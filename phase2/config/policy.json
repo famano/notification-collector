@@ -1,0 +1,36 @@
+{
+  "_comment": "トリアージ方針。コードを変えずにここだけ直せるようにしてある。",
+
+  "llm": {
+    "_comment": "全通知を通すので、既定は費用対効果の良い sonnet。判断精度を上げたいときは claude-opus-5 に変更する。",
+    "model": "claude-sonnet-5",
+    "maxOutputTokens": 1024,
+    "maxBodyChars": 4000
+  },
+
+  "ignore": {
+    "_comment": "ここに一致した通知は LLM に渡さず捨てる。前段でコストを落とすためのルール。",
+    "appIdPatterns": [
+      "Windows.SystemToast.*",
+      "Microsoft.SkyDrive.Desktop",
+      "Microsoft.WindowsStore*",
+      "MicrosoftWindows.Client.CBS*",
+      "Microsoft.Windows.Photos*"
+    ],
+    "titlePatterns": [
+      "*をタスク バーにピン留めしますか*"
+    ]
+  },
+
+  "watch": {
+    "_comment": "重点的に見るアプリ。空配列なら ignore 以外すべてを対象にする。",
+    "appIdPatterns": []
+  },
+
+  "context": {
+    "_comment": "判断の背景情報。自分の役割や優先事項を書くほど精度が上がる。",
+    "userName": "",
+    "role": "",
+    "priorities": []
+  }
+}

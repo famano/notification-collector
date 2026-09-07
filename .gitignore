@@ -1,6 +1,7 @@
 # 取得した通知の実データ。実際のメッセージ本文・送信者名・社内パスが入るため
 # 絶対にコミットしない。
 phase1/data/
+phase2/data/
 **/notifications.jsonl
 **/state.json
 
