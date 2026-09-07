@@ -39,7 +39,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-. "$PSScriptRoot\lib\WinSqlite.ps1"
+. "$PSScriptRoot\..\lib\WinSqlite.ps1"
 
 $DataDir   = Join-Path $PSScriptRoot 'data'
 $StatePath = Join-Path $DataDir 'state.json'
@@ -118,6 +118,12 @@ function ConvertFrom-FileTime {
     try { return [DateTime]::FromFileTimeUtc($Value).ToLocalTime() } catch { return $null }
 }
 
+function ConvertTo-Iso8601 {
+    param($Value)
+    if ($Value -is [DateTime]) { return $Value.ToString('o') }
+    return $null
+}
+
 # ---------------------------------------------------------------- 取得
 
 function Get-WpnNotifications {
@@ -156,8 +162,10 @@ SELECT n.[Order] AS Ord, n.Id, n.HandlerId, n.Type, n.Payload, n.PayloadType,
             type        = $r['Type']
             app         = $app
             aumid       = $r['Aumid']
-            arrivedAt   = (ConvertFrom-FileTime ([long] $r['ArrivalTime']))
-            expiresAt   = (ConvertFrom-FileTime ([long] $r['ExpiryTime']))
+            # ISO8601 文字列で持つ。DateTime のままだと ConvertTo-Json が
+            # /Date(...)/ 形式にしてしまい、後段から扱いにくい。
+            arrivedAt   = (ConvertTo-Iso8601 (ConvertFrom-FileTime ([long] $r['ArrivalTime'])))
+            expiresAt   = (ConvertTo-Iso8601 (ConvertFrom-FileTime ([long] $r['ExpiryTime'])))
             header      = $toast.header
             title       = $toast.title
             body        = $toast.body
@@ -175,7 +183,7 @@ SELECT n.[Order] AS Ord, n.Id, n.HandlerId, n.Type, n.Payload, n.PayloadType,
 
 function Show-Notification {
     param($n)
-    $ts  = if ($n.arrivedAt) { $n.arrivedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { '(no time)' }
+    $ts  = if ($n.arrivedAt) { ([DateTime] $n.arrivedAt).ToString('yyyy-MM-dd HH:mm:ss') } else { '(no time)' }
     $hdr = if ($n.header) { " [$($n.header)]" } else { '' }
     Write-Host ''
     Write-Host ("[{0}] {1}{2}" -f $ts, $n.app, $hdr) -ForegroundColor Cyan
@@ -194,28 +202,31 @@ function Save-Notification {
 
 # ---------------------------------------------------------------- main
 
+# 件数は戻り値ではなくスクリプトスコープの変数で持つ。
+# 戻り値にすると -Json のときに JSON 行まで呼び出し元の変数へ吸われて標準出力に出なくなる。
+$script:NewCount = 0
+
 function Invoke-Poll {
     param($state)
 
     $since = if ($Backfill) { 0 } else { [long] $state.LastOrder }
     $items = @(Get-WpnNotifications -SinceOrder $since -AllTypes:$IncludeAllTypes)
 
+    # -Backfill は「いま DB にあるものを全部出す」ためのスイッチなので既読判定も無視する
     $seen = @{}
-    foreach ($k in $state.SeenKeys) { $seen[$k] = $true }
+    if (-not $Backfill) { foreach ($k in $state.SeenKeys) { $seen[$k] = $true } }
 
-    $new = 0
     foreach ($n in $items) {
         if ($seen.ContainsKey($n.key)) { continue }
         $seen[$n.key] = $true
-        $state.SeenKeys += $n.key
+        if ($state.SeenKeys -notcontains $n.key) { $state.SeenKeys += $n.key }
 
         if ($Json) { $n | ConvertTo-Json -Depth 6 -Compress } else { Show-Notification $n }
         Save-Notification $n
-        $new++
+        $script:NewCount++
 
         if ($n.order -gt $state.LastOrder) { $state.LastOrder = $n.order }
     }
-    return $new
 }
 
 $state = Read-State
@@ -225,7 +236,7 @@ if ($Watch) {
     Write-Host "output -> $OutPath" -ForegroundColor DarkGray
     try {
         while ($true) {
-            try { [void](Invoke-Poll $state); Write-State $state }
+            try { Invoke-Poll $state; Write-State $state }
             catch { Write-Host ("poll error: {0}" -f $_.Exception.Message) -ForegroundColor Red }
             Start-Sleep -Seconds $IntervalSeconds
         }
@@ -233,10 +244,10 @@ if ($Watch) {
     finally { Write-State $state }
 }
 else {
-    $n = Invoke-Poll $state
+    Invoke-Poll $state
     Write-State $state
     if (-not $Json) {
         Write-Host ''
-        Write-Host ("{0} new notification(s). total log -> {1}" -f $n, $OutPath) -ForegroundColor Yellow
+        Write-Host ("{0} new notification(s). total log -> {1}" -f $script:NewCount, $OutPath) -ForegroundColor Yellow
     }
 }

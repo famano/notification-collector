@@ -1,7 +1,7 @@
 ﻿# dump-schema.ps1 — 実機の wpndatabase.db のスキーマと生データを確認する調査用スクリプト。
 # Phase 1 の最初の目的「何が取れるのか見極める」ためのもの。
 $ErrorActionPreference = 'Stop'
-. "$PSScriptRoot\lib\WinSqlite.ps1"
+. "$PSScriptRoot\..\lib\WinSqlite.ps1"
 
 $db = New-WpnSnapshot
 try {
