@@ -1,0 +1,17 @@
+# 取得した通知の実データ。実際のメッセージ本文・送信者名・社内パスが入るため
+# 絶対にコミットしない。
+phase1/data/
+**/notifications.jsonl
+**/state.json
+
+# 資格情報
+*.env
+.env*
+secrets.json
+token*.json
+
+# Windows / エディタ
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
