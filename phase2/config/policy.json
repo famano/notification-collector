@@ -2,9 +2,10 @@
   "_comment": "トリアージ方針。コードを変えずにここだけ直せるようにしてある。",
 
   "llm": {
-    "_comment": "全通知を通すので、既定は費用対効果の良い sonnet。判断精度を上げたいときは claude-opus-5 に変更する。",
-    "model": "claude-sonnet-5",
-    "maxOutputTokens": 1024,
+    "_comment": "分類タスクなのでモデルは落とさず effort で費用を抑える。effort は low/medium/high/xhigh/max。Opus 5 は thinking が既定オンで max_tokens を消費するため余裕を持たせる。",
+    "model": "claude-opus-5",
+    "effort": "low",
+    "maxOutputTokens": 4096,
     "maxBodyChars": 4000
   },
 

@@ -2,8 +2,10 @@
 # Claude API を呼んで通知の対応要否を構造化出力で判定する。
 # API キーは環境変数 ANTHROPIC_API_KEY から読む (ファイルには置かない)。
 
-$script:ApiUrl     = 'https://api.anthropic.com/v1/messages'
-$script:ApiVersion = '2023-06-01'
+$script:ApiUrl       = 'https://api.anthropic.com/v1/messages'
+$script:ApiVersion   = '2023-06-01'
+# fallbacks: "default" のスカラー形式に対応するベータ。配列形式とはヘッダが異なる。
+$script:FallbackBeta = 'server-side-fallback-2026-07-01'
 
 # 判定結果のスキーマ。tool_choice で必ずこの形で返させる。
 $script:TriageTool = @{
@@ -100,6 +102,8 @@ link: $($Evt['link'])
 この通知を分類してください。
 "@
 
+    $effort = if ($Policy.llm.effort) { $Policy.llm.effort } else { 'low' }
+
     $payload = @{
         model       = $Policy.llm.model
         max_tokens  = [int] $Policy.llm.maxOutputTokens
@@ -107,6 +111,10 @@ link: $($Evt['link'])
         tools       = @($script:TriageTool)
         tool_choice = @{ type = 'tool'; name = 'record_triage' }
         messages    = @(@{ role = 'user'; content = $userText })
+        # 分類タスクなのでモデルは落とさず effort で費用を抑える
+        output_config = @{ effort = $effort }
+        # 安全分類器が判定を拒否した場合、同一リクエスト内で代替モデルに回す
+        fallbacks   = 'default'
     }
 
     $json  = $payload | ConvertTo-Json -Depth 12 -Compress
@@ -114,6 +122,7 @@ link: $($Evt['link'])
     $headers = @{
         'x-api-key'         = $apiKey
         'anthropic-version' = $script:ApiVersion
+        'anthropic-beta'    = $script:FallbackBeta
     }
 
     $attempt = 0
@@ -125,6 +134,12 @@ link: $($Evt['link'])
             # PowerShell 5.1 の自動デコードは日本語を壊すことがあるので明示的に UTF-8 で読む
             $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
             $obj  = $text | ConvertFrom-Json
+
+            # 安全分類器による拒否は HTTP 200 で返る。content を読む前に必ず確認する。
+            if ($obj.stop_reason -eq 'refusal') {
+                $cat = if ($obj.stop_details) { $obj.stop_details.category } else { '(不明)' }
+                throw "モデルが判定を拒否しました (category=$cat)"
+            }
 
             $toolUse = $obj.content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -First 1
             if (-not $toolUse) { throw "tool_use が返りませんでした: $text" }
