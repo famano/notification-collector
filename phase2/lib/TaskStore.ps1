@@ -193,3 +193,88 @@ function Add-TaskComment {
         [object[]] @($TaskId, $Author, $Body, (Get-Now)))
     return $Conn.LastRowId
 }
+
+# ---------------------------------------------------------------- UI (Phase 3) 用
+
+# ボードが変化したかを安く判定するための版番号。UI はこれをポーリングし、
+# 変わったときだけボード全体を取り直す。
+function Get-BoardRevision {
+    param([Parameter(Mandatory)] $Conn)
+    $r = @($Conn.Query("SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS m FROM tasks"))[0]
+    $c = @($Conn.Query("SELECT COUNT(*) AS n FROM task_comments"))[0]
+    return ("{0}-{1}-{2}" -f $r['n'], $r['m'], $c['n'])
+}
+
+function Get-TaskDetail {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $rows = @($Conn.Query('SELECT * FROM tasks WHERE id = ?', [object[]] @($TaskId)))
+    if ($rows.Count -eq 0) { return $null }
+    $task = $rows[0]
+
+    $comments = @($Conn.Query(
+        'SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC', [object[]] @($TaskId)))
+
+    $ev = $null
+    if ($task['event_id']) {
+        $er = @($Conn.Query('SELECT * FROM events WHERE id = ?', [object[]] @($task['event_id'])))
+        if ($er.Count -gt 0) { $ev = $er[0] }
+    }
+    return [pscustomobject]@{ task = $task; comments = $comments; event = $ev }
+}
+
+# 更新できるカラムはホワイトリストで固定する。キーを SQL に埋めるため、
+# 呼び出し側の入力をそのまま通してはいけない。
+$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'agent_output')
+
+function Update-TaskFields {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [hashtable] $Fields,
+        [int] $ExpectedVersion = -1
+    )
+    $sets = @()
+    $vals = @()
+    foreach ($k in $Fields.Keys) {
+        if ($script:UpdatableFields -notcontains $k) { continue }
+        $sets += "$k = ?"
+        $vals += $Fields[$k]
+    }
+    if ($sets.Count -eq 0) { return $false }
+
+    $sets += 'version = version + 1'
+    $sets += 'updated_at = ?'
+    $vals += (Get-Now)
+    $vals += $TaskId
+
+    $sql = 'UPDATE tasks SET ' + ($sets -join ', ') + ' WHERE id = ?'
+    if ($ExpectedVersion -ge 0) {
+        $sql += ' AND version = ?'
+        $vals += $ExpectedVersion
+    }
+    return ($Conn.NonQuery($sql, [object[]] $vals) -gt 0)
+}
+
+# ユーザーがカードを doing から動かした / 中止を押したときに立てる。
+# 実際の停止は Phase 4 のワーカーがこのフラグを見て行う。
+function Set-TaskCancel {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [bool] $Requested = $true)
+    return ($Conn.NonQuery(
+        'UPDATE tasks SET cancel_requested = ?, version = version + 1, updated_at = ? WHERE id = ?',
+        [object[]] @([int] $Requested, (Get-Now), $TaskId)) -gt 0)
+}
+
+# ユーザーが手で起票したカード (通知に紐づかない)
+function New-UserTask {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [string] $Title,
+        [string] $Summary, [string] $Column = 'todo', [string] $Urgency = 'normal'
+    )
+    $now = Get-Now
+    [void] $Conn.NonQuery(
+        'INSERT INTO tasks (event_id, board_column, title, summary, needs_action, urgency, category, created_at, updated_at)
+         VALUES (NULL,?,?,?,1,?,?,?,?)',
+        [object[]] @($Column, $Title, $Summary, $Urgency, 'user', $now, $now))
+    return $Conn.LastRowId
+}

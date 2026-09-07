@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>通知カンバン</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #dfe3e8; --text: #1c1f23;
+    --muted: #6b7280; --accent: #2563eb; --danger: #b91c1c;
+    --high: #dc2626; --normal: #2563eb; --low: #6b7280;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --panel: #1d2126; --border: #2f353c; --text: #e6e8ea;
+      --muted: #9aa3ad; --accent: #60a5fa; --danger: #f87171;
+      --high: #f87171; --normal: #60a5fa; --low: #9aa3ad;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.6 "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  button {
+    font: inherit; padding: 5px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  #board { display: flex; gap: 12px; padding: 16px; align-items: flex-start; overflow-x: auto; }
+  .col {
+    flex: 0 0 260px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 90px);
+  }
+  .col > h2 {
+    font-size: 12px; margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-weight: 600; letter-spacing: .04em;
+  }
+  .col .list { padding: 8px; overflow-y: auto; min-height: 60px; flex: 1; }
+  .col.over { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .card {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; margin-bottom: 8px; cursor: grab;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .t { font-weight: 600; margin-bottom: 3px; word-break: break-word; }
+  .card .s { color: var(--muted); font-size: 12px; word-break: break-word;
+             display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .card .meta { margin-top: 6px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .tag { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .tag.high { color: var(--high); border-color: var(--high); }
+  .tag.normal { color: var(--normal); border-color: var(--normal); }
+  .tag.low { color: var(--low); }
+  .tag.cancel { color: var(--danger); border-color: var(--danger); }
+  #drawer {
+    position: fixed; top: 0; right: 0; width: min(460px, 92vw); height: 100%;
+    background: var(--panel); border-left: 1px solid var(--border);
+    padding: 16px; overflow-y: auto; z-index: 10;
+    box-shadow: -8px 0 24px rgba(0,0,0,.12);
+  }
+  #drawer h3 { margin: 0 0 4px; font-size: 15px; word-break: break-word; }
+  #drawer .sec { margin-top: 16px; }
+  #drawer .sec > label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; letter-spacing: .04em; }
+  #drawer pre {
+    white-space: pre-wrap; word-break: break-word; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 0; font: inherit;
+  }
+  textarea {
+    width: 100%; min-height: 90px; font: inherit; padding: 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); resize: vertical;
+  }
+  input[type=text] {
+    width: 100%; font: inherit; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+  .cmt { border-left: 2px solid var(--border); padding: 2px 0 2px 8px; margin-bottom: 8px; }
+  .cmt .who { font-size: 11px; color: var(--muted); }
+  #toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--danger); color: #fff; padding: 8px 16px; border-radius: 6px; z-index: 20;
+  }
+  .row { display: flex; gap: 8px; align-items: center; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>通知カンバン</h1>
+  <span class="spacer"></span>
+  <span id="status" class="tag">—</span>
+  <button id="newBtn">+ カード</button>
+  <button id="reloadBtn">再読込</button>
+</header>
+
+<div id="board"></div>
+
+<div id="drawer" hidden></div>
+<div id="toast" hidden></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var board = document.getElementById('board');
+  var drawer = document.getElementById('drawer');
+  var statusEl = document.getElementById('status');
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+
+  var lastRev = null;
+  var dragging = false;   // ドラッグ中はポーリング再描画を止める
+  var openTaskId = null;
+  var dirty = false;      // 編集途中の内容を再描画で消さないためのフラグ
+
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 3000);
+  }
+
+  function api(path, method, body) {
+    return fetch(path, {
+      method: method || 'GET',
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        return { status: r.status, body: j };
+      });
+    });
+  }
+
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    // 通知本文は第三者が書いた文字列なので、必ず textContent で入れる。
+    // innerHTML を使うと Slack のメッセージから DOM を注入できてしまう。
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function renderBoard(data) {
+    board.innerHTML = '';
+    data.columns.forEach(function (col) {
+      var c = el('div', 'col');
+      c.dataset.key = col.key;
+      c.appendChild(el('h2', null, col.label + ' (' + col.tasks.length + ')'));
+      var list = el('div', 'list');
+      col.tasks.forEach(function (t) { list.appendChild(renderCard(t, col.key)); });
+      c.appendChild(list);
+
+      c.addEventListener('dragover', function (ev) { ev.preventDefault(); c.classList.add('over'); });
+      c.addEventListener('dragleave', function () { c.classList.remove('over'); });
+      c.addEventListener('drop', function (ev) {
+        ev.preventDefault();
+        c.classList.remove('over');
+        var raw = ev.dataTransfer.getData('text/plain');
+        if (!raw) return;
+        var d = JSON.parse(raw);
+        if (d.from === col.key) return;
+        move(d.id, d.version, d.from, col.key);
+      });
+      board.appendChild(c);
+    });
+  }
+
+  function renderCard(t, colKey) {
+    var card = el('div', 'card');
+    card.draggable = true;
+    card.appendChild(el('div', 't', t.title));
+    if (t.summary) card.appendChild(el('div', 's', t.summary));
+
+    var meta = el('div', 'meta');
+    if (t.urgency) meta.appendChild(el('span', 'tag ' + t.urgency, t.urgency));
+    if (t.category) meta.appendChild(el('span', 'tag', t.category));
+    if (t.cancel_requested) meta.appendChild(el('span', 'tag cancel', '中止要求'));
+    meta.appendChild(el('span', 'tag', '#' + t.id));
+    card.appendChild(meta);
+
+    card.addEventListener('dragstart', function (ev) {
+      dragging = true;
+      ev.dataTransfer.setData('text/plain', JSON.stringify({
+        id: t.id, version: t.version, from: colKey
+      }));
+    });
+    card.addEventListener('dragend', function () { dragging = false; });
+    card.addEventListener('click', function () { openDetail(t.id); });
+    return card;
+  }
+
+  function move(id, version, from, to) {
+    api('/api/tasks/' + id + '/move', 'POST', { column: to, version: version, from: from })
+      .then(function (r) {
+        if (r.status === 409) {
+          toast('他で更新されています。最新を読み直しました。');
+        }
+        refresh(true);
+      });
+  }
+
+  // ドロワー内に入力中のものがあるか。ポーリングでの再描画がユーザーの
+  // 打鍵を消してしまうため、フォーカスがドロワー内にある間は作り直さない。
+  function drawerBusy() {
+    var a = document.activeElement;
+    return dirty || (a && drawer.contains(a) && !drawer.hidden);
+  }
+
+  function refresh(force) {
+    return api('/api/board').then(function (r) {
+      lastRev = r.body.rev;
+      renderBoard(r.body);
+      statusEl.textContent = new Date().toLocaleTimeString();
+      if (openTaskId && (force || !drawerBusy())) openDetail(openTaskId, true);
+    });
+  }
+
+  // 変更検出は安い /api/rev で行い、変わったときだけボードを取り直す。
+  function poll() {
+    if (dragging) return;
+    api('/api/rev').then(function (r) {
+      if (r.body.rev && r.body.rev !== lastRev) refresh(false);
+    }).catch(function () {
+      statusEl.textContent = '接続なし';
+    });
+  }
+
+  function openDetail(id, keepScroll) {
+    api('/api/tasks/' + id).then(function (r) {
+      if (r.status !== 200) return;
+      openTaskId = id;
+      var t = r.body.task, ev = r.body.event, comments = r.body.comments || [];
+      var scroll = keepScroll ? drawer.scrollTop : 0;
+
+      drawer.innerHTML = '';
+      var head = el('div', 'row');
+      head.appendChild(el('h3', null, t.title));
+      var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
+      var close = el('button', null, '閉じる');
+      close.onclick = function () { openTaskId = null; dirty = false; drawer.hidden = true; };
+      head.appendChild(close);
+      drawer.appendChild(head);
+
+      var sub = el('div', 'meta');
+      sub.appendChild(el('span', 'tag', '#' + t.id));
+      sub.appendChild(el('span', 'tag', t.board_column));
+      if (t.urgency) sub.appendChild(el('span', 'tag ' + t.urgency, t.urgency));
+      sub.appendChild(el('span', 'tag', 'v' + t.version));
+      if (t.cancel_requested) sub.appendChild(el('span', 'tag cancel', '中止要求'));
+      drawer.appendChild(sub);
+
+      if (t.summary) drawer.appendChild(section('要約', pre(t.summary)));
+      if (t.reason) drawer.appendChild(section('判定理由', pre(t.reason)));
+
+      if (t.proposed_actions) {
+        var acts = [];
+        try { acts = JSON.parse(t.proposed_actions) || []; } catch (e) { acts = []; }
+        if (acts.length) {
+          var ul = el('div');
+          acts.forEach(function (a) { ul.appendChild(pre(a.type + ': ' + a.detail)); });
+          drawer.appendChild(section('提案されたアクション', ul));
+        }
+      }
+
+      if (ev) {
+        var box = el('div');
+        box.appendChild(pre((ev.app_id || '') + '\n' + (ev.occurred_at || '')));
+        if (ev.body) box.appendChild(pre(ev.body));
+        if (ev.link) {
+          var a = el('div', null, ev.link);   // リンクは踏ませない。文字列として出すだけ。
+          a.style.color = 'var(--muted)';
+          a.style.wordBreak = 'break-all';
+          box.appendChild(a);
+        }
+        drawer.appendChild(section('元の通知', box));
+      }
+
+      if (t.agent_output) drawer.appendChild(section('エージェントの生成物', pre(t.agent_output)));
+
+      // ユーザーの編集はエージェントの生成物とは別カラムに保存される
+      var ta = document.createElement('textarea');
+      ta.value = t.user_edited || '';
+      ta.oninput = function () { dirty = true; };
+      var saveBtn = el('button', 'primary', '保存');
+      saveBtn.onclick = function () {
+        api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
+          .then(function (r2) {
+            if (r2.status === 409) { toast('競合しました。最新を読み直します。'); }
+            dirty = false; refresh(true);
+          });
+      };
+      var editWrap = el('div');
+      editWrap.appendChild(ta);
+      var editRow = el('div', 'row'); editRow.style.marginTop = '6px';
+      editRow.appendChild(saveBtn);
+      var cancelBtn = el('button', 'danger', '作業を中止');
+      cancelBtn.onclick = function () {
+        api('/api/tasks/' + t.id + '/cancel', 'POST', {}).then(function () { refresh(true); });
+      };
+      editRow.appendChild(cancelBtn);
+      editWrap.appendChild(editRow);
+      drawer.appendChild(section('自分の下書き / 修正', editWrap));
+
+      var cbox = el('div');
+      comments.forEach(function (c) {
+        var d = el('div', 'cmt');
+        d.appendChild(el('div', 'who', c.author + ' · ' + (c.created_at || '').replace('T', ' ').slice(0, 19)));
+        d.appendChild(el('div', null, c.body));
+        cbox.appendChild(d);
+      });
+      var ci = document.createElement('input');
+      ci.type = 'text';
+      ci.placeholder = 'エージェントへの指示を書く（Enter で送信）';
+      ci.onkeydown = function (e) {
+        if (e.key !== 'Enter' || !ci.value.trim()) return;
+        api('/api/tasks/' + t.id + '/comment', 'POST', { body: ci.value })
+          .then(function () {
+            ci.value = '';
+            // 送信後は作り直されるので、新しい入力欄にフォーカスを戻す
+            return refresh(true);
+          })
+          .then(function () {
+            var next = drawer.querySelector('input[type=text]');
+            if (next) next.focus();
+          });
+      };
+      cbox.appendChild(ci);
+      drawer.appendChild(section('指示・コメント', cbox));
+
+      drawer.hidden = false;
+      drawer.scrollTop = scroll;
+    });
+  }
+
+  function section(label, node) {
+    var s = el('div', 'sec');
+    s.appendChild(el('label', null, label));
+    s.appendChild(node);
+    return s;
+  }
+  function pre(text) { return el('pre', null, text); }
+
+  document.getElementById('reloadBtn').onclick = function () { refresh(true); };
+  document.getElementById('newBtn').onclick = function () {
+    var title = prompt('カードのタイトル');
+    if (!title) return;
+    api('/api/tasks', 'POST', { title: title }).then(function () { refresh(true); });
+  };
+
+  refresh(true);
+  setInterval(poll, 1500);
+})();
+</script>
+</body>
+</html>
