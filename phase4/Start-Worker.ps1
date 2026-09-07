@@ -25,6 +25,9 @@ param(
     [string] $PolicyPath,
     [int]    $IdleSeconds = 5,
     [int]    $LeaseMinutes = 10,
+    # 同じカードで連続して失敗した回数がこれに達したら棚上げする
+    [int]    $MaxFailures = 3,
+    [int]    $ErrorBackoffSeconds = 30,
     [switch] $Once
 )
 
@@ -119,9 +122,20 @@ try {
                 # リースを外して次のワーカーが拾えるようにする
                 [void] $conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($tid))
                 [void] (Set-TaskColumn -Conn $conn -TaskId $tid -Column 'todo')
+
+                # 残高不足やキー不正のような恒久的な失敗では、戻して拾い直すのを
+                # 延々と繰り返してしまう。一定回数で棚上げし、原因を書いて手を止める。
+                $fails = Get-ConsecutiveFailures -Conn $conn -TaskId $tid
+                if ($fails -ge $MaxFailures) {
+                    [void] (Set-TaskCancel -Conn $conn -TaskId $tid -Requested $true)
+                    Add-TaskActivity -Conn $conn -TaskId $tid -Kind 'error' -Message (
+                        "{0}回続けて失敗したため、このカードは一旦見送ります。原因を直したあと『中止を解除して要対応へ』で再開できます。" -f $fails)
+                    Write-Host ("  [#{0}] {1}回連続失敗のため棚上げしました" -f $tid, $fails) -ForegroundColor Yellow
+                }
             }
             Set-WorkerState -Conn $conn -State 'error' -CurrentTaskId $null -Message $msg
-            if (-not $Once) { Start-Sleep -Seconds $IdleSeconds }
+            # 失敗直後は間を置く。API 側の問題を叩き続けないため。
+            if (-not $Once) { Start-Sleep -Seconds $ErrorBackoffSeconds }
         }
         if ($Once) { break }
     }

@@ -152,7 +152,12 @@ function Invoke-Route {
     $method = $req.HttpMethod
 
     if ($path -eq '/api/rev' -and $method -eq 'GET') {
-        Write-JsonResponse $Context ([pscustomobject]@{ rev = (Get-BoardRevision -Conn $Conn) })
+        # ワーカーの死活もここで返す。版はハートビートで変わらないので、
+        # これが無いと「止まったこと」が画面に伝わらない。
+        Write-JsonResponse $Context ([pscustomobject]@{
+            rev    = (Get-BoardRevision -Conn $Conn)
+            worker = (Get-WorkerPayload $Conn)
+        })
         return
     }
 
@@ -206,6 +211,12 @@ function Invoke-Route {
                 # 実行中から動かしたら中止要求とみなす。ユーザーの割り込みはここで拾う。
                 if ($ok -and $b.from -eq 'doing' -and $b.column -ne 'doing') {
                     [void] (Set-TaskCancel -Conn $Conn -TaskId $taskId -Requested $true)
+                    Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '実行中から移動したため中止を要求しました'
+                }
+                # 要対応に戻すのは「もう一度やって」の意思表示。中止フラグが
+                # 残っているとワーカーが永久に無視するので、ここで解除する。
+                if ($ok -and $b.column -eq 'todo') {
+                    [void] (Set-TaskCancel -Conn $Conn -TaskId $taskId -Requested $false)
                 }
                 if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
                 Write-JsonResponse $Context @{ ok = $true }
@@ -218,9 +229,11 @@ function Invoke-Route {
                 return
             }
             'cancel' {
-                [void] (Set-TaskCancel -Conn $Conn -TaskId $taskId -Requested $true)
-                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '利用者が中止を要求しました'
-                Write-JsonResponse $Context @{ ok = $true }
+                $on = if ($b -and $null -ne $b.cancel) { [bool] $b.cancel } else { $true }
+                [void] (Set-TaskCancel -Conn $Conn -TaskId $taskId -Requested $on)
+                $m = if ($on) { '利用者が中止を要求しました' } else { '利用者が中止要求を取り消しました' }
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message $m
+                Write-JsonResponse $Context @{ ok = $true; cancel = $on }
                 return
             }
             'archive' {

@@ -160,9 +160,26 @@ function Invoke-ClaudeApi {
         }
         catch {
             $status = $null
-            if ($_.Exception.Response) { $status = [int] $_.Exception.Response.StatusCode }
+            $apiMessage = $null
+            if ($_.Exception.Response) {
+                $status = [int] $_.Exception.Response.StatusCode
+                # 本文にこそ原因が書いてある (残高不足・キー不正・パラメータ誤りなど)。
+                # "400 Bad Request" だけでは何も分からないので必ず読む。
+                try {
+                    $sr = New-Object IO.StreamReader($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+                    $raw = $sr.ReadToEnd()
+                    $sr.Dispose()
+                    $err = $raw | ConvertFrom-Json
+                    if ($err.error -and $err.error.message) { $apiMessage = $err.error.message }
+                    elseif ($raw) { $apiMessage = $raw }
+                }
+                catch { }
+            }
             $retryable = ($status -eq 429 -or ($status -ge 500 -and $status -lt 600) -or $null -eq $status)
-            if (-not $retryable -or $attempt -gt $MaxRetries) { throw }
+            if (-not $retryable -or $attempt -gt $MaxRetries) {
+                if ($apiMessage) { throw ("Claude API エラー ({0}): {1}" -f $status, $apiMessage) }
+                throw
+            }
             Start-Sleep -Seconds ([Math]::Pow(2, $attempt))
         }
     }

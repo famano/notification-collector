@@ -235,10 +235,13 @@ function Get-BoardRevision {
     param([Parameter(Mandatory)] $Conn)
     $r = @($Conn.Query("SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS m FROM tasks"))[0]
     $c = @($Conn.Query("SELECT COUNT(*) AS n FROM task_comments"))[0]
-    # ワーカーの動きでも UI が更新されるよう、作業ログと死活も版に含める
+    # ワーカーの動きでも UI が更新されるよう、作業ログと死活も版に含める。
+    # ただし死活の updated_at は含めない。待機中のハートビートが 5 秒ごとに
+    # 版を変え、ボード全体の再取得が延々と走ってしまうため。
     $a = @($Conn.Query("SELECT COUNT(*) AS n FROM task_activity"))[0]
-    $w = @($Conn.Query("SELECT COALESCE(MAX(updated_at),'') AS m FROM worker_state"))[0]
-    return ("{0}-{1}-{2}-{3}-{4}" -f $r['n'], $r['m'], $c['n'], $a['n'], $w['m'])
+    $w = @($Conn.Query("SELECT COALESCE(state,'') || '/' || COALESCE(current_task_id,'') AS s FROM worker_state WHERE id=1"))
+    $ws = if ($w.Count -gt 0) { $w[0]['s'] } else { '' }
+    return ("{0}-{1}-{2}-{3}-{4}" -f $r['n'], $r['m'], $c['n'], $a['n'], $ws)
 }
 
 # ---------------------------------------------------------------- 作業ログ / ワーカー死活
@@ -260,6 +263,20 @@ function Get-TaskActivity {
     return $Conn.Query(
         'SELECT * FROM (SELECT * FROM task_activity WHERE task_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC',
         [object[]] @($TaskId, $Limit))
+}
+
+# 直近で連続して失敗した回数。成功 (done) が出たらそこで打ち切る。
+# 恒久的な失敗 (残高不足・キー不正など) でカードを拾い続けないための判断材料。
+function Get-ConsecutiveFailures {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $rows = @($Conn.Query(
+        'SELECT kind FROM task_activity WHERE task_id = ? ORDER BY id DESC LIMIT 30', [object[]] @($TaskId)))
+    $n = 0
+    foreach ($r in $rows) {
+        if ($r['kind'] -eq 'error') { $n++ }
+        elseif ($r['kind'] -eq 'done') { break }
+    }
+    return $n
 }
 
 function Set-WorkerState {
