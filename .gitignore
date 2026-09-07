@@ -2,6 +2,9 @@
 # 絶対にコミットしない。
 phase1/data/
 phase2/data/
+
+# ワーカーが作った成果物 (業務内容そのものが入る)
+phase4/output/
 **/notifications.jsonl
 **/state.json
 

@@ -28,12 +28,21 @@ param(
     # 同じカードで連続して失敗した回数がこれに達したら棚上げする
     [int]    $MaxFailures = 3,
     [int]    $ErrorBackoffSeconds = 30,
+    # 1カードあたりのツール実行ターン上限
+    [int]    $MaxTurns = 12,
+    # 成果物の出力先。カードごとにサブフォルダを切る。
+    [string] $OutputRoot,
     [switch] $Once
 )
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\..\phase2\lib\ClaudeClient.ps1"
+. "$PSScriptRoot\lib\WorkTools.ps1"
+
+if (-not $OutputRoot) { $OutputRoot = Join-Path $PSScriptRoot 'output' }
+if (-not (Test-Path $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
+$OutputRoot = (Resolve-Path $OutputRoot).Path
 
 if (-not $PolicyPath) { $PolicyPath = Join-Path $PSScriptRoot '..\phase2\config\policy.json' }
 $policy = Get-Content -LiteralPath $PolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -79,23 +88,60 @@ function Invoke-WorkItem {
 
     if (Stop-IfCancelled $id) { return }
 
-    Write-Step $id 'llm' 'Claude に下書きを生成させています…'
-    $res = Invoke-ClaudeDraft -Task $Task -Evt $evt -Policy $policy -Instructions $instructions
+    $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
+    Write-Step $id 'llm' '対応内容を検討しています…'
 
+    # ツール実行のたびに作業ログへ残し、その直前に中止要求を見る。
+    # これで「いま何をしているか」が画面に出て、途中で割り込める。
+    $onProgress = {
+        param($toolName, $toolInput)
+        if (Test-TaskCancelled -Conn $conn -TaskId $id) { return $false }
+        $what = switch ($toolName) {
+            'write_file'         { "ファイルを作成しています: $($toolInput.path)" }
+            'create_email_draft' { "メールの下書きを作成しています: $($toolInput.subject)" }
+            'read_file'          { "ファイルを読んでいます: $($toolInput.path)" }
+            'list_files'         { 'これまでの成果物を確認しています' }
+            default              { "実行中: $toolName" }
+        }
+        Write-Step $id 'tool' $what 'DarkCyan'
+        return $true
+    }.GetNewClosure()
+
+    $onTool = {
+        param($toolName, $toolInput)
+        $r = Invoke-WorkTool -Name $toolName -ToolInput $toolInput -Workspace $workspace
+        if ($r.artifact) {
+            Add-TaskArtifact -Conn $conn -TaskId $id -Path $r.artifact
+            Write-Step $id 'file' ("成果物: " + (Split-Path -Leaf $r.artifact)) 'Green'
+        }
+        if ($r.isError) { Write-Step $id 'step' ("ツールが失敗: " + $r.text) 'Yellow' }
+        return $r
+    }.GetNewClosure()
+
+    $res = Invoke-ClaudeWork -Task $Task -Evt $evt -Policy $policy -Instructions $instructions `
+        -Tools (Get-WorkTools) -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns
+
+    if ($res.aborted) { Stop-IfCancelled $id | Out-Null; return }
     # 生成中にユーザーが中止した場合、結果は捨てる
     if (Stop-IfCancelled $id) { return }
 
-    $d = $res.result
-    [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ agent_output = $d.draft })
-    Set-CommentsConsumed -Conn $conn -TaskId $id
-
-    if ($d.notes) {
-        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Body ("確認してください: " + $d.notes))
+    $files = @(Get-TaskArtifacts -Conn $conn -TaskId $id)
+    $summary = $res.text
+    if ($files.Count -gt 0) {
+        $summary += "`n`n作成したファイル:`n" + (($files | ForEach-Object { '- ' + $_['name'] }) -join "`n")
     }
+    [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ agent_output = $summary })
+    Set-CommentsConsumed -Conn $conn -TaskId $id
 
     [void] $conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($id))
     [void] (Set-TaskColumn -Conn $conn -TaskId $id -Column 'review')
-    Write-Step $id 'done' '下書きを作成しました。レビュー待ちに移動します。' 'Green'
+
+    $msg = if ($files.Count -gt 0) {
+        "{0} 件のファイルを作成しました。レビュー待ちに移動します。" -f $files.Count
+    } else {
+        'ファイルの作成はありませんでした。レビュー待ちに移動します。'
+    }
+    Write-Step $id 'done' $msg 'Green'
 }
 
 Write-Host 'ワーカーを開始しました。停止するには Ctrl+C' -ForegroundColor Green

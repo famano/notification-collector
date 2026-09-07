@@ -6,124 +6,175 @@
 <title>通知カンバン</title>
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --border: #dfe3e8; --text: #1c1f23;
-    --muted: #6b7280; --accent: #2563eb; --danger: #b91c1c; --ok: #15803d;
-    --high: #dc2626; --normal: #2563eb; --low: #6b7280; --soft: #eef1f5;
+    --bg: #f4f6f8; --panel: #ffffff; --border: #e2e6ea; --line: #eef1f4;
+    --text: #14181d; --muted: #6b7480; --faint: #9aa3ad;
+    --accent: #2563eb; --danger: #c0261c; --ok: #15803d; --soft: #f0f3f7;
+    --high: #d92d20; --normal: #2563eb; --low: #8a94a0;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14171a; --panel: #1d2126; --border: #2f353c; --text: #e6e8ea;
-      --muted: #9aa3ad; --accent: #60a5fa; --danger: #f87171; --ok: #4ade80;
-      --high: #f87171; --normal: #60a5fa; --low: #9aa3ad; --soft: #23282e;
+      --bg: #121519; --panel: #1b1f25; --border: #2c333b; --line: #242a31;
+      --text: #e8eaed; --muted: #9aa3ad; --faint: #6f7883;
+      --accent: #6ba5fb; --danger: #f8746a; --ok: #4ade80; --soft: #222831;
+      --high: #f8746a; --normal: #6ba5fb; --low: #7d868f;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
-    font: 13px/1.6 "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+    font: 13px/1.65 "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
   }
+
+  /* ---------- ヘッダ ---------- */
   header {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 9px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
     position: sticky; top: 0; z-index: 5;
   }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 650; letter-spacing: .01em; }
   .spacer { flex: 1; }
   button {
-    font: inherit; padding: 5px 12px; border-radius: 6px;
+    font: inherit; font-size: 12px; padding: 5px 11px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer;
   }
-  button:hover:not(:disabled) { border-color: var(--accent); }
-  button:disabled { opacity: .55; cursor: default; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { color: var(--danger); border-color: var(--danger); }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
+  button.quiet { border-color: transparent; color: var(--muted); }
+  button.danger { color: var(--danger); border-color: transparent; }
+  button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
 
-  /* ワーカーの現在状態 */
   #worker {
-    display: flex; align-items: center; gap: 8px; padding: 4px 10px;
-    border: 1px solid var(--border); border-radius: 20px; background: var(--soft); max-width: 46vw;
+    display: flex; align-items: center; gap: 7px; padding: 3px 11px;
+    border: 1px solid var(--border); border-radius: 20px; background: var(--soft); max-width: 44vw;
   }
-  #worker .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  #worker .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
+  #worker.working { border-color: var(--ok); }
   #worker.working .dot { background: var(--ok); animation: pulse 1.2s ease-in-out infinite; }
   #worker.idle .dot { background: var(--accent); }
-  #worker.error .dot { background: var(--danger); }
-  #worker .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  #worker.error .dot, #worker.stopped .dot { background: var(--danger); }
+  #worker .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--muted); }
+  #worker.working .txt { color: var(--text); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .2; } }
 
   #warn {
-    margin: 12px 16px -4px; padding: 8px 12px; border-radius: 6px;
-    border: 1px solid var(--danger); color: var(--danger); background: var(--panel); font-size: 12px;
+    margin: 10px 16px -6px; padding: 8px 12px; border-radius: 6px;
+    border-left: 3px solid var(--danger); background: var(--panel);
+    color: var(--danger); font-size: 12px;
   }
-  #board { display: flex; gap: 12px; padding: 16px; align-items: flex-start; overflow-x: auto; }
+
+  /* ---------- ボード ---------- */
+  #board { display: flex; gap: 10px; padding: 16px; align-items: flex-start; overflow-x: auto; }
   .col {
-    flex: 0 0 268px; background: var(--panel); border: 1px solid var(--border);
+    flex: 0 0 264px; background: var(--panel); border: 1px solid var(--border);
     border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 96px);
   }
-  .col > h2 {
-    font-size: 12px; margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--border);
-    color: var(--muted); font-weight: 600;
-  }
-  .col .hint { font-weight: 400; font-size: 11px; display: block; opacity: .8; }
-  .col .list { padding: 8px; overflow-y: auto; min-height: 60px; flex: 1; }
+  .col > .head { padding: 8px 12px 7px; border-bottom: 1px solid var(--line); }
+  .col .name { font-size: 12px; font-weight: 650; }
+  .col .count { color: var(--faint); font-weight: 400; }
+  .col .hint { display: block; font-size: 10.5px; color: var(--faint); margin-top: 1px; }
+  /* 見るべき列だけ色を持たせ、済んだ列は沈める */
+  .col.act .name { color: var(--accent); }
+  .col.act { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+  .col.done-ish { opacity: .72; }
+  .col .list { padding: 7px; overflow-y: auto; min-height: 52px; flex: 1; }
   .col.over { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   .card {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 10px; margin-bottom: 8px; cursor: grab; position: relative;
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--border);
+    border-radius: 5px; padding: 8px 10px; margin-bottom: 7px; cursor: grab;
   }
-  .card:hover { border-color: var(--accent); }
-  .card.active { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok) inset; }
-  .card .t { font-weight: 600; margin-bottom: 3px; word-break: break-word; }
-  .card .s { color: var(--muted); font-size: 12px; word-break: break-word;
-             display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .card .meta { margin-top: 6px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-  .card .now {
-    margin-top: 6px; font-size: 11px; color: var(--ok);
-    display: flex; gap: 6px; align-items: center;
+  .card:hover { border-color: var(--accent); border-left-color: var(--accent); }
+  .card.u-high { border-left-color: var(--high); }
+  .card.u-normal { border-left-color: var(--normal); }
+  .card.active { border-color: var(--ok); border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 6%, var(--panel)); }
+  .card .t { font-size: 13.5px; font-weight: 620; line-height: 1.45; word-break: break-word; }
+  .card .s {
+    color: var(--muted); font-size: 11.5px; line-height: 1.5; margin-top: 3px; word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
+  .card .foot {
+    margin-top: 7px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    font-size: 10.5px; color: var(--faint);
+  }
+  .card .foot .u-high { color: var(--high); font-weight: 600; }
+  .card .foot .files { color: var(--ok); }
+  .card .warnflag { color: var(--danger); font-weight: 600; cursor: help; }
+  .card .now { margin-top: 6px; font-size: 11px; color: var(--ok); font-weight: 600; }
 
-  .tag {
-    font-size: 11px; padding: 1px 7px; border-radius: 10px;
-    border: 1px solid var(--border); color: var(--muted); background: var(--panel); cursor: help;
-  }
-  .tag.high { color: var(--high); border-color: var(--high); }
-  .tag.normal { color: var(--normal); border-color: var(--normal); }
-  .tag.low { color: var(--low); }
-  .tag.warn { color: var(--danger); border-color: var(--danger); }
-
+  /* ---------- ドロワー ---------- */
   #drawer {
-    position: fixed; top: 0; right: 0; width: min(480px, 94vw); height: 100%;
+    position: fixed; top: 0; right: 0; width: min(520px, 96vw); height: 100%;
     background: var(--panel); border-left: 1px solid var(--border);
-    padding: 16px; overflow-y: auto; z-index: 10; box-shadow: -8px 0 24px rgba(0,0,0,.12);
+    overflow-y: auto; z-index: 10; box-shadow: -10px 0 28px rgba(0,0,0,.13);
   }
-  #drawer h3 { margin: 0 0 4px; font-size: 15px; word-break: break-word; }
-  .sec { margin-top: 16px; }
-  .sec > label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  #drawer .pad { padding: 14px 18px 40px; }
+  #drawer h3 { margin: 0; font-size: 17px; line-height: 1.4; font-weight: 650; word-break: break-word; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; font-size: 11px; color: var(--muted); }
+  .chip { cursor: help; }
+  .chip b { font-weight: 600; color: var(--text); }
+  .chip.hi b { color: var(--high); }
+  .chip.warn { color: var(--danger); font-weight: 600; }
+
+  .lead { margin-top: 14px; font-size: 13.5px; line-height: 1.7; }
+
+  /* 主役: 成果物と自分の下書き */
+  .primary {
+    margin-top: 16px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--soft); padding: 12px;
+  }
+  .primary > .cap { font-size: 11px; font-weight: 650; color: var(--muted); margin-bottom: 8px; }
+
+  .file {
+    display: flex; align-items: center; gap: 8px; padding: 7px 9px; margin-bottom: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font-size: 12px;
+  }
+  .file .nm { font-weight: 600; word-break: break-all; flex: 1; }
+  .file .sz { color: var(--faint); font-size: 11px; white-space: nowrap; }
+
+  details { margin-top: 8px; border-top: 1px solid var(--line); }
+  details > summary {
+    cursor: pointer; list-style: none; padding: 9px 2px; font-size: 12px;
+    color: var(--muted); display: flex; align-items: center; gap: 7px; user-select: none;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before {
+    content: '▸'; font-size: 10px; color: var(--faint); transition: transform .12s;
+  }
+  details[open] > summary::before { transform: rotate(90deg); }
+  details > summary:hover { color: var(--accent); }
+  details > summary .n { color: var(--faint); font-weight: 400; }
+  details .body { padding: 2px 2px 12px; }
+
   pre {
-    white-space: pre-wrap; word-break: break-word; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 0 0 6px; font: inherit;
+    white-space: pre-wrap; word-break: break-word; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; margin: 0 0 7px;
+    font: inherit; font-size: 12.5px; line-height: 1.65;
   }
   textarea {
-    width: 100%; min-height: 110px; font: inherit; padding: 8px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--bg); color: var(--text); resize: vertical;
+    width: 100%; font: inherit; font-size: 12.5px; padding: 9px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); resize: vertical;
   }
-  input[type=text] {
-    width: 100%; font: inherit; padding: 6px 8px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--bg); color: var(--text);
-  }
-  .cmt { border-left: 2px solid var(--border); padding: 2px 0 2px 8px; margin-bottom: 8px; }
-  .cmt .who { font-size: 11px; color: var(--muted); }
+  #draftBox { min-height: 130px; }
+  .hintline { font-size: 10.5px; color: var(--faint); margin-top: 4px; }
 
-  /* 作業ログ */
-  .act { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; align-items: baseline; }
-  .act .ts { color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
-  .act .k { flex: none; width: 5.5em; color: var(--muted); font-size: 11px; }
-  .act.done .k { color: var(--ok); }
-  .act.error .k, .act.cancelled .k { color: var(--danger); }
+  .act { display: flex; gap: 9px; font-size: 12px; padding: 3px 0; align-items: baseline; }
+  .act .ts { color: var(--faint); font-size: 10.5px; flex: none; font-variant-numeric: tabular-nums; }
+  .act .k { flex: none; width: 5em; color: var(--faint); font-size: 10.5px; }
+  .act.done .k, .act.file .k { color: var(--ok); font-weight: 600; }
+  .act.error .k, .act.cancelled .k { color: var(--danger); font-weight: 600; }
 
+  .cmt { padding: 7px 0 7px 10px; border-left: 2px solid var(--line); margin-bottom: 8px; }
+  .cmt.agent { border-left-color: var(--accent); }
+  .cmt .who { font-size: 10.5px; color: var(--faint); margin-bottom: 2px; }
+  .cmt .bd { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
+
+  .row { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
   #toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
     color: #fff; padding: 8px 16px; border-radius: 6px; z-index: 30; background: var(--muted);
+    font-size: 12.5px; box-shadow: 0 4px 14px rgba(0,0,0,.2);
   }
   #toast.ok { background: var(--ok); }
   #toast.err { background: var(--danger); }
@@ -134,14 +185,12 @@
   }
   #help .box {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 20px; max-width: 620px; width: 100%; max-height: 85vh; overflow-y: auto;
+    padding: 20px; max-width: 640px; width: 100%; max-height: 85vh; overflow-y: auto;
   }
-  #help h4 { margin: 16px 0 6px; font-size: 13px; }
-  #help h4:first-of-type { margin-top: 8px; }
+  #help h4 { margin: 18px 0 6px; font-size: 12px; color: var(--accent); }
   #help table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  #help td { padding: 3px 8px 3px 0; vertical-align: top; }
-  #help td:first-child { white-space: nowrap; color: var(--muted); width: 9em; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #help td { padding: 3px 10px 3px 0; vertical-align: top; }
+  #help td:first-child { white-space: nowrap; color: var(--muted); width: 10em; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -151,10 +200,10 @@
   <h1>通知カンバン</h1>
   <div id="worker" title="ワーカーの状態"><span class="dot"></span><span class="txt">—</span></div>
   <span class="spacer"></span>
-  <span id="status" class="tag" title="最後にボードを読み込んだ時刻">—</span>
-  <button id="archBtn" title="アーカイブしたカードを表示">アーカイブ</button>
+  <span id="status" style="font-size:11px;color:var(--faint)" title="最後にボードを読み込んだ時刻">—</span>
+  <button id="archBtn" class="quiet">アーカイブ</button>
   <button id="newBtn">+ カード</button>
-  <button id="helpBtn" title="表示の意味">?</button>
+  <button id="helpBtn" class="quiet" title="表示の意味">?</button>
 </header>
 
 <div id="warn" hidden></div>
@@ -173,18 +222,14 @@
   var toastEl = document.getElementById('toast');
   var workerEl = document.getElementById('worker');
   var helpEl = document.getElementById('help');
+  var warnEl = document.getElementById('warn');
   var toastTimer = null;
 
-  var warnEl = document.getElementById('warn');
-  var lastRev = null;
-  var dragging = false;
-  var openTaskId = null;
-  var dirty = false;
-  var showArchived = false;
-  var workerTaskId = null;
-  var workerAlive = false;
+  var lastRev = null, dragging = false, openTaskId = null, dirty = false;
+  var showArchived = false, workerTaskId = null, workerAlive = false;
+  // 折りたたみの開閉はカードを開き直しても保つ
+  var openSections = {};
 
-  // 表示用の日本語ラベル。生の enum をそのまま出すと意味が伝わらない。
   var URGENCY = { high: '高', normal: '中', low: '低' };
   var CATEGORY = {
     reply_required: '返信が必要', task: '作業', fyi: '参考情報',
@@ -195,21 +240,16 @@
     review: 'レビュー待ち', done: '完了', dismissed: '対応不要', archived: 'アーカイブ済み'
   };
   var COLUMN_HINT = {
-    inbox: '判定がまだ',
-    todo: 'ワーカーが次に着手する',
-    doing: 'ワーカーが作業中',
-    review: '下書きができた。確認してください',
-    done: '対応済み',
-    dismissed: '対応不要と判断'
+    inbox: '判定がまだ', todo: 'ワーカーが次に着手する', doing: 'ワーカーが作業中',
+    review: '成果物を確認してください', done: '対応済み', dismissed: '対応不要と判断'
   };
+  var ATTENTION = { todo: 1, doing: 1, review: 1 };
+  var QUIET = { done: 1, dismissed: 1 };
   var ACT_KIND = {
-    start: '開始', step: '経過', llm: '生成中', done: '完了',
-    error: 'エラー', cancelled: '中止', user: '操作'
+    start: '開始', step: '経過', llm: '検討', tool: '実行', file: '成果物',
+    done: '完了', error: 'エラー', cancelled: '中止', user: '操作'
   };
-  var WORKER_STATE = {
-    working: '作業中', idle: '待機中', stopped: '停止中',
-    error: 'エラー', unknown: '未起動'
-  };
+  var WORKER_STATE = { working: '作業中', idle: '待機中', stopped: '停止中', error: 'エラー', unknown: '未起動' };
 
   function toast(msg, kind) {
     toastEl.textContent = msg;
@@ -231,22 +271,15 @@
     });
   }
 
+  // 通知本文は第三者が書いた文字列。必ず textContent で入れる。
+  // innerHTML を使うとメッセージから DOM を注入できてしまう。
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
-    // 通知本文は第三者が書いた文字列。必ず textContent で入れる。
-    // innerHTML を使うと Slack のメッセージから DOM を注入できてしまう。
     if (text != null) e.textContent = text;
     return e;
   }
 
-  function tag(label, value, cls, tip) {
-    var t = el('span', 'tag' + (cls ? ' ' + cls : ''), label ? label + ' ' + value : value);
-    if (tip) t.title = tip;
-    return t;
-  }
-
-  // 押した瞬間に見た目が変わり、結果がトーストで返るボタン
   function actionButton(text, cls, busyText, fn) {
     var b = el('button', cls, text);
     b.onclick = function () {
@@ -260,7 +293,10 @@
     return b;
   }
 
-  // ---------------------------------------------------------------- ワーカー表示
+  function hhmm(iso) { return (iso || '').replace('T', ' ').slice(0, 19); }
+  function kb(n) { n = Number(n) || 0; return n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB'; }
+
+  // ---------------------------------------------------------------- ワーカー
 
   function renderWorker(w) {
     workerTaskId = w && w.currentTaskId ? Number(w.currentTaskId) : null;
@@ -268,12 +304,11 @@
     var msg = (w && w.message) ? w.message : '';
     var stale = w && w.staleSeconds != null && w.staleSeconds > 90;
 
-    // 生きていると名乗っていてもハートビートが止まっていれば実際は動いていない。
-    // idle のまま固まると「待機中」に見え、なぜ着手されないのか分からなくなる。
+    // 生きていると名乗っていてもハートビートが止まっていれば動いていない。
+    // idle のまま固まると「待機中」に見え、なぜ着手されないか分からなくなる。
     if (stale && (state === 'working' || state === 'idle')) {
-      var mins = Math.floor(w.staleSeconds / 60);
       msg = (state === 'working' ? '作業中に落ちました。' : '')
-          + mins + '分以上応答がありません（プロセスが動いていません）';
+          + Math.floor(w.staleSeconds / 60) + '分以上応答がありません（プロセスが動いていません）';
       state = 'stopped';
       workerTaskId = null;
     }
@@ -281,18 +316,15 @@
 
     workerEl.className = state;
     var label = WORKER_STATE[state] || state;
-    // 状態名と同じ文言なら重ねて出さない（「待機中： 待機中」になるため）
     var txt = label + (msg && msg !== label ? '： ' + msg : '');
     if (state === 'working' && workerTaskId) txt += '（#' + workerTaskId + '）';
     workerEl.querySelector('.txt').textContent = 'ワーカー ' + txt;
     workerEl.title = 'ワーカー: ' + label + (msg ? '\n' + msg : '');
 
-    // 止まっているあいだは、なぜ何も起きないのかを常に画面に出しておく
     if (workerAlive) {
       warnEl.hidden = true;
     } else {
-      warnEl.textContent =
-        'ワーカーが動いていないため、「要対応」のカードには誰も着手しません。'
+      warnEl.textContent = 'ワーカーが動いていないため、「要対応」のカードには誰も着手しません。'
         + ' phase4\\Start-Worker.ps1 を起動してください。';
       warnEl.hidden = false;
     }
@@ -304,11 +336,13 @@
     board.innerHTML = '';
     renderWorker(data.worker);
     data.columns.forEach(function (col) {
-      var c = el('div', 'col');
-      c.dataset.key = col.key;
-      var h = el('h2', null, (COLUMN[col.key] || col.label) + '（' + col.tasks.length + '）');
-      if (COLUMN_HINT[col.key]) h.appendChild(el('span', 'hint', COLUMN_HINT[col.key]));
-      c.appendChild(h);
+      var c = el('div', 'col' + (ATTENTION[col.key] ? ' act' : '') + (QUIET[col.key] ? ' done-ish' : ''));
+      var head = el('div', 'head');
+      var name = el('div', 'name', (COLUMN[col.key] || col.label) + ' ');
+      name.appendChild(el('span', 'count', String(col.tasks.length)));
+      head.appendChild(name);
+      if (COLUMN_HINT[col.key]) head.appendChild(el('span', 'hint', COLUMN_HINT[col.key]));
+      c.appendChild(head);
 
       var list = el('div', 'list');
       col.tasks.forEach(function (t) { list.appendChild(renderCard(t, col.key)); });
@@ -332,38 +366,28 @@
   }
 
   function renderCard(t, colKey) {
-    var card = el('div', 'card');
+    var running = Number(t.id) === workerTaskId;
+    var card = el('div', 'card' + (t.urgency ? ' u-' + t.urgency : '') + (running ? ' active' : ''));
     card.draggable = (colKey !== 'archived');
-    if (Number(t.id) === workerTaskId) card.classList.add('active');
 
     card.appendChild(el('div', 't', t.title));
     if (t.summary) card.appendChild(el('div', 's', t.summary));
 
-    var meta = el('div', 'meta');
-    meta.appendChild(tag('ID', t.id, null, 'カード番号'));
-    if (t.urgency) {
-      meta.appendChild(tag('緊急度', URGENCY[t.urgency] || t.urgency, t.urgency, '対応の急ぎ度合い'));
-    }
-    if (t.category) {
-      meta.appendChild(tag('種別', CATEGORY[t.category] || t.category, null, '通知の分類'));
-    }
+    // 補助情報は小さく淡く一行に。強調するのは緊急度「高」と警告だけ。
+    var foot = el('div', 'foot');
+    foot.appendChild(el('span', null, '#' + t.id));
+    if (t.urgency === 'high') foot.appendChild(el('span', 'u-high', '緊急度 高'));
+    if (t.artifact_count > 0) foot.appendChild(el('span', 'files', '成果物 ' + t.artifact_count));
     if (t.cancel_requested) {
-      // 要対応にあるのに中止要求が残っていると、ワーカーは永久に飛ばす。
-      // 「待っているのに動かない」の原因になるのでカード上で分かるようにする。
-      if (colKey === 'todo') {
-        meta.appendChild(tag('', '着手対象外', 'warn',
-          '中止要求が残っているためワーカーが飛ばします。カードを開いて解除するか、要対応へドラッグし直してください'));
-      } else {
-        meta.appendChild(tag('', '中止を要求済み', 'warn', 'ワーカーは次の区切りで作業をやめます'));
-      }
+      // 要対応にあるのに中止要求が残っていると、ワーカーは永久に飛ばす
+      var w = el('span', 'warnflag', colKey === 'todo' ? '着手対象外' : '中止要求');
+      w.title = colKey === 'todo'
+        ? '中止要求が残っているためワーカーが飛ばします。カードを開いて解除できます'
+        : 'ワーカーは次の区切りで作業をやめます';
+      foot.appendChild(w);
     }
-    card.appendChild(meta);
-
-    if (Number(t.id) === workerTaskId) {
-      var now = el('div', 'now');
-      now.appendChild(el('span', null, '● ワーカーが作業中'));
-      card.appendChild(now);
-    }
+    card.appendChild(foot);
+    if (running) card.appendChild(el('div', 'now', '● ワーカーが作業中'));
 
     card.addEventListener('dragstart', function (ev) {
       dragging = true;
@@ -377,13 +401,9 @@
   function move(id, version, from, to) {
     return api('/api/tasks/' + id + '/move', 'POST', { column: to, version: version, from: from })
       .then(function (r) {
-        if (r.status === 409) {
-          toast('他で更新されていたため移動しませんでした。最新を読み直します。', 'err');
-        } else if (from === 'doing' && to !== 'doing') {
-          toast('「' + (COLUMN[to] || to) + '」へ移動し、ワーカーに中止を要求しました', 'ok');
-        } else {
-          toast('「' + (COLUMN[to] || to) + '」へ移動しました', 'ok');
-        }
+        if (r.status === 409) toast('他で更新されていたため移動しませんでした', 'err');
+        else if (from === 'doing' && to !== 'doing') toast('移動し、ワーカーに中止を要求しました', 'ok');
+        else toast('「' + (COLUMN[to] || to) + '」へ移動しました', 'ok');
         return refresh(true);
       });
   }
@@ -413,185 +433,225 @@
 
   // ---------------------------------------------------------------- 詳細
 
-  function section(label, node) {
-    var s = el('div', 'sec');
-    s.appendChild(el('label', null, label));
-    s.appendChild(node);
-    return s;
+  // 既定で閉じている折りたたみ。開閉状態は openSections に覚える。
+  function foldable(key, label, count, buildBody) {
+    var d = document.createElement('details');
+    d.open = !!openSections[key];
+    var s = document.createElement('summary');
+    s.appendChild(el('span', null, label));
+    if (count != null) s.appendChild(el('span', 'n', '（' + count + '）'));
+    d.appendChild(s);
+    var body = el('div', 'body');
+    d.appendChild(body);
+    var built = false;
+    function build() { if (!built) { buildBody(body); built = true; } }
+    if (d.open) build();
+    d.addEventListener('toggle', function () {
+      openSections[key] = d.open;
+      if (d.open) build();
+    });
+    return d;
   }
+
   function pre(text) { return el('pre', null, text); }
-  function hhmm(iso) { return (iso || '').replace('T', ' ').slice(0, 19); }
 
   function openDetail(id, keepScroll) {
     return api('/api/tasks/' + id).then(function (r) {
       if (r.status !== 200) return;
       openTaskId = id;
       var t = r.body.task, ev = r.body.event;
-      var comments = r.body.comments || [], activity = r.body.activity || [];
+      var comments = r.body.comments || [], activity = r.body.activity || [], files = r.body.artifacts || [];
       var scroll = keepScroll ? drawer.scrollTop : 0;
 
       drawer.innerHTML = '';
+      var pad = el('div', 'pad');
+      drawer.appendChild(pad);
 
       var head = el('div', 'row');
       head.appendChild(el('h3', null, t.title));
       var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
-      var close = el('button', null, '閉じる');
+      var close = el('button', 'quiet', '閉じる');
       close.onclick = function () { openTaskId = null; dirty = false; drawer.hidden = true; };
       head.appendChild(close);
-      drawer.appendChild(head);
+      pad.appendChild(head);
 
-      var sub = el('div', 'meta');
-      sub.appendChild(tag('ID', t.id, null, 'カード番号'));
-      sub.appendChild(tag('列', COLUMN[t.board_column] || t.board_column, null, 'いまカンバンのどこにあるか'));
-      if (t.urgency) sub.appendChild(tag('緊急度', URGENCY[t.urgency] || t.urgency, t.urgency, '対応の急ぎ度合い'));
-      if (t.category) sub.appendChild(tag('種別', CATEGORY[t.category] || t.category, null, '通知の分類'));
-      sub.appendChild(tag('版', t.version, null, '更新のたびに増える番号。同時編集の衝突検出に使う'));
-      if (t.cancel_requested) sub.appendChild(tag('', '中止を要求済み', 'warn', 'ワーカーは次の区切りで作業をやめます'));
-      if (t.archived_at) sub.appendChild(tag('', 'アーカイブ済み', 'warn', 'ボードから隠れています'));
-      drawer.appendChild(sub);
+      var chips = el('div', 'chips');
+      function chip(label, value, cls, tip) {
+        var c = el('span', 'chip' + (cls ? ' ' + cls : ''));
+        if (label) c.appendChild(document.createTextNode(label + ' '));
+        c.appendChild(el('b', null, value));
+        if (tip) c.title = tip;
+        chips.appendChild(c);
+      }
+      chip('', '#' + t.id, null, 'カード番号');
+      chip('列', COLUMN[t.board_column] || t.board_column, null, 'いまカンバンのどこにあるか');
+      if (t.urgency) chip('緊急度', URGENCY[t.urgency] || t.urgency, t.urgency === 'high' ? 'hi' : null, '対応の急ぎ度合い');
+      if (t.category) chip('種別', CATEGORY[t.category] || t.category, null, '通知の分類');
+      chip('版', t.version, null, '更新のたびに増える番号。同時編集の衝突検出に使う');
+      if (t.cancel_requested) {
+        var w = el('span', 'chip warn', '中止要求あり'); w.title = 'ワーカーはこのカードを飛ばします'; chips.appendChild(w);
+      }
+      if (t.archived_at) chips.appendChild(el('span', 'chip warn', 'アーカイブ済み'));
+      pad.appendChild(chips);
 
-      if (t.summary) drawer.appendChild(section('要約', pre(t.summary)));
-      if (t.reason) drawer.appendChild(section('この判定にした理由', pre(t.reason)));
+      if (t.summary) pad.appendChild(el('div', 'lead', t.summary));
 
-      if (t.proposed_actions) {
-        var acts = [];
-        try { acts = JSON.parse(t.proposed_actions) || []; } catch (e) { acts = []; }
-        if (acts.length) {
-          var box = el('div');
-          acts.forEach(function (a) { box.appendChild(pre(a.type + ': ' + a.detail)); });
-          drawer.appendChild(section('想定される対応', box));
-        }
+      // --- 主役1: 成果物 ---
+      if (files.length > 0) {
+        var box = el('div', 'primary');
+        box.appendChild(el('div', 'cap', 'ワーカーが作成したファイル'));
+        files.forEach(function (f) {
+          var row = el('div', 'file');
+          row.appendChild(el('span', 'nm', f.name));
+          row.appendChild(el('span', 'sz', kb(f.bytes)));
+          row.appendChild(actionButton('中身を見る', null, '読込中…', function () {
+            return api('/api/tasks/' + t.id + '/artifact?id=' + f.id).then(function (a) {
+              if (a.status !== 200) { toast('ファイルを開けませんでした', 'err'); return; }
+              var v = document.getElementById('view-' + f.id);
+              if (v) { v.hidden = !v.hidden; return; }
+              var p = pre(a.body.content);
+              p.id = 'view-' + f.id;
+              p.style.marginTop = '6px';
+              row.parentNode.insertBefore(p, row.nextSibling);
+            });
+          }));
+          box.appendChild(row);
+        });
+        box.appendChild(el('div', 'hintline',
+          'ファイルはカードごとの作業フォルダに保存されています。.eml はメールソフトで開くと下書きになります。'));
+        pad.appendChild(box);
       }
 
-      // ワーカーの作業ログ — 「いま何をしているか / 何をしたか」
-      var actBox = el('div');
-      if (activity.length === 0) {
-        actBox.appendChild(el('div', 'act', 'まだ作業は行われていません'));
+      // --- 主役2: 自分の下書き / 修正 ---
+      var edit = el('div', 'primary');
+      edit.appendChild(el('div', 'cap', '自分の下書き / 修正'));
+      var ta = document.createElement('textarea');
+      ta.id = 'draftBox';
+      ta.value = t.user_edited || '';
+      ta.placeholder = 'ここに書いた内容はワーカーが再実行しても消えません。';
+      ta.oninput = function () { dirty = true; };
+      edit.appendChild(ta);
+
+      var er = el('div', 'row'); er.style.marginTop = '7px';
+      er.appendChild(actionButton('保存', 'primary', '保存中…', function () {
+        return api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
+          .then(function (r2) {
+            if (r2.status === 409) toast('他で更新されていたため保存できませんでした', 'err');
+            else toast('保存しました', 'ok');
+            dirty = false;
+            return refresh(true);
+          });
+      }));
+      if (t.agent_output) {
+        er.appendChild(actionButton('報告を取り込む', null, '…', function () {
+          ta.value = t.agent_output; dirty = true;
+          toast('編集欄に入れました。保存すると確定します', 'ok');
+        }));
+      }
+      if (t.cancel_requested) {
+        er.appendChild(actionButton('中止を解除して要対応へ', null, '解除中…', function () {
+          return api('/api/tasks/' + t.id + '/cancel', 'POST', { cancel: false })
+            .then(function () { return api('/api/tasks/' + t.id + '/move', 'POST', { column: 'todo', from: t.board_column }); })
+            .then(function () { toast('要対応に戻しました', 'ok'); return refresh(true); });
+        }));
       } else {
+        er.appendChild(actionButton('作業を中止', 'danger', '中止要求中…', function () {
+          return api('/api/tasks/' + t.id + '/cancel', 'POST', {}).then(function () {
+            toast('中止を要求しました', 'ok');
+            return refresh(true);
+          });
+        }));
+      }
+      edit.appendChild(er);
+      pad.appendChild(edit);
+
+      // --- 以下は既定で折りたたむ ---
+      if (t.agent_output) {
+        pad.appendChild(foldable('report', 'ワーカーの報告', null, function (b) { b.appendChild(pre(t.agent_output)); }));
+      }
+      if (t.reason) {
+        pad.appendChild(foldable('reason', 'この判定にした理由', null, function (b) { b.appendChild(pre(t.reason)); }));
+      }
+
+      pad.appendChild(foldable('activity', 'ワーカーの作業ログ', activity.length, function (b) {
+        if (activity.length === 0) { b.appendChild(el('div', 'act', 'まだ作業は行われていません')); return; }
         activity.slice().reverse().forEach(function (a) {
           var row = el('div', 'act ' + a.kind);
           row.appendChild(el('span', 'ts', hhmm(a.created_at).slice(11)));
           row.appendChild(el('span', 'k', ACT_KIND[a.kind] || a.kind));
           row.appendChild(el('span', null, a.message));
-          actBox.appendChild(row);
+          b.appendChild(row);
         });
-      }
-      drawer.appendChild(section('ワーカーの作業ログ（新しい順）', actBox));
-
-      if (t.agent_output) drawer.appendChild(section('ワーカーが作った下書き', pre(t.agent_output)));
-
-      var ta = document.createElement('textarea');
-      ta.value = t.user_edited || '';
-      ta.placeholder = '下書きを直したり、自分で書いたりする欄です。ワーカーが再生成してもここは消えません。';
-      ta.oninput = function () { dirty = true; };
-
-      var editWrap = el('div');
-      editWrap.appendChild(ta);
-      var editRow = el('div', 'row'); editRow.style.marginTop = '6px';
-
-      editRow.appendChild(actionButton('保存', 'primary', '保存中…', function () {
-        return api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
-          .then(function (r2) {
-            if (r2.status === 409) { toast('他で更新されていたため保存できませんでした', 'err'); }
-            else { toast('保存しました', 'ok'); }
-            dirty = false;
-            return refresh(true);
-          });
       }));
 
-      if (t.agent_output) {
-        editRow.appendChild(actionButton('下書きを取り込む', null, '取り込み中…', function () {
-          ta.value = t.agent_output;
-          dirty = true;
-          toast('下書きを編集欄に入れました。保存すると確定します', 'ok');
-        }));
-      }
-
-      if (t.cancel_requested) {
-        editRow.appendChild(actionButton('中止を解除して要対応へ', null, '解除中…', function () {
-          return api('/api/tasks/' + t.id + '/cancel', 'POST', { cancel: false })
+      pad.appendChild(foldable('comments', '指示・やりとり', comments.length, function (b) {
+        comments.forEach(function (c) {
+          var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
+          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
+          d.appendChild(el('div', 'bd', c.body));
+          b.appendChild(d);
+        });
+        // 複数行を書けるようにする。Enter は改行、送信は Ctrl+Enter かボタン。
+        var ci = document.createElement('textarea');
+        ci.rows = 3;
+        ci.placeholder = 'ワーカーへの指示（改行できます／Ctrl+Enter で送信）';
+        var send = function () {
+          if (!ci.value.trim()) return;
+          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ci.value })
             .then(function () {
-              return api('/api/tasks/' + t.id + '/move', 'POST', { column: 'todo', from: t.board_column });
+              ci.value = '';
+              toast('指示を送りました。次の実行時に反映されます', 'ok');
+              openSections['comments'] = true;
+              return refresh(true);
             })
             .then(function () {
-              toast('中止要求を解除し、要対応に戻しました', 'ok');
-              return refresh(true);
+              var next = drawer.querySelector('details .body textarea');
+              if (next) next.focus();
             });
-        }));
-      } else {
-        editRow.appendChild(actionButton('作業を中止', 'danger', '中止要求中…', function () {
-          return api('/api/tasks/' + t.id + '/cancel', 'POST', {}).then(function () {
-            toast('中止を要求しました。ワーカーは次の区切りで停止します', 'ok');
-            return refresh(true);
-          });
-        }));
-      }
-      editWrap.appendChild(editRow);
-      drawer.appendChild(section('自分の下書き / 修正', editWrap));
-
-      var cbox = el('div');
-      comments.forEach(function (c) {
-        var d = el('div', 'cmt');
-        d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
-        d.appendChild(el('div', null, c.body));
-        cbox.appendChild(d);
-      });
-      var ci = document.createElement('input');
-      ci.type = 'text';
-      ci.placeholder = 'ワーカーへの指示を書く（Enter で送信）';
-      ci.onkeydown = function (e) {
-        if (e.key !== 'Enter' || !ci.value.trim()) return;
-        api('/api/tasks/' + t.id + '/comment', 'POST', { body: ci.value })
-          .then(function () {
-            ci.value = '';
-            toast('指示を送りました。次の実行時に反映されます', 'ok');
-            return refresh(true);
-          })
-          .then(function () {
-            var next = drawer.querySelector('input[type=text]');
-            if (next) next.focus();
-          });
-      };
-      cbox.appendChild(ci);
-      drawer.appendChild(section('指示・やりとり', cbox));
+        };
+        ci.onkeydown = function (e) {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+        };
+        b.appendChild(ci);
+        var sr = el('div', 'row'); sr.style.marginTop = '6px';
+        sr.appendChild(actionButton('指示を送る', null, '送信中…', send));
+        b.appendChild(sr);
+      }));
 
       if (ev) {
-        var evBox = el('div');
-        evBox.appendChild(pre((ev.app_id || '') + '\n' + hhmm(ev.occurred_at)));
-        if (ev.body) evBox.appendChild(pre(ev.body));
-        if (ev.link) {
-          // リンクは踏ませない。文字列として出すだけ。
-          var a = el('div', null, ev.link);
-          a.style.color = 'var(--muted)';
-          a.style.wordBreak = 'break-all';
-          evBox.appendChild(a);
-        }
-        drawer.appendChild(section('元の通知', evBox));
+        pad.appendChild(foldable('event', '元の通知', null, function (b) {
+          b.appendChild(pre((ev.app_id || '') + '\n' + hhmm(ev.occurred_at)));
+          if (ev.body) b.appendChild(pre(ev.body));
+          if (ev.link) {
+            // リンクは踏ませない。文字列として出すだけ。
+            var a = el('div', null, ev.link);
+            a.style.cssText = 'color:var(--faint);word-break:break-all;font-size:11px';
+            b.appendChild(a);
+          }
+        }));
       }
 
-      // 片付け
-      var mng = el('div', 'row');
-      mng.appendChild(actionButton(
-        t.archived_at ? 'アーカイブから戻す' : 'アーカイブ',
-        null,
-        '処理中…',
-        function () {
+      pad.appendChild(foldable('manage', 'カードの片付け', null, function (b) {
+        var mng = el('div', 'row');
+        mng.appendChild(actionButton(t.archived_at ? 'アーカイブから戻す' : 'アーカイブ', null, '処理中…', function () {
           return api('/api/tasks/' + t.id + '/archive', 'POST', { archived: !t.archived_at })
             .then(function () {
-              toast(t.archived_at ? 'ボードに戻しました' : 'アーカイブしました（アーカイブ表示から戻せます）', 'ok');
+              toast(t.archived_at ? 'ボードに戻しました' : 'アーカイブしました', 'ok');
               if (!t.archived_at && !showArchived) { openTaskId = null; drawer.hidden = true; }
               return refresh(true);
             });
         }));
-      mng.appendChild(actionButton('削除', 'danger', '削除中…', function () {
-        if (!confirm('カード #' + t.id + '「' + t.title + '」を完全に削除します。\n作業ログとやりとりも消え、元に戻せません。')) return;
-        return api('/api/tasks/' + t.id, 'DELETE').then(function () {
-          toast('削除しました', 'ok');
-          openTaskId = null; dirty = false; drawer.hidden = true;
-          return refresh(true);
-        });
+        mng.appendChild(actionButton('削除', 'danger', '削除中…', function () {
+          if (!confirm('カード #' + t.id + '「' + t.title + '」を完全に削除します。\n作業ログとやりとりも消え、元に戻せません。')) return;
+          return api('/api/tasks/' + t.id, 'DELETE').then(function () {
+            toast('削除しました', 'ok');
+            openTaskId = null; dirty = false; drawer.hidden = true;
+            return refresh(true);
+          });
+        }));
+        b.appendChild(mng);
+        b.appendChild(el('div', 'hintline', '削除してもワーカーが作ったファイル自体は作業フォルダに残ります。'));
       }));
-      drawer.appendChild(section('カードの片付け', mng));
 
       drawer.hidden = false;
       drawer.scrollTop = scroll;
@@ -617,7 +677,7 @@
     var head = el('div', 'row');
     head.appendChild(el('h3', null, '表示の意味'));
     var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
-    var c = el('button', null, '閉じる');
+    var c = el('button', 'quiet', '閉じる');
     c.onclick = function () { helpEl.hidden = true; };
     head.appendChild(c);
     box.appendChild(head);
@@ -626,35 +686,27 @@
     box.appendChild(rows([
       ['未分類', '判定がまだのカード'],
       ['要対応', 'ワーカーが次に着手する'],
-      ['実行中', 'ワーカーが作業している。ここから他の列へ動かすと中止要求になる'],
-      ['レビュー待ち', '下書きができた状態。内容を確認して送信可否を決める'],
-      ['完了', '対応済み'],
-      ['対応不要', '見たうえで対応不要と判断したもの']
+      ['実行中', 'ワーカーが作業している。ここから動かすと中止要求になる'],
+      ['レビュー待ち', '成果物ができた状態。内容を確認して送信可否を決める'],
+      ['完了 / 対応不要', '済んだもの。淡く表示される']
     ]));
 
-    box.appendChild(el('h4', null, 'カードのラベル'));
+    box.appendChild(el('h4', null, 'カードの表示'));
     box.appendChild(rows([
-      ['ID', 'カード番号。ワーカーのログと照合するときに使う'],
-      ['緊急度', '高 / 中 / 低。対応の急ぎ度合い'],
-      ['種別', '返信が必要 / 作業 / 参考情報 / 不要 / システム / 自分で作成'],
-      ['版', '更新のたびに増える番号。自分とワーカーが同時に直したときの衝突検出に使う'],
-      ['中止を要求済み', 'ワーカーは次の区切りで作業をやめる']
+      ['左の色帯', '緊急度。赤=高、青=中、灰=低'],
+      ['#1', 'カード番号。ワーカーの作業ログと照合するときに使う'],
+      ['成果物 n', 'ワーカーが実際に作ったファイルの数'],
+      ['着手対象外', '中止要求が残っており、ワーカーが飛ばす'],
+      ['版', '更新のたびに増える番号。同時編集の衝突検出に使う']
     ]));
 
     box.appendChild(el('h4', null, 'ワーカー'));
     box.appendChild(rows([
+      ['できること', 'ファイル作成、メール下書き(.eml)の作成、作ったファイルの読み返し'],
+      ['できないこと', 'メールやメッセージの送信・投稿、作業フォルダ外の操作、コマンド実行'],
       ['作業中', 'いずれかのカードを処理している。ヘッダに対象と内容が出る'],
-      ['待機中', '起動しているが処理するカードが無い'],
-      ['停止中 / 未起動', 'phase4\\Start-Worker.ps1 を実行すると動き出す'],
-      ['エラー', '直前の処理が失敗した。カードの作業ログに理由が残る']
+      ['停止中 / 未起動', 'phase4\\Start-Worker.ps1 を実行すると動き出す']
     ]));
-
-    box.appendChild(el('h4', null, '安全について'));
-    box.appendChild(rows([
-      ['送信はしない', 'ワーカーは下書きを作るだけで、送信・投稿は一切行わない'],
-      ['リンク', '元の通知のリンクは文字列として表示するだけでクリックできない']
-    ]));
-
     helpEl.appendChild(box);
     helpEl.hidden = false;
   }

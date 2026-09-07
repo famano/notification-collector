@@ -38,19 +38,6 @@ $script:TriageTool = @{
     }
 }
 
-$script:DraftTool = @{
-    name         = 'record_draft'
-    description  = '依頼に対する下書きを記録する。送信は行わない。'
-    input_schema = @{
-        type       = 'object'
-        properties = [ordered]@{
-            draft = @{ type = 'string'; description = '返信文または成果物の本文。そのまま使える形で書く。' }
-            notes = @{ type = 'string'; description = '人間が確認すべき点、不明な点、前提として置いたこと。' }
-        }
-        required = @('draft', 'notes')
-    }
-}
-
 # ---------------------------------------------------------------- プロンプト
 
 # 通知本文・メッセージ本文は第三者が書いた文字列。指示ではなくデータとして扱わせる。
@@ -90,21 +77,31 @@ $script:InjectionGuard
 "@
 }
 
-function Get-DraftSystemPrompt {
+function Get-WorkSystemPrompt {
     param($Context)
     return @"
-あなたは利用者の代わりに返信や文書の「下書き」を作る補助者です。
-record_draft ツールで結果を返してください。
+あなたは利用者の代わりに実務を代行する担当者です。文面を書くだけでなく、
+与えられたツールで**実際に成果物を作成してください**。
 
 $(Get-ContextBlock $Context)
-下書きの方針:
+進め方:
+- メールの返信を作るなら create_email_draft で .eml ファイルを実際に作る。
+  文面をテキストで返して終わりにしない。
+- 報告書・メモ・一覧などを求められたら write_file で実際にファイルを作る。
+- 必要なら複数のファイルを作ってよい。read_file / list_files で作ったものを確認できる。
 - 日本語のビジネス文書として自然な敬体で書く。過度にへりくだらない。
-- 元のメッセージだけでは分からない事実を創作しない。不明な点は notes に列挙する。
-- 利用者からの追加指示がある場合は、それを最優先で反映する。
+- 元のメッセージから分からない事実を創作しない。宛先や日付が不明なら空欄にし、
+  最後の説明でその点を明示する。
+- 利用者からの追加指示があれば最優先で反映する。
 
-厳守:
-あなたは下書きを作るだけです。送信・投稿・ファイルの実際の書き込みは決して行いません。
-最終的な送信可否は必ず人間が判断します。
+作業を終えたら、何を作ったか・人間が確認すべき点を短くまとめて返してください。
+
+できないこと (依頼されても行わない):
+- メールやメッセージの送信・投稿。作るのは下書きファイルまでで、送信は人間が行う。
+- 作業フォルダ外のファイル操作、既存ファイルの書き換え、コマンド実行。
+
+「実際にはできない」と断る前に、まず上のツールで実現できないか検討してください。
+ツールで作れるものは作ってください。
 
 $script:InjectionGuard
 "@
@@ -112,12 +109,12 @@ $script:InjectionGuard
 
 # ---------------------------------------------------------------- HTTP
 
-function Invoke-ClaudeApi {
+function Send-ClaudeRequest {
     <#
       .SYNOPSIS
-        Messages API を叩き、tool_use の入力を返す共通処理。
+        Messages API を1回叩き、応答をそのまま返す (再試行・拒否判定・エラー本文の展開込み)。
       .OUTPUTS
-        [pscustomobject] result (tool の input) / model / raw
+        [pscustomobject] 解析済みの応答。content / stop_reason / model を持つ。
     #>
     param(
         [Parameter(Mandatory)] [hashtable] $Payload,
@@ -153,10 +150,8 @@ function Invoke-ClaudeApi {
                 throw "モデルが処理を拒否しました (category=$cat)"
             }
 
-            $toolUse = $obj.content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -First 1
-            if (-not $toolUse) { throw "tool_use が返りませんでした: $text" }
-
-            return [pscustomobject]@{ result = $toolUse.input; model = $obj.model; raw = $text }
+            Add-Member -InputObject $obj -NotePropertyName '_raw' -NotePropertyValue $text -Force
+            return $obj
         }
         catch {
             $status = $null
@@ -183,6 +178,81 @@ function Invoke-ClaudeApi {
             Start-Sleep -Seconds ([Math]::Pow(2, $attempt))
         }
     }
+}
+
+function Invoke-ClaudeApi {
+    # ツールを1つだけ強制して呼ぶ用途 (分類など)。
+    param([Parameter(Mandatory)] [hashtable] $Payload)
+    $obj = Send-ClaudeRequest -Payload $Payload
+    $toolUse = $obj.content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -First 1
+    if (-not $toolUse) { throw "tool_use が返りませんでした: $($obj._raw)" }
+    return [pscustomobject]@{ result = $toolUse.input; model = $obj.model; raw = $obj._raw }
+}
+
+function Invoke-ClaudeAgent {
+    <#
+      .SYNOPSIS
+        ツールを実際に実行しながら複数ターン進めるエージェントループ。
+      .PARAMETER OnTool
+        ツール1件を実行する。引数: 名前, 入力。戻り値に text と isError を持つこと。
+      .PARAMETER OnProgress
+        各ツール実行の直前に呼ばれる。$false を返すとその場で中断する (割り込み用)。
+      .OUTPUTS
+        [pscustomobject] text (最後のテキスト) / turns / aborted / model
+    #>
+    param(
+        [Parameter(Mandatory)] $Policy,
+        [Parameter(Mandatory)] [string] $System,
+        [Parameter(Mandatory)] $Tools,
+        [Parameter(Mandatory)] [string] $UserText,
+        [Parameter(Mandatory)] [scriptblock] $OnTool,
+        [scriptblock] $OnProgress,
+        [int] $MaxTurns = 12
+    )
+
+    $messages = [System.Collections.ArrayList]::new()
+    [void] $messages.Add(@{ role = 'user'; content = $UserText })
+
+    for ($turn = 1; $turn -le $MaxTurns; $turn++) {
+        $payload = @{
+            model         = $Policy.llm.model
+            max_tokens    = [int] $Policy.llm.maxOutputTokens
+            system        = $System
+            tools         = [object[]] $Tools
+            messages      = [object[]] $messages.ToArray()
+            output_config = @{ effort = $(if ($Policy.llm.effort) { $Policy.llm.effort } else { 'low' }) }
+            fallbacks     = 'default'
+        }
+
+        $obj = Send-ClaudeRequest -Payload $payload
+
+        # thinking ブロックを含め、応答はそのまま履歴に戻す (同一モデルでは無改変で返す必要がある)
+        [void] $messages.Add(@{ role = 'assistant'; content = [object[]] @($obj.content) })
+
+        if ($obj.stop_reason -ne 'tool_use') {
+            $text = (@($obj.content | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text })) -join "`n"
+            return [pscustomobject]@{ text = $text; turns = $turn; aborted = $false; model = $obj.model }
+        }
+
+        $results = @()
+        foreach ($tu in @($obj.content | Where-Object { $_.type -eq 'tool_use' })) {
+            if ($OnProgress) {
+                $go = & $OnProgress $tu.name $tu.input
+                if ($go -eq $false) {
+                    return [pscustomobject]@{ text = ''; turns = $turn; aborted = $true; model = $obj.model }
+                }
+            }
+            $r = & $OnTool $tu.name $tu.input
+            $block = @{ type = 'tool_result'; tool_use_id = $tu.id; content = [string] $r.text }
+            if ($r.isError) { $block['is_error'] = $true }
+            $results += $block
+        }
+        # 並列で呼ばれたツールの結果は必ず1つの user メッセージにまとめて返す。
+        # 分割すると以後の並列呼び出しが行われなくなる。
+        [void] $messages.Add(@{ role = 'user'; content = [object[]] $results })
+    }
+
+    throw ("ツール実行が {0} ターンを超えました。処理を打ち切ります。" -f $MaxTurns)
 }
 
 function New-BasePayload {
@@ -226,18 +296,24 @@ link: $($Evt['link'])
     return Invoke-ClaudeApi -Payload (New-BasePayload $Policy (Get-TriageSystemPrompt $Policy.context) $script:TriageTool $userText)
 }
 
-function Invoke-ClaudeDraft {
+function Invoke-ClaudeWork {
     <#
       .SYNOPSIS
-        カード1枚について下書きを生成する。送信は決して行わない。
+        カード1枚の作業を実行する。ツールで実際に成果物を作らせる。
       .PARAMETER Instructions
         ユーザーがカードに書いた未読コメント (割り込み指示)。
+      .PARAMETER OnTool
+        ツールを実行する処理。呼び出し側 (ワーカー) が作業フォルダを束縛して渡す。
     #>
     param(
         [Parameter(Mandatory)] $Task,
         $Evt,
         [Parameter(Mandatory)] $Policy,
-        [string[]] $Instructions
+        [string[]] $Instructions,
+        [Parameter(Mandatory)] $Tools,
+        [Parameter(Mandatory)] [scriptblock] $OnTool,
+        [scriptblock] $OnProgress,
+        [int] $MaxTurns = 12
     )
 
     $maxBody = if ($Policy.llm.maxBodyChars) { [int] $Policy.llm.maxBodyChars } else { 4000 }
@@ -276,7 +352,8 @@ title: $(if ($Evt) { $Evt['title'] } else { '' })
 body: $body
 </thread>
 $prior$instr
-上記に対する下書きを作成してください。
+上記の対応を実施してください。必要な成果物はツールで実際に作成してください。
 "@
-    return Invoke-ClaudeApi -Payload (New-BasePayload $Policy (Get-DraftSystemPrompt $Policy.context) $script:DraftTool $userText)
+    return Invoke-ClaudeAgent -Policy $Policy -System (Get-WorkSystemPrompt $Policy.context) `
+        -Tools $Tools -UserText $userText -OnTool $OnTool -OnProgress $OnProgress -MaxTurns $MaxTurns
 }

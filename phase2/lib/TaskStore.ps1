@@ -89,6 +89,18 @@ CREATE TABLE IF NOT EXISTS task_activity (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_task ON task_activity(task_id, id);
 
+-- ワーカーが実際に作ったファイル。
+CREATE TABLE IF NOT EXISTS task_artifacts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER NOT NULL,
+  path       TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  bytes      INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, path),
+  FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+
 -- ワーカーの生存確認と現在の作業。1行だけ持つ。
 CREATE TABLE IF NOT EXISTS worker_state (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
@@ -239,9 +251,10 @@ function Get-BoardRevision {
     # ただし死活の updated_at は含めない。待機中のハートビートが 5 秒ごとに
     # 版を変え、ボード全体の再取得が延々と走ってしまうため。
     $a = @($Conn.Query("SELECT COUNT(*) AS n FROM task_activity"))[0]
+    $f = @($Conn.Query("SELECT COUNT(*) AS n FROM task_artifacts"))[0]
     $w = @($Conn.Query("SELECT COALESCE(state,'') || '/' || COALESCE(current_task_id,'') AS s FROM worker_state WHERE id=1"))
     $ws = if ($w.Count -gt 0) { $w[0]['s'] } else { '' }
-    return ("{0}-{1}-{2}-{3}-{4}" -f $r['n'], $r['m'], $c['n'], $a['n'], $ws)
+    return ("{0}-{1}-{2}-{3}-{4}-{5}" -f $r['n'], $r['m'], $c['n'], $a['n'], $f['n'], $ws)
 }
 
 # ---------------------------------------------------------------- 作業ログ / ワーカー死活
@@ -263,6 +276,27 @@ function Get-TaskActivity {
     return $Conn.Query(
         'SELECT * FROM (SELECT * FROM task_activity WHERE task_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC',
         [object[]] @($TaskId, $Limit))
+}
+
+function Add-TaskArtifact {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [string] $Path
+    )
+    $name = Split-Path -Leaf $Path
+    $len = 0
+    try { $len = (Get-Item -LiteralPath $Path).Length } catch { }
+    # 上書き生成もあるので、同じパスなら差し替える
+    [void] $Conn.NonQuery(
+        'INSERT INTO task_artifacts (task_id, path, name, bytes, created_at) VALUES (?,?,?,?,?)
+         ON CONFLICT(task_id, path) DO UPDATE SET bytes=excluded.bytes, created_at=excluded.created_at',
+        [object[]] @($TaskId, $Path, $name, $len, (Get-Now)))
+}
+
+function Get-TaskArtifacts {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    return $Conn.Query('SELECT * FROM task_artifacts WHERE task_id = ? ORDER BY id ASC', [object[]] @($TaskId))
 }
 
 # 直近で連続して失敗した回数。成功 (done) が出たらそこで打ち切る。

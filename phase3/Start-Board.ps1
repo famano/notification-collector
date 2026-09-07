@@ -99,8 +99,29 @@ function Write-StaticFile {
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
 }
 
+function Get-ArtifactCounts {
+    param($Conn)
+    $map = @{}
+    foreach ($r in $Conn.Query('SELECT task_id, COUNT(*) AS n FROM task_artifacts GROUP BY task_id')) {
+        $map[[string] $r['task_id']] = [int] $r['n']
+    }
+    return $map
+}
+
+function ConvertTo-CardObject {
+    param($Row, $Counts)
+    $o = ConvertTo-PlainObject $Row
+    $n = 0
+    $key = [string] $Row['id']
+    if ($Counts.ContainsKey($key)) { $n = $Counts[$key] }
+    Add-Member -InputObject $o -NotePropertyName 'artifact_count' -NotePropertyValue $n -Force
+    return $o
+}
+
 function Get-BoardPayload {
     param($Conn, [switch] $Archived)
+
+    $counts = Get-ArtifactCounts $Conn
 
     if ($Archived) {
         $rows = @(Get-Tasks -Conn $Conn -IncludeArchived | Where-Object { $_['archived_at'] })
@@ -108,7 +129,7 @@ function Get-BoardPayload {
             rev     = (Get-BoardRevision -Conn $Conn)
             columns = @([pscustomobject]@{
                 key   = 'archived'; label = 'アーカイブ済み'
-                tasks = @($rows | ForEach-Object { ConvertTo-PlainObject $_ })
+                tasks = @($rows | ForEach-Object { ConvertTo-CardObject $_ $counts })
             })
             worker  = (Get-WorkerPayload $Conn)
         }
@@ -116,7 +137,7 @@ function Get-BoardPayload {
 
     $all = @(Get-Tasks -Conn $Conn)
     $cols = foreach ($c in $Columns) {
-        $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-PlainObject $_ })
+        $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-CardObject $_ $counts })
         [pscustomobject]@{ key = $c.key; label = $c.label; tasks = $items }
     }
     return [pscustomobject]@{
@@ -188,6 +209,28 @@ function Invoke-Route {
                 comments = @($d.comments | ForEach-Object { ConvertTo-PlainObject $_ })
                 event    = (ConvertTo-PlainObject $d.event)
                 activity = @(Get-TaskActivity -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
+                artifacts = @(Get-TaskArtifacts -Conn $Conn -TaskId $taskId | ForEach-Object {
+                    [pscustomobject]@{ id = $_['id']; name = $_['name']; bytes = $_['bytes']; created_at = $_['created_at'] }
+                })
+            })
+            return
+        }
+
+        # 成果物の中身を返す。パスは DB 側の記録からのみ引き、
+        # クライアントから受けたパスは一切使わない。
+        if ($method -eq 'GET' -and $action -eq 'artifact') {
+            $aid = 0
+            if ($req.Url.Query -match 'id=(\d+)') { $aid = [int] $Matches[1] }
+            $row = @(Get-TaskArtifacts -Conn $Conn -TaskId $taskId | Where-Object { [int] $_['id'] -eq $aid })
+            if ($row.Count -eq 0) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+            $p = [string] $row[0]['path']
+            if (-not (Test-Path -LiteralPath $p)) {
+                Write-JsonResponse $Context @{ error = 'ファイルが見つかりません'; name = $row[0]['name'] } 404; return
+            }
+            Write-JsonResponse $Context ([pscustomobject]@{
+                name    = $row[0]['name']
+                path    = $p
+                content = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)
             })
             return
         }
