@@ -101,6 +101,35 @@ CREATE TABLE IF NOT EXISTS task_artifacts (
   FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 
+-- ツール実行の承認要求。ワーカーが止まって利用者の判断を待つ。
+CREATE TABLE IF NOT EXISTS tool_requests (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER NOT NULL,
+  tool       TEXT NOT NULL,
+  summary    TEXT NOT NULL,
+  detail     TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'pending',
+  decided_at TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+CREATE INDEX IF NOT EXISTS idx_toolreq_status ON tool_requests(status, id);
+
+-- まとめて許可。scope は 'task' か 'global'。
+CREATE TABLE IF NOT EXISTS tool_grants (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope      TEXT NOT NULL,
+  scope_id   INTEGER,
+  tool       TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(scope, scope_id, tool)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 -- ワーカーの生存確認と現在の作業。1行だけ持つ。
 CREATE TABLE IF NOT EXISTS worker_state (
   id              INTEGER PRIMARY KEY CHECK (id = 1),
@@ -252,9 +281,11 @@ function Get-BoardRevision {
     # 版を変え、ボード全体の再取得が延々と走ってしまうため。
     $a = @($Conn.Query("SELECT COUNT(*) AS n FROM task_activity"))[0]
     $f = @($Conn.Query("SELECT COUNT(*) AS n FROM task_artifacts"))[0]
+    # 承認待ちは即座に画面へ出したいので版に含める
+    $q = @($Conn.Query("SELECT COUNT(*) AS n FROM tool_requests WHERE status='pending'"))[0]
     $w = @($Conn.Query("SELECT COALESCE(state,'') || '/' || COALESCE(current_task_id,'') AS s FROM worker_state WHERE id=1"))
     $ws = if ($w.Count -gt 0) { $w[0]['s'] } else { '' }
-    return ("{0}-{1}-{2}-{3}-{4}-{5}" -f $r['n'], $r['m'], $c['n'], $a['n'], $f['n'], $ws)
+    return ("{0}-{1}-{2}-{3}-{4}-{5}-{6}" -f $r['n'], $r['m'], $c['n'], $a['n'], $f['n'], $q['n'], $ws)
 }
 
 # ---------------------------------------------------------------- 作業ログ / ワーカー死活
@@ -276,6 +307,96 @@ function Get-TaskActivity {
     return $Conn.Query(
         'SELECT * FROM (SELECT * FROM task_activity WHERE task_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC',
         [object[]] @($TaskId, $Limit))
+}
+
+# ---------------------------------------------------------------- 権限 (ツール実行の承認)
+
+function Get-Setting {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $Key, [string] $Default)
+    $r = @($Conn.Query('SELECT value FROM settings WHERE key = ?', [object[]] @($Key)))
+    if ($r.Count -eq 0) { return $Default }
+    return [string] $r[0]['value']
+}
+
+function Set-Setting {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $Key, [Parameter(Mandatory)] [string] $Value)
+    [void] $Conn.NonQuery(
+        'INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        [object[]] @($Key, $Value))
+}
+
+# YOLO: すべてのツール実行を承認なしで通す
+function Test-YoloMode {
+    param([Parameter(Mandatory)] $Conn)
+    return ((Get-Setting -Conn $Conn -Key 'yolo' -Default '0') -eq '1')
+}
+
+function Test-ToolGranted {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [Parameter(Mandatory)] [string] $Tool)
+    $r = @($Conn.Query(
+        "SELECT 1 AS x FROM tool_grants
+          WHERE tool = ? AND (scope = 'global' OR (scope = 'task' AND scope_id = ?)) LIMIT 1",
+        [object[]] @($Tool, $TaskId)))
+    return ($r.Count -gt 0)
+}
+
+function Add-ToolGrant {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [ValidateSet('task', 'global')] [string] $Scope,
+        $ScopeId,
+        [Parameter(Mandatory)] [string] $Tool
+    )
+    [void] $Conn.NonQuery(
+        'INSERT OR IGNORE INTO tool_grants (scope, scope_id, tool, created_at) VALUES (?,?,?,?)',
+        [object[]] @($Scope, $ScopeId, $Tool, (Get-Now)))
+}
+
+function Get-ToolGrants {
+    param([Parameter(Mandatory)] $Conn)
+    return $Conn.Query('SELECT * FROM tool_grants ORDER BY id ASC')
+}
+
+function Remove-ToolGrant {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $GrantId)
+    return ($Conn.NonQuery('DELETE FROM tool_grants WHERE id = ?', [object[]] @($GrantId)) -gt 0)
+}
+
+function New-ToolRequest {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [string] $Tool,
+        [Parameter(Mandatory)] [string] $Summary,
+        [Parameter(Mandatory)] [string] $Detail
+    )
+    [void] $Conn.NonQuery(
+        'INSERT INTO tool_requests (task_id, tool, summary, detail, status, created_at) VALUES (?,?,?,?,?,?)',
+        [object[]] @($TaskId, $Tool, $Summary, $Detail, 'pending', (Get-Now)))
+    return $Conn.LastRowId
+}
+
+function Get-ToolRequest {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $RequestId)
+    $r = @($Conn.Query('SELECT * FROM tool_requests WHERE id = ?', [object[]] @($RequestId)))
+    if ($r.Count -eq 0) { return $null }
+    return $r[0]
+}
+
+function Get-PendingToolRequests {
+    param([Parameter(Mandatory)] $Conn)
+    return $Conn.Query("SELECT * FROM tool_requests WHERE status = 'pending' ORDER BY id ASC")
+}
+
+function Set-ToolRequestStatus {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $RequestId,
+        [Parameter(Mandatory)] [ValidateSet('approved', 'denied', 'expired')] [string] $Status
+    )
+    return ($Conn.NonQuery(
+        "UPDATE tool_requests SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
+        [object[]] @($Status, (Get-Now), $RequestId)) -gt 0)
 }
 
 function Add-TaskArtifact {

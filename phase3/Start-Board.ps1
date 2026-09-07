@@ -172,12 +172,67 @@ function Invoke-Route {
     $path   = $req.Url.AbsolutePath
     $method = $req.HttpMethod
 
+    # 承認待ち一覧と、いま効いている「まとめて許可」
+    if ($path -eq '/api/approvals' -and $method -eq 'GET') {
+        Write-JsonResponse $Context ([pscustomobject]@{
+            pending = @(Get-PendingToolRequests -Conn $Conn | ForEach-Object {
+                [pscustomobject]@{
+                    id = $_['id']; task_id = $_['task_id']; tool = $_['tool']
+                    summary = $_['summary']; detail = $_['detail']; created_at = $_['created_at']
+                }
+            })
+            grants = @(Get-ToolGrants -Conn $Conn | ForEach-Object {
+                [pscustomobject]@{ id = $_['id']; scope = $_['scope']; scope_id = $_['scope_id']; tool = $_['tool'] }
+            })
+            yolo = (Test-YoloMode -Conn $Conn)
+        })
+        return
+    }
+
+    if ($path -match '^/api/approvals/(\d+)/decide$' -and $method -eq 'POST') {
+        $reqId = [int] $Matches[1]
+        $b = Read-JsonBody $Context
+        $decision = if ($b -and $b.decision -eq 'approved') { 'approved' } else { 'denied' }
+
+        $r = Get-ToolRequest -Conn $Conn -RequestId $reqId
+        if (-not $r) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+
+        # 「まとめて許可」は許可のときだけ作る
+        if ($decision -eq 'approved' -and $b -and $b.grant) {
+            if ($b.grant -eq 'task')   { Add-ToolGrant -Conn $Conn -Scope 'task' -ScopeId ([int] $r['task_id']) -Tool ([string] $r['tool']) }
+            if ($b.grant -eq 'global') { Add-ToolGrant -Conn $Conn -Scope 'global' -ScopeId $null -Tool ([string] $r['tool']) }
+        }
+        $ok = Set-ToolRequestStatus -Conn $Conn -RequestId $reqId -Status $decision
+        if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'すでに処理済みです' } 409; return }
+
+        $msg = if ($decision -eq 'approved') { '利用者が実行を許可しました' } else { '利用者が実行を拒否しました' }
+        Add-TaskActivity -Conn $Conn -TaskId ([int] $r['task_id']) -Kind 'user' -Message $msg
+        Write-JsonResponse $Context @{ ok = $true; decision = $decision }
+        return
+    }
+
+    if ($path -match '^/api/grants/(\d+)$' -and $method -eq 'DELETE') {
+        [void] (Remove-ToolGrant -Conn $Conn -GrantId ([int] $Matches[1]))
+        Write-JsonResponse $Context @{ ok = $true }
+        return
+    }
+
+    if ($path -eq '/api/settings/yolo' -and $method -eq 'POST') {
+        $b = Read-JsonBody $Context
+        $on = if ($b -and $b.on) { '1' } else { '0' }
+        Set-Setting -Conn $Conn -Key 'yolo' -Value $on
+        Write-JsonResponse $Context @{ ok = $true; yolo = ($on -eq '1') }
+        return
+    }
+
     if ($path -eq '/api/rev' -and $method -eq 'GET') {
         # ワーカーの死活もここで返す。版はハートビートで変わらないので、
         # これが無いと「止まったこと」が画面に伝わらない。
         Write-JsonResponse $Context ([pscustomobject]@{
-            rev    = (Get-BoardRevision -Conn $Conn)
-            worker = (Get-WorkerPayload $Conn)
+            rev     = (Get-BoardRevision -Conn $Conn)
+            worker  = (Get-WorkerPayload $Conn)
+            # 承認待ちは待たせるほど作業が止まるので、毎回のポーリングで返す
+            pending = @(Get-PendingToolRequests -Conn $Conn).Count
         })
         return
     }

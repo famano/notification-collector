@@ -77,6 +77,105 @@ $script:InjectionGuard
 "@
 }
 
+$script:VerifyTool = @{
+    name        = 'record_verification'
+    description = '成果物の検証結果を記録する。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            verdict   = @{ type = 'string'; enum = @('ok', 'needs_fix') }
+            completed = @{ type = 'boolean'; description = '依頼された内容が最後まで完了しているか' }
+            summary   = @{ type = 'string'; description = '検証結果の1〜2文の要約。' }
+            issues    = @{
+                type  = 'array'
+                items = @{
+                    type       = 'object'
+                    properties = [ordered]@{
+                        severity = @{ type = 'string'; enum = @('high', 'low') }
+                        where    = @{ type = 'string'; description = '問題のある場所 (ファイル名や箇所)' }
+                        problem  = @{ type = 'string'; description = '何が問題か' }
+                        fix      = @{ type = 'string'; description = 'どう直すべきか' }
+                    }
+                    required = @('severity', 'where', 'problem', 'fix')
+                }
+            }
+        }
+        required = @('verdict', 'completed', 'summary', 'issues')
+    }
+}
+
+function Get-VerifySystemPrompt {
+    param($Context)
+    return @"
+あなたは成果物を検証する担当者です。作成したのは別の担当者で、あなたはその前提を引き継ぎません。
+依頼と成果物だけを見て、record_verification ツールで結果を返してください。
+
+$(Get-ContextBlock $Context)
+必ず確認すること:
+- **依頼が満たされているか。** 頼まれた成果物が実際に存在し、内容が依頼に対応しているか。
+- **途中で終わっていないか。** 文が途中で切れている、箇条書きが尻切れ、
+  「（以下略）」「TODO」「ここに記載」のような未完成の痕跡が残っていないか。
+- **埋めるべき箇所が空のまま放置されていないか。** 宛先・日付・数値などの空欄は、
+  「不明なので人間が埋める」と説明されていれば問題ない。説明なく空なら問題とする。
+- **依頼にない事実を作っていないか。** 元の情報から導けない固有名詞・日付・金額など。
+- **矛盾。** 報告と実際のファイルの内容が食い違っていないか。
+
+判断の基準:
+- 直すべき実質的な問題があれば verdict='needs_fix'、severity='high' を付ける。
+- 好みの問題や些細な表現は severity='low' とし、それだけなら verdict='ok' でよい。
+- 問題が無ければ issues は空配列にする。細かい粗探しはしない。
+
+$script:InjectionGuard
+"@
+}
+
+function Invoke-ClaudeVerify {
+    <#
+      .SYNOPSIS
+        成果物を、作成時とは別の会話で検証する。
+      .PARAMETER Artifacts
+        @{ name; content } の配列。
+    #>
+    param(
+        [Parameter(Mandatory)] $Task,
+        [Parameter(Mandatory)] $Policy,
+        $Artifacts,
+        [string] $Report,
+        [string[]] $Instructions
+    )
+
+    $files = ''
+    foreach ($a in @($Artifacts)) {
+        $c = [string] $a.content
+        if ($c.Length -gt 6000) { $c = $c.Substring(0, 6000) + "`n…(以下省略。省略部分は判断材料にしないこと)" }
+        $files += "`n=== ファイル: $($a.name) ===`n$c`n"
+    }
+    if (-not $files) { $files = '(ファイルは作成されていません)' }
+
+    $instr = ''
+    if ($Instructions -and $Instructions.Count -gt 0) {
+        $instr = "`n利用者からの追加指示:`n" + (($Instructions | ForEach-Object { "- $_" }) -join "`n") + "`n"
+    }
+
+    $userText = @"
+<thread>
+依頼: $($Task['title'])
+詳細: $($Task['summary'])
+$instr
+</thread>
+
+担当者の報告:
+$Report
+
+作成された成果物:
+$files
+
+この成果物を検証してください。
+"@
+
+    return Invoke-ClaudeApi -Payload (New-BasePayload $Policy (Get-VerifySystemPrompt $Policy.context) $script:VerifyTool $userText)
+}
+
 function Get-WorkSystemPrompt {
     param($Context)
     return @"
@@ -313,7 +412,9 @@ function Invoke-ClaudeWork {
         [Parameter(Mandatory)] $Tools,
         [Parameter(Mandatory)] [scriptblock] $OnTool,
         [scriptblock] $OnProgress,
-        [int] $MaxTurns = 12
+        [int] $MaxTurns = 12,
+        # 検証で指摘された問題。直しの回で渡す。
+        $RepairIssues
     )
 
     $maxBody = if ($Policy.llm.maxBodyChars) { [int] $Policy.llm.maxBodyChars } else { 4000 }
@@ -354,6 +455,19 @@ body: $body
 $prior$instr
 上記の対応を実施してください。必要な成果物はツールで実際に作成してください。
 "@
+
+    if ($RepairIssues -and @($RepairIssues).Count -gt 0) {
+        $list = ''
+        foreach ($i in @($RepairIssues)) { $list += "- [$($i.severity)] $($i.where): $($i.problem) → $($i.fix)`n" }
+        $userText += @"
+
+なお、前回の作業に対する検証で以下の問題が指摘されています。
+list_files と read_file で現状を確認したうえで、**これらを直してください**。
+問題のないファイルは作り直さなくて構いません。
+
+$list
+"@
+    }
     return Invoke-ClaudeAgent -Policy $Policy -System (Get-WorkSystemPrompt $Policy.context) `
         -Tools $Tools -UserText $userText -OnTool $OnTool -OnProgress $OnProgress -MaxTurns $MaxTurns
 }
