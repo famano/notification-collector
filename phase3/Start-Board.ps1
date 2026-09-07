@@ -100,13 +100,46 @@ function Write-StaticFile {
 }
 
 function Get-BoardPayload {
-    param($Conn)
+    param($Conn, [switch] $Archived)
+
+    if ($Archived) {
+        $rows = @(Get-Tasks -Conn $Conn -IncludeArchived | Where-Object { $_['archived_at'] })
+        return [pscustomobject]@{
+            rev     = (Get-BoardRevision -Conn $Conn)
+            columns = @([pscustomobject]@{
+                key   = 'archived'; label = 'アーカイブ済み'
+                tasks = @($rows | ForEach-Object { ConvertTo-PlainObject $_ })
+            })
+            worker  = (Get-WorkerPayload $Conn)
+        }
+    }
+
     $all = @(Get-Tasks -Conn $Conn)
     $cols = foreach ($c in $Columns) {
         $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-PlainObject $_ })
         [pscustomobject]@{ key = $c.key; label = $c.label; tasks = $items }
     }
-    return [pscustomobject]@{ rev = (Get-BoardRevision -Conn $Conn); columns = @($cols) }
+    return [pscustomobject]@{
+        rev     = (Get-BoardRevision -Conn $Conn)
+        columns = @($cols)
+        worker  = (Get-WorkerPayload $Conn)
+    }
+}
+
+function Get-WorkerPayload {
+    param($Conn)
+    $w = Get-WorkerState -Conn $Conn
+    if (-not $w) {
+        return [pscustomobject]@{ state = 'unknown'; message = 'ワーカーは一度も起動していません'; currentTaskId = $null; staleSeconds = $null }
+    }
+    $age = $null
+    try { $age = [int] ((Get-Date) - [DateTime] $w['updated_at']).TotalSeconds } catch { }
+    return [pscustomobject]@{
+        state         = $w['state']
+        message       = $w['message']
+        currentTaskId = $w['current_task_id']
+        staleSeconds  = $age
+    }
 }
 
 # ---------------------------------------------------------------- routing
@@ -124,7 +157,8 @@ function Invoke-Route {
     }
 
     if ($path -eq '/api/board' -and $method -eq 'GET') {
-        Write-JsonResponse $Context (Get-BoardPayload $Conn)
+        $arch = ($req.Url.Query -match 'archived=1')
+        Write-JsonResponse $Context (Get-BoardPayload $Conn -Archived:$arch)
         return
     }
 
@@ -148,7 +182,15 @@ function Invoke-Route {
                 task     = (ConvertTo-PlainObject $d.task)
                 comments = @($d.comments | ForEach-Object { ConvertTo-PlainObject $_ })
                 event    = (ConvertTo-PlainObject $d.event)
+                activity = @(Get-TaskActivity -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
             })
+            return
+        }
+
+        if ($method -eq 'DELETE' -and -not $action) {
+            $ok = Remove-Task -Conn $Conn -TaskId $taskId
+            if (-not $ok) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+            Write-JsonResponse $Context @{ ok = $true }
             return
         }
 
@@ -177,7 +219,14 @@ function Invoke-Route {
             }
             'cancel' {
                 [void] (Set-TaskCancel -Conn $Conn -TaskId $taskId -Requested $true)
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '利用者が中止を要求しました'
                 Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            'archive' {
+                $on = if ($b -and $null -ne $b.archived) { [bool] $b.archived } else { $true }
+                [void] (Set-TaskArchived -Conn $Conn -TaskId $taskId -Archived $on)
+                Write-JsonResponse $Context @{ ok = $true; archived = $on }
                 return
             }
             default {

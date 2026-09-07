@@ -7,14 +7,14 @@
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #dfe3e8; --text: #1c1f23;
-    --muted: #6b7280; --accent: #2563eb; --danger: #b91c1c;
-    --high: #dc2626; --normal: #2563eb; --low: #6b7280;
+    --muted: #6b7280; --accent: #2563eb; --danger: #b91c1c; --ok: #15803d;
+    --high: #dc2626; --normal: #2563eb; --low: #6b7280; --soft: #eef1f5;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14171a; --panel: #1d2126; --border: #2f353c; --text: #e6e8ea;
-      --muted: #9aa3ad; --accent: #60a5fa; --danger: #f87171;
-      --high: #f87171; --normal: #60a5fa; --low: #9aa3ad;
+      --muted: #9aa3ad; --accent: #60a5fa; --danger: #f87171; --ok: #4ade80;
+      --high: #f87171; --normal: #60a5fa; --low: #9aa3ad; --soft: #23282e;
     }
   }
   * { box-sizing: border-box; }
@@ -23,59 +23,84 @@
     font: 13px/1.6 "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
   }
   header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 9px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
     position: sticky; top: 0; z-index: 5;
   }
   header h1 { font-size: 15px; margin: 0; font-weight: 600; }
-  header .spacer { flex: 1; }
+  .spacer { flex: 1; }
   button {
     font: inherit; padding: 5px 12px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer;
   }
-  button:hover { border-color: var(--accent); }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { color: var(--danger); }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+
+  /* ワーカーの現在状態 */
+  #worker {
+    display: flex; align-items: center; gap: 8px; padding: 4px 10px;
+    border: 1px solid var(--border); border-radius: 20px; background: var(--soft); max-width: 46vw;
+  }
+  #worker .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  #worker.working .dot { background: var(--ok); animation: pulse 1.2s ease-in-out infinite; }
+  #worker.idle .dot { background: var(--accent); }
+  #worker.error .dot { background: var(--danger); }
+  #worker .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
   #board { display: flex; gap: 12px; padding: 16px; align-items: flex-start; overflow-x: auto; }
   .col {
-    flex: 0 0 260px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 90px);
+    flex: 0 0 268px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 96px);
   }
   .col > h2 {
     font-size: 12px; margin: 0; padding: 9px 12px; border-bottom: 1px solid var(--border);
-    color: var(--muted); font-weight: 600; letter-spacing: .04em;
+    color: var(--muted); font-weight: 600;
   }
+  .col .hint { font-weight: 400; font-size: 11px; display: block; opacity: .8; }
   .col .list { padding: 8px; overflow-y: auto; min-height: 60px; flex: 1; }
   .col.over { outline: 2px solid var(--accent); outline-offset: -2px; }
+
   .card {
     background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
-    padding: 8px 10px; margin-bottom: 8px; cursor: grab;
+    padding: 8px 10px; margin-bottom: 8px; cursor: grab; position: relative;
   }
   .card:hover { border-color: var(--accent); }
+  .card.active { border-color: var(--ok); box-shadow: 0 0 0 1px var(--ok) inset; }
   .card .t { font-weight: 600; margin-bottom: 3px; word-break: break-word; }
   .card .s { color: var(--muted); font-size: 12px; word-break: break-word;
              display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-  .card .meta { margin-top: 6px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .tag { font-size: 11px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .card .meta { margin-top: 6px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .card .now {
+    margin-top: 6px; font-size: 11px; color: var(--ok);
+    display: flex; gap: 6px; align-items: center;
+  }
+
+  .tag {
+    font-size: 11px; padding: 1px 7px; border-radius: 10px;
+    border: 1px solid var(--border); color: var(--muted); background: var(--panel); cursor: help;
+  }
   .tag.high { color: var(--high); border-color: var(--high); }
   .tag.normal { color: var(--normal); border-color: var(--normal); }
   .tag.low { color: var(--low); }
-  .tag.cancel { color: var(--danger); border-color: var(--danger); }
+  .tag.warn { color: var(--danger); border-color: var(--danger); }
+
   #drawer {
-    position: fixed; top: 0; right: 0; width: min(460px, 92vw); height: 100%;
+    position: fixed; top: 0; right: 0; width: min(480px, 94vw); height: 100%;
     background: var(--panel); border-left: 1px solid var(--border);
-    padding: 16px; overflow-y: auto; z-index: 10;
-    box-shadow: -8px 0 24px rgba(0,0,0,.12);
+    padding: 16px; overflow-y: auto; z-index: 10; box-shadow: -8px 0 24px rgba(0,0,0,.12);
   }
   #drawer h3 { margin: 0 0 4px; font-size: 15px; word-break: break-word; }
-  #drawer .sec { margin-top: 16px; }
-  #drawer .sec > label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; letter-spacing: .04em; }
-  #drawer pre {
+  .sec { margin-top: 16px; }
+  .sec > label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  pre {
     white-space: pre-wrap; word-break: break-word; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 0; font: inherit;
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 0 0 6px; font: inherit;
   }
   textarea {
-    width: 100%; min-height: 90px; font: inherit; padding: 8px; border-radius: 6px;
+    width: 100%; min-height: 110px; font: inherit; padding: 8px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text); resize: vertical;
   }
   input[type=text] {
@@ -84,11 +109,35 @@
   }
   .cmt { border-left: 2px solid var(--border); padding: 2px 0 2px 8px; margin-bottom: 8px; }
   .cmt .who { font-size: 11px; color: var(--muted); }
+
+  /* 作業ログ */
+  .act { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; align-items: baseline; }
+  .act .ts { color: var(--muted); font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+  .act .k { flex: none; width: 5.5em; color: var(--muted); font-size: 11px; }
+  .act.done .k { color: var(--ok); }
+  .act.error .k, .act.cancelled .k { color: var(--danger); }
+
   #toast {
     position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
-    background: var(--danger); color: #fff; padding: 8px 16px; border-radius: 6px; z-index: 20;
+    color: #fff; padding: 8px 16px; border-radius: 6px; z-index: 30; background: var(--muted);
   }
-  .row { display: flex; gap: 8px; align-items: center; }
+  #toast.ok { background: var(--ok); }
+  #toast.err { background: var(--danger); }
+
+  #help {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #help .box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; max-width: 620px; width: 100%; max-height: 85vh; overflow-y: auto;
+  }
+  #help h4 { margin: 16px 0 6px; font-size: 13px; }
+  #help h4:first-of-type { margin-top: 8px; }
+  #help table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  #help td { padding: 3px 8px 3px 0; vertical-align: top; }
+  #help td:first-child { white-space: nowrap; color: var(--muted); width: 9em; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -96,16 +145,18 @@
 
 <header>
   <h1>通知カンバン</h1>
+  <div id="worker" title="ワーカーの状態"><span class="dot"></span><span class="txt">—</span></div>
   <span class="spacer"></span>
-  <span id="status" class="tag">—</span>
+  <span id="status" class="tag" title="最後にボードを読み込んだ時刻">—</span>
+  <button id="archBtn" title="アーカイブしたカードを表示">アーカイブ</button>
   <button id="newBtn">+ カード</button>
-  <button id="reloadBtn">再読込</button>
+  <button id="helpBtn" title="表示の意味">?</button>
 </header>
 
 <div id="board"></div>
-
 <div id="drawer" hidden></div>
 <div id="toast" hidden></div>
+<div id="help" hidden></div>
 
 <script>
 (function () {
@@ -115,18 +166,50 @@
   var drawer = document.getElementById('drawer');
   var statusEl = document.getElementById('status');
   var toastEl = document.getElementById('toast');
+  var workerEl = document.getElementById('worker');
+  var helpEl = document.getElementById('help');
   var toastTimer = null;
 
   var lastRev = null;
-  var dragging = false;   // ドラッグ中はポーリング再描画を止める
+  var dragging = false;
   var openTaskId = null;
-  var dirty = false;      // 編集途中の内容を再描画で消さないためのフラグ
+  var dirty = false;
+  var showArchived = false;
+  var workerTaskId = null;
 
-  function toast(msg) {
+  // 表示用の日本語ラベル。生の enum をそのまま出すと意味が伝わらない。
+  var URGENCY = { high: '高', normal: '中', low: '低' };
+  var CATEGORY = {
+    reply_required: '返信が必要', task: '作業', fyi: '参考情報',
+    spam: '不要', system: 'システム', user: '自分で作成'
+  };
+  var COLUMN = {
+    inbox: '未分類', todo: '要対応', doing: '実行中',
+    review: 'レビュー待ち', done: '完了', dismissed: '対応不要', archived: 'アーカイブ済み'
+  };
+  var COLUMN_HINT = {
+    inbox: '判定がまだ',
+    todo: 'ワーカーが次に着手する',
+    doing: 'ワーカーが作業中',
+    review: '下書きができた。確認してください',
+    done: '対応済み',
+    dismissed: '対応不要と判断'
+  };
+  var ACT_KIND = {
+    start: '開始', step: '経過', llm: '生成中', done: '完了',
+    error: 'エラー', cancelled: '中止', user: '操作'
+  };
+  var WORKER_STATE = {
+    working: '作業中', idle: '待機中', stopped: '停止中',
+    error: 'エラー', unknown: '未起動'
+  };
+
+  function toast(msg, kind) {
     toastEl.textContent = msg;
+    toastEl.className = kind || '';
     toastEl.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 3000);
+    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 3200);
   }
 
   function api(path, method, body) {
@@ -144,55 +227,117 @@
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
-    // 通知本文は第三者が書いた文字列なので、必ず textContent で入れる。
+    // 通知本文は第三者が書いた文字列。必ず textContent で入れる。
     // innerHTML を使うと Slack のメッセージから DOM を注入できてしまう。
     if (text != null) e.textContent = text;
     return e;
   }
 
+  function tag(label, value, cls, tip) {
+    var t = el('span', 'tag' + (cls ? ' ' + cls : ''), label ? label + ' ' + value : value);
+    if (tip) t.title = tip;
+    return t;
+  }
+
+  // 押した瞬間に見た目が変わり、結果がトーストで返るボタン
+  function actionButton(text, cls, busyText, fn) {
+    var b = el('button', cls, text);
+    b.onclick = function () {
+      b.disabled = true;
+      var old = b.textContent;
+      b.textContent = busyText;
+      Promise.resolve(fn())
+        .catch(function (e) { toast('失敗しました: ' + e, 'err'); })
+        .then(function () { b.disabled = false; b.textContent = old; });
+    };
+    return b;
+  }
+
+  // ---------------------------------------------------------------- ワーカー表示
+
+  function renderWorker(w) {
+    workerTaskId = w && w.currentTaskId ? Number(w.currentTaskId) : null;
+    var state = (w && w.state) || 'unknown';
+    // 作業中を名乗っていても更新が止まっていれば応答なしとみなす
+    if (state === 'working' && w.staleSeconds != null && w.staleSeconds > 90) {
+      state = 'error';
+      workerTaskId = null;
+    }
+    workerEl.className = state;
+    var label = WORKER_STATE[state] || state;
+    var msg = (w && w.message) ? w.message : '';
+    // 状態名と同じ文言なら重ねて出さない（「待機中： 待機中」になるため）
+    var txt = label + (msg && msg !== label ? '： ' + msg : '');
+    if (state === 'working' && workerTaskId) txt += '（#' + workerTaskId + '）';
+    workerEl.querySelector('.txt').textContent = 'ワーカー ' + txt;
+    workerEl.title = state === 'unknown'
+      ? 'ワーカーが未起動です。phase4\\Start-Worker.ps1 を実行すると要対応カードの下書きを作ります。'
+      : 'ワーカー: ' + label + (msg ? '\n' + msg : '');
+  }
+
+  // ---------------------------------------------------------------- ボード
+
   function renderBoard(data) {
     board.innerHTML = '';
+    renderWorker(data.worker);
     data.columns.forEach(function (col) {
       var c = el('div', 'col');
       c.dataset.key = col.key;
-      c.appendChild(el('h2', null, col.label + ' (' + col.tasks.length + ')'));
+      var h = el('h2', null, (COLUMN[col.key] || col.label) + '（' + col.tasks.length + '）');
+      if (COLUMN_HINT[col.key]) h.appendChild(el('span', 'hint', COLUMN_HINT[col.key]));
+      c.appendChild(h);
+
       var list = el('div', 'list');
       col.tasks.forEach(function (t) { list.appendChild(renderCard(t, col.key)); });
       c.appendChild(list);
 
-      c.addEventListener('dragover', function (ev) { ev.preventDefault(); c.classList.add('over'); });
-      c.addEventListener('dragleave', function () { c.classList.remove('over'); });
-      c.addEventListener('drop', function (ev) {
-        ev.preventDefault();
-        c.classList.remove('over');
-        var raw = ev.dataTransfer.getData('text/plain');
-        if (!raw) return;
-        var d = JSON.parse(raw);
-        if (d.from === col.key) return;
-        move(d.id, d.version, d.from, col.key);
-      });
+      if (col.key !== 'archived') {
+        c.addEventListener('dragover', function (ev) { ev.preventDefault(); c.classList.add('over'); });
+        c.addEventListener('dragleave', function () { c.classList.remove('over'); });
+        c.addEventListener('drop', function (ev) {
+          ev.preventDefault();
+          c.classList.remove('over');
+          var raw = ev.dataTransfer.getData('text/plain');
+          if (!raw) return;
+          var d = JSON.parse(raw);
+          if (d.from === col.key) return;
+          move(d.id, d.version, d.from, col.key);
+        });
+      }
       board.appendChild(c);
     });
   }
 
   function renderCard(t, colKey) {
     var card = el('div', 'card');
-    card.draggable = true;
+    card.draggable = (colKey !== 'archived');
+    if (Number(t.id) === workerTaskId) card.classList.add('active');
+
     card.appendChild(el('div', 't', t.title));
     if (t.summary) card.appendChild(el('div', 's', t.summary));
 
     var meta = el('div', 'meta');
-    if (t.urgency) meta.appendChild(el('span', 'tag ' + t.urgency, t.urgency));
-    if (t.category) meta.appendChild(el('span', 'tag', t.category));
-    if (t.cancel_requested) meta.appendChild(el('span', 'tag cancel', '中止要求'));
-    meta.appendChild(el('span', 'tag', '#' + t.id));
+    meta.appendChild(tag('ID', t.id, null, 'カード番号'));
+    if (t.urgency) {
+      meta.appendChild(tag('緊急度', URGENCY[t.urgency] || t.urgency, t.urgency, '対応の急ぎ度合い'));
+    }
+    if (t.category) {
+      meta.appendChild(tag('種別', CATEGORY[t.category] || t.category, null, '通知の分類'));
+    }
+    if (t.cancel_requested) {
+      meta.appendChild(tag('', '中止を要求済み', 'warn', 'ワーカーは次の区切りで作業をやめます'));
+    }
     card.appendChild(meta);
+
+    if (Number(t.id) === workerTaskId) {
+      var now = el('div', 'now');
+      now.appendChild(el('span', null, '● ワーカーが作業中'));
+      card.appendChild(now);
+    }
 
     card.addEventListener('dragstart', function (ev) {
       dragging = true;
-      ev.dataTransfer.setData('text/plain', JSON.stringify({
-        id: t.id, version: t.version, from: colKey
-      }));
+      ev.dataTransfer.setData('text/plain', JSON.stringify({ id: t.id, version: t.version, from: colKey }));
     });
     card.addEventListener('dragend', function () { dragging = false; });
     card.addEventListener('click', function () { openDetail(t.id); });
@@ -200,24 +345,26 @@
   }
 
   function move(id, version, from, to) {
-    api('/api/tasks/' + id + '/move', 'POST', { column: to, version: version, from: from })
+    return api('/api/tasks/' + id + '/move', 'POST', { column: to, version: version, from: from })
       .then(function (r) {
         if (r.status === 409) {
-          toast('他で更新されています。最新を読み直しました。');
+          toast('他で更新されていたため移動しませんでした。最新を読み直します。', 'err');
+        } else if (from === 'doing' && to !== 'doing') {
+          toast('「' + (COLUMN[to] || to) + '」へ移動し、ワーカーに中止を要求しました', 'ok');
+        } else {
+          toast('「' + (COLUMN[to] || to) + '」へ移動しました', 'ok');
         }
-        refresh(true);
+        return refresh(true);
       });
   }
 
-  // ドロワー内に入力中のものがあるか。ポーリングでの再描画がユーザーの
-  // 打鍵を消してしまうため、フォーカスがドロワー内にある間は作り直さない。
   function drawerBusy() {
     var a = document.activeElement;
     return dirty || (a && drawer.contains(a) && !drawer.hidden);
   }
 
   function refresh(force) {
-    return api('/api/board').then(function (r) {
+    return api('/api/board' + (showArchived ? '?archived=1' : '')).then(function (r) {
       lastRev = r.body.rev;
       renderBoard(r.body);
       statusEl.textContent = new Date().toLocaleTimeString();
@@ -225,24 +372,34 @@
     });
   }
 
-  // 変更検出は安い /api/rev で行い、変わったときだけボードを取り直す。
   function poll() {
     if (dragging) return;
     api('/api/rev').then(function (r) {
       if (r.body.rev && r.body.rev !== lastRev) refresh(false);
-    }).catch(function () {
-      statusEl.textContent = '接続なし';
-    });
+    }).catch(function () { statusEl.textContent = '接続なし'; });
   }
 
+  // ---------------------------------------------------------------- 詳細
+
+  function section(label, node) {
+    var s = el('div', 'sec');
+    s.appendChild(el('label', null, label));
+    s.appendChild(node);
+    return s;
+  }
+  function pre(text) { return el('pre', null, text); }
+  function hhmm(iso) { return (iso || '').replace('T', ' ').slice(0, 19); }
+
   function openDetail(id, keepScroll) {
-    api('/api/tasks/' + id).then(function (r) {
+    return api('/api/tasks/' + id).then(function (r) {
       if (r.status !== 200) return;
       openTaskId = id;
-      var t = r.body.task, ev = r.body.event, comments = r.body.comments || [];
+      var t = r.body.task, ev = r.body.event;
+      var comments = r.body.comments || [], activity = r.body.activity || [];
       var scroll = keepScroll ? drawer.scrollTop : 0;
 
       drawer.innerHTML = '';
+
       var head = el('div', 'row');
       head.appendChild(el('h3', null, t.title));
       var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
@@ -252,81 +409,97 @@
       drawer.appendChild(head);
 
       var sub = el('div', 'meta');
-      sub.appendChild(el('span', 'tag', '#' + t.id));
-      sub.appendChild(el('span', 'tag', t.board_column));
-      if (t.urgency) sub.appendChild(el('span', 'tag ' + t.urgency, t.urgency));
-      sub.appendChild(el('span', 'tag', 'v' + t.version));
-      if (t.cancel_requested) sub.appendChild(el('span', 'tag cancel', '中止要求'));
+      sub.appendChild(tag('ID', t.id, null, 'カード番号'));
+      sub.appendChild(tag('列', COLUMN[t.board_column] || t.board_column, null, 'いまカンバンのどこにあるか'));
+      if (t.urgency) sub.appendChild(tag('緊急度', URGENCY[t.urgency] || t.urgency, t.urgency, '対応の急ぎ度合い'));
+      if (t.category) sub.appendChild(tag('種別', CATEGORY[t.category] || t.category, null, '通知の分類'));
+      sub.appendChild(tag('版', t.version, null, '更新のたびに増える番号。同時編集の衝突検出に使う'));
+      if (t.cancel_requested) sub.appendChild(tag('', '中止を要求済み', 'warn', 'ワーカーは次の区切りで作業をやめます'));
+      if (t.archived_at) sub.appendChild(tag('', 'アーカイブ済み', 'warn', 'ボードから隠れています'));
       drawer.appendChild(sub);
 
       if (t.summary) drawer.appendChild(section('要約', pre(t.summary)));
-      if (t.reason) drawer.appendChild(section('判定理由', pre(t.reason)));
+      if (t.reason) drawer.appendChild(section('この判定にした理由', pre(t.reason)));
 
       if (t.proposed_actions) {
         var acts = [];
         try { acts = JSON.parse(t.proposed_actions) || []; } catch (e) { acts = []; }
         if (acts.length) {
-          var ul = el('div');
-          acts.forEach(function (a) { ul.appendChild(pre(a.type + ': ' + a.detail)); });
-          drawer.appendChild(section('提案されたアクション', ul));
+          var box = el('div');
+          acts.forEach(function (a) { box.appendChild(pre(a.type + ': ' + a.detail)); });
+          drawer.appendChild(section('想定される対応', box));
         }
       }
 
-      if (ev) {
-        var box = el('div');
-        box.appendChild(pre((ev.app_id || '') + '\n' + (ev.occurred_at || '')));
-        if (ev.body) box.appendChild(pre(ev.body));
-        if (ev.link) {
-          var a = el('div', null, ev.link);   // リンクは踏ませない。文字列として出すだけ。
-          a.style.color = 'var(--muted)';
-          a.style.wordBreak = 'break-all';
-          box.appendChild(a);
-        }
-        drawer.appendChild(section('元の通知', box));
+      // ワーカーの作業ログ — 「いま何をしているか / 何をしたか」
+      var actBox = el('div');
+      if (activity.length === 0) {
+        actBox.appendChild(el('div', 'act', 'まだ作業は行われていません'));
+      } else {
+        activity.slice().reverse().forEach(function (a) {
+          var row = el('div', 'act ' + a.kind);
+          row.appendChild(el('span', 'ts', hhmm(a.created_at).slice(11)));
+          row.appendChild(el('span', 'k', ACT_KIND[a.kind] || a.kind));
+          row.appendChild(el('span', null, a.message));
+          actBox.appendChild(row);
+        });
       }
+      drawer.appendChild(section('ワーカーの作業ログ（新しい順）', actBox));
 
-      if (t.agent_output) drawer.appendChild(section('エージェントの生成物', pre(t.agent_output)));
+      if (t.agent_output) drawer.appendChild(section('ワーカーが作った下書き', pre(t.agent_output)));
 
-      // ユーザーの編集はエージェントの生成物とは別カラムに保存される
       var ta = document.createElement('textarea');
       ta.value = t.user_edited || '';
+      ta.placeholder = '下書きを直したり、自分で書いたりする欄です。ワーカーが再生成してもここは消えません。';
       ta.oninput = function () { dirty = true; };
-      var saveBtn = el('button', 'primary', '保存');
-      saveBtn.onclick = function () {
-        api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
-          .then(function (r2) {
-            if (r2.status === 409) { toast('競合しました。最新を読み直します。'); }
-            dirty = false; refresh(true);
-          });
-      };
+
       var editWrap = el('div');
       editWrap.appendChild(ta);
       var editRow = el('div', 'row'); editRow.style.marginTop = '6px';
-      editRow.appendChild(saveBtn);
-      var cancelBtn = el('button', 'danger', '作業を中止');
-      cancelBtn.onclick = function () {
-        api('/api/tasks/' + t.id + '/cancel', 'POST', {}).then(function () { refresh(true); });
-      };
-      editRow.appendChild(cancelBtn);
+
+      editRow.appendChild(actionButton('保存', 'primary', '保存中…', function () {
+        return api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
+          .then(function (r2) {
+            if (r2.status === 409) { toast('他で更新されていたため保存できませんでした', 'err'); }
+            else { toast('保存しました', 'ok'); }
+            dirty = false;
+            return refresh(true);
+          });
+      }));
+
+      if (t.agent_output) {
+        editRow.appendChild(actionButton('下書きを取り込む', null, '取り込み中…', function () {
+          ta.value = t.agent_output;
+          dirty = true;
+          toast('下書きを編集欄に入れました。保存すると確定します', 'ok');
+        }));
+      }
+
+      editRow.appendChild(actionButton('作業を中止', 'danger', '中止要求中…', function () {
+        return api('/api/tasks/' + t.id + '/cancel', 'POST', {}).then(function () {
+          toast('中止を要求しました。ワーカーは次の区切りで停止します', 'ok');
+          return refresh(true);
+        });
+      }));
       editWrap.appendChild(editRow);
       drawer.appendChild(section('自分の下書き / 修正', editWrap));
 
       var cbox = el('div');
       comments.forEach(function (c) {
         var d = el('div', 'cmt');
-        d.appendChild(el('div', 'who', c.author + ' · ' + (c.created_at || '').replace('T', ' ').slice(0, 19)));
+        d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
         d.appendChild(el('div', null, c.body));
         cbox.appendChild(d);
       });
       var ci = document.createElement('input');
       ci.type = 'text';
-      ci.placeholder = 'エージェントへの指示を書く（Enter で送信）';
+      ci.placeholder = 'ワーカーへの指示を書く（Enter で送信）';
       ci.onkeydown = function (e) {
         if (e.key !== 'Enter' || !ci.value.trim()) return;
         api('/api/tasks/' + t.id + '/comment', 'POST', { body: ci.value })
           .then(function () {
             ci.value = '';
-            // 送信後は作り直されるので、新しい入力欄にフォーカスを戻す
+            toast('指示を送りました。次の実行時に反映されます', 'ok');
             return refresh(true);
           })
           .then(function () {
@@ -335,26 +508,135 @@
           });
       };
       cbox.appendChild(ci);
-      drawer.appendChild(section('指示・コメント', cbox));
+      drawer.appendChild(section('指示・やりとり', cbox));
+
+      if (ev) {
+        var evBox = el('div');
+        evBox.appendChild(pre((ev.app_id || '') + '\n' + hhmm(ev.occurred_at)));
+        if (ev.body) evBox.appendChild(pre(ev.body));
+        if (ev.link) {
+          // リンクは踏ませない。文字列として出すだけ。
+          var a = el('div', null, ev.link);
+          a.style.color = 'var(--muted)';
+          a.style.wordBreak = 'break-all';
+          evBox.appendChild(a);
+        }
+        drawer.appendChild(section('元の通知', evBox));
+      }
+
+      // 片付け
+      var mng = el('div', 'row');
+      mng.appendChild(actionButton(
+        t.archived_at ? 'アーカイブから戻す' : 'アーカイブ',
+        null,
+        '処理中…',
+        function () {
+          return api('/api/tasks/' + t.id + '/archive', 'POST', { archived: !t.archived_at })
+            .then(function () {
+              toast(t.archived_at ? 'ボードに戻しました' : 'アーカイブしました（アーカイブ表示から戻せます）', 'ok');
+              if (!t.archived_at && !showArchived) { openTaskId = null; drawer.hidden = true; }
+              return refresh(true);
+            });
+        }));
+      mng.appendChild(actionButton('削除', 'danger', '削除中…', function () {
+        if (!confirm('カード #' + t.id + '「' + t.title + '」を完全に削除します。\n作業ログとやりとりも消え、元に戻せません。')) return;
+        return api('/api/tasks/' + t.id, 'DELETE').then(function () {
+          toast('削除しました', 'ok');
+          openTaskId = null; dirty = false; drawer.hidden = true;
+          return refresh(true);
+        });
+      }));
+      drawer.appendChild(section('カードの片付け', mng));
 
       drawer.hidden = false;
       drawer.scrollTop = scroll;
     });
   }
 
-  function section(label, node) {
-    var s = el('div', 'sec');
-    s.appendChild(el('label', null, label));
-    s.appendChild(node);
-    return s;
-  }
-  function pre(text) { return el('pre', null, text); }
+  // ---------------------------------------------------------------- ヘルプ
 
-  document.getElementById('reloadBtn').onclick = function () { refresh(true); };
+  function rows(pairs) {
+    var tb = document.createElement('table');
+    pairs.forEach(function (p) {
+      var tr = document.createElement('tr');
+      tr.appendChild(el('td', null, p[0]));
+      tr.appendChild(el('td', null, p[1]));
+      tb.appendChild(tr);
+    });
+    return tb;
+  }
+
+  function openHelp() {
+    helpEl.innerHTML = '';
+    var box = el('div', 'box');
+    var head = el('div', 'row');
+    head.appendChild(el('h3', null, '表示の意味'));
+    var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
+    var c = el('button', null, '閉じる');
+    c.onclick = function () { helpEl.hidden = true; };
+    head.appendChild(c);
+    box.appendChild(head);
+
+    box.appendChild(el('h4', null, '列'));
+    box.appendChild(rows([
+      ['未分類', '判定がまだのカード'],
+      ['要対応', 'ワーカーが次に着手する'],
+      ['実行中', 'ワーカーが作業している。ここから他の列へ動かすと中止要求になる'],
+      ['レビュー待ち', '下書きができた状態。内容を確認して送信可否を決める'],
+      ['完了', '対応済み'],
+      ['対応不要', '見たうえで対応不要と判断したもの']
+    ]));
+
+    box.appendChild(el('h4', null, 'カードのラベル'));
+    box.appendChild(rows([
+      ['ID', 'カード番号。ワーカーのログと照合するときに使う'],
+      ['緊急度', '高 / 中 / 低。対応の急ぎ度合い'],
+      ['種別', '返信が必要 / 作業 / 参考情報 / 不要 / システム / 自分で作成'],
+      ['版', '更新のたびに増える番号。自分とワーカーが同時に直したときの衝突検出に使う'],
+      ['中止を要求済み', 'ワーカーは次の区切りで作業をやめる']
+    ]));
+
+    box.appendChild(el('h4', null, 'ワーカー'));
+    box.appendChild(rows([
+      ['作業中', 'いずれかのカードを処理している。ヘッダに対象と内容が出る'],
+      ['待機中', '起動しているが処理するカードが無い'],
+      ['停止中 / 未起動', 'phase4\\Start-Worker.ps1 を実行すると動き出す'],
+      ['エラー', '直前の処理が失敗した。カードの作業ログに理由が残る']
+    ]));
+
+    box.appendChild(el('h4', null, '安全について'));
+    box.appendChild(rows([
+      ['送信はしない', 'ワーカーは下書きを作るだけで、送信・投稿は一切行わない'],
+      ['リンク', '元の通知のリンクは文字列として表示するだけでクリックできない']
+    ]));
+
+    helpEl.appendChild(box);
+    helpEl.hidden = false;
+  }
+
+  // ---------------------------------------------------------------- 起動
+
+  document.getElementById('helpBtn').onclick = openHelp;
+  helpEl.onclick = function (e) { if (e.target === helpEl) helpEl.hidden = true; };
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (!helpEl.hidden) { helpEl.hidden = true; return; }
+    if (!drawer.hidden) { openTaskId = null; dirty = false; drawer.hidden = true; }
+  });
+
+  document.getElementById('archBtn').onclick = function () {
+    showArchived = !showArchived;
+    this.textContent = showArchived ? 'ボードに戻る' : 'アーカイブ';
+    refresh(true);
+  };
+
   document.getElementById('newBtn').onclick = function () {
     var title = prompt('カードのタイトル');
     if (!title) return;
-    api('/api/tasks', 'POST', { title: title }).then(function () { refresh(true); });
+    api('/api/tasks', 'POST', { title: title }).then(function () {
+      toast('カードを作成しました', 'ok');
+      refresh(true);
+    });
   };
 
   refresh(true);

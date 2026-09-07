@@ -77,7 +77,37 @@ CREATE TABLE IF NOT EXISTS triage_log (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_triage_event ON triage_log(event_id);
+
+-- ワーカーが「いま何をしているか」を残す。カードごとの作業ログ。
+CREATE TABLE IF NOT EXISTS task_activity (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  message    TEXT NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+CREATE INDEX IF NOT EXISTS idx_activity_task ON task_activity(task_id, id);
+
+-- ワーカーの生存確認と現在の作業。1行だけ持つ。
+CREATE TABLE IF NOT EXISTS worker_state (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  state           TEXT NOT NULL,
+  current_task_id INTEGER,
+  message         TEXT,
+  updated_at      TEXT NOT NULL
+);
 '@
+
+# 既存 DB にも後から列を足せるようにする。CREATE TABLE IF NOT EXISTS では
+# 列追加が反映されないため、PRAGMA で確認して ALTER する。
+function Invoke-SchemaMigration {
+    param([Parameter(Mandatory)] $Conn)
+    $cols = @($Conn.Query('PRAGMA table_info(tasks)')) | ForEach-Object { $_['name'] }
+    if ($cols -notcontains 'archived_at') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN archived_at TEXT')
+    }
+}
 
 function Get-Now { return (Get-Date).ToString('o') }
 
@@ -88,6 +118,7 @@ function Open-TaskStore {
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $conn = New-Object WinSqlite.Conn ([IO.Path]::GetFullPath($Path))
     $conn.Exec($script:Schema)
+    Invoke-SchemaMigration -Conn $conn
     return $conn
 }
 
@@ -153,11 +184,13 @@ function New-Task {
 }
 
 function Get-Tasks {
-    param([Parameter(Mandatory)] $Conn, [string] $Column)
+    param([Parameter(Mandatory)] $Conn, [string] $Column, [switch] $IncludeArchived)
+    $where = if ($IncludeArchived) { '1=1' } else { 'archived_at IS NULL' }
     if ($Column) {
-        return $Conn.Query('SELECT * FROM tasks WHERE board_column = ? ORDER BY updated_at DESC', [object[]] @($Column))
+        return $Conn.Query("SELECT * FROM tasks WHERE $where AND board_column = ? ORDER BY updated_at DESC",
+                           [object[]] @($Column))
     }
-    return $Conn.Query('SELECT * FROM tasks ORDER BY board_column, updated_at DESC')
+    return $Conn.Query("SELECT * FROM tasks WHERE $where ORDER BY board_column, updated_at DESC")
 }
 
 # 楽観ロック付きの列移動。ユーザーの操作とエージェントの書き戻しが衝突したら false を返す。
@@ -202,7 +235,131 @@ function Get-BoardRevision {
     param([Parameter(Mandatory)] $Conn)
     $r = @($Conn.Query("SELECT COUNT(*) AS n, COALESCE(MAX(updated_at),'') AS m FROM tasks"))[0]
     $c = @($Conn.Query("SELECT COUNT(*) AS n FROM task_comments"))[0]
-    return ("{0}-{1}-{2}" -f $r['n'], $r['m'], $c['n'])
+    # ワーカーの動きでも UI が更新されるよう、作業ログと死活も版に含める
+    $a = @($Conn.Query("SELECT COUNT(*) AS n FROM task_activity"))[0]
+    $w = @($Conn.Query("SELECT COALESCE(MAX(updated_at),'') AS m FROM worker_state"))[0]
+    return ("{0}-{1}-{2}-{3}-{4}" -f $r['n'], $r['m'], $c['n'], $a['n'], $w['m'])
+}
+
+# ---------------------------------------------------------------- 作業ログ / ワーカー死活
+
+function Add-TaskActivity {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [string] $Kind,
+        [Parameter(Mandatory)] [string] $Message
+    )
+    [void] $Conn.NonQuery(
+        'INSERT INTO task_activity (task_id, created_at, kind, message) VALUES (?,?,?,?)',
+        [object[]] @($TaskId, (Get-Now), $Kind, $Message))
+}
+
+function Get-TaskActivity {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [int] $Limit = 50)
+    return $Conn.Query(
+        'SELECT * FROM (SELECT * FROM task_activity WHERE task_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id ASC',
+        [object[]] @($TaskId, $Limit))
+}
+
+function Set-WorkerState {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [string] $State,
+        $CurrentTaskId, [string] $Message
+    )
+    [void] $Conn.NonQuery(
+        'INSERT INTO worker_state (id, state, current_task_id, message, updated_at) VALUES (1,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET state=excluded.state, current_task_id=excluded.current_task_id,
+                                       message=excluded.message, updated_at=excluded.updated_at',
+        [object[]] @($State, $CurrentTaskId, $Message, (Get-Now)))
+}
+
+function Get-WorkerState {
+    param([Parameter(Mandatory)] $Conn)
+    $r = @($Conn.Query('SELECT * FROM worker_state WHERE id = 1'))
+    if ($r.Count -eq 0) { return $null }
+    return $r[0]
+}
+
+# ---------------------------------------------------------------- アーカイブ / 削除
+
+function Set-TaskArchived {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [bool] $Archived = $true)
+    $val = if ($Archived) { Get-Now } else { $null }
+    return ($Conn.NonQuery(
+        'UPDATE tasks SET archived_at = ?, version = version + 1, updated_at = ? WHERE id = ?',
+        [object[]] @($val, (Get-Now), $TaskId)) -gt 0)
+}
+
+# 完全削除。カードに紐づく作業ログ・コメントも消す。
+# events は残す (再取り込みで復活させないための冪等キーとして必要)。
+function Remove-Task {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $Conn.Begin()
+    try {
+        [void] $Conn.NonQuery('DELETE FROM task_activity WHERE task_id = ?', [object[]] @($TaskId))
+        [void] $Conn.NonQuery('DELETE FROM task_comments WHERE task_id = ?', [object[]] @($TaskId))
+        $n = $Conn.NonQuery('DELETE FROM tasks WHERE id = ?', [object[]] @($TaskId))
+        $Conn.Commit()
+        return ($n -gt 0)
+    }
+    catch { $Conn.Rollback(); throw }
+}
+
+# ---------------------------------------------------------------- ワーカー用
+
+# ユーザーが書いたまだ読んでいない指示。ワーカーは各実行の前にこれを読む。
+function Get-UnconsumedComments {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    return $Conn.Query(
+        "SELECT * FROM task_comments WHERE task_id = ? AND author = 'user' AND consumed_at IS NULL ORDER BY id ASC",
+        [object[]] @($TaskId))
+}
+
+function Set-CommentsConsumed {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    [void] $Conn.NonQuery(
+        'UPDATE task_comments SET consumed_at = ? WHERE task_id = ? AND consumed_at IS NULL',
+        [object[]] @((Get-Now), $TaskId))
+}
+
+# 中止要求が立っているか (ワーカーが各ステップの前に確認する)
+function Test-TaskCancelled {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $r = @($Conn.Query('SELECT cancel_requested FROM tasks WHERE id = ?', [object[]] @($TaskId)))
+    if ($r.Count -eq 0) { return $true }
+    return ([int] $r[0]['cancel_requested'] -ne 0)
+}
+
+# 未処理のカードを1枚取り、リースを張って doing に移す。
+# 戻り値: 取れたカード、なければ $null。
+function Get-NextWorkItem {
+    param([Parameter(Mandatory)] $Conn, [int] $LeaseMinutes = 10)
+    $now = Get-Now
+    $Conn.Begin()
+    try {
+        # リース切れの doing も回収対象に含める (ワーカーが落ちた場合の復旧)
+        $rows = @($Conn.Query(
+            "SELECT * FROM tasks
+              WHERE archived_at IS NULL AND cancel_requested = 0
+                AND (board_column = 'todo'
+                     OR (board_column = 'doing' AND (agent_lease_until IS NULL OR agent_lease_until < ?)))
+              ORDER BY CASE urgency WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC
+              LIMIT 1", [object[]] @($now)))
+        if ($rows.Count -eq 0) { $Conn.Commit(); return $null }
+
+        $t = $rows[0]
+        $lease = (Get-Date).AddMinutes($LeaseMinutes).ToString('o')
+        $n = $Conn.NonQuery(
+            "UPDATE tasks SET board_column='doing', agent_lease_until=?, version=version+1, updated_at=?
+              WHERE id = ? AND version = ?",
+            [object[]] @($lease, $now, $t['id'], $t['version']))
+        $Conn.Commit()
+        if ($n -eq 0) { return $null }   # 直前にユーザーが動かした
+        return $t
+    }
+    catch { $Conn.Rollback(); throw }
 }
 
 function Get-TaskDetail {
