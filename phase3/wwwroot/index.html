@@ -515,6 +515,15 @@
     return dirty || (a && drawer.contains(a) && !drawer.hidden);
   }
 
+  function closeDrawer(force) {
+    if (drawer.hidden) return;
+    // 未保存の編集を黙って捨てない
+    if (!force && dirty && !confirm('保存していない編集があります。閉じてよいですか？')) return;
+    openTaskId = null;
+    dirty = false;
+    drawer.hidden = true;
+  }
+
   function refresh(force) {
     return api('/api/board' + (showArchived ? '?archived=1' : '')).then(function (r) {
       lastRev = r.body.rev;
@@ -576,7 +585,7 @@
       head.appendChild(el('h3', null, t.title));
       var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
       var close = el('button', 'quiet', '閉じる');
-      close.onclick = function () { openTaskId = null; dirty = false; drawer.hidden = true; };
+      close.onclick = function () { closeDrawer(); };
       head.appendChild(close);
       pad.appendChild(head);
 
@@ -690,13 +699,8 @@
       }));
 
       pad.appendChild(foldable('comments', '指示・やりとり', comments.length, function (b) {
-        comments.forEach(function (c) {
-          var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
-          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
-          d.appendChild(el('div', 'bd', c.body));
-          b.appendChild(d);
-        });
-        // 複数行を書けるようにする。Enter は改行、送信は Ctrl+Enter かボタン。
+        // 入力欄を先頭に、やりとりは新しい順。増えても入力とその直前の文脈が
+        // 常に手前にあり、下までスクロールする必要がない。
         var ci = document.createElement('textarea');
         ci.rows = 3;
         ci.placeholder = 'ワーカーへの指示（改行できます／Ctrl+Enter で送信）';
@@ -718,9 +722,16 @@
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
         };
         b.appendChild(ci);
-        var sr = el('div', 'row'); sr.style.marginTop = '6px';
+        var sr = el('div', 'row'); sr.style.margin = '6px 0 12px';
         sr.appendChild(actionButton('指示を送る', null, '送信中…', send));
         b.appendChild(sr);
+
+        comments.slice().reverse().forEach(function (c) {
+          var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
+          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
+          d.appendChild(el('div', 'bd', c.body));
+          b.appendChild(d);
+        });
       }));
 
       if (ev) {
@@ -748,7 +759,12 @@
         }));
         mng.appendChild(actionButton('削除', 'danger', '削除中…', function () {
           if (!confirm('カード #' + t.id + '「' + t.title + '」を完全に削除します。\n作業ログとやりとりも消え、元に戻せません。')) return;
-          return api('/api/tasks/' + t.id, 'DELETE').then(function () {
+          return api('/api/tasks/' + t.id, 'DELETE').then(function (r) {
+            // 応答を見ずに成功を名乗らない。失敗しているのに消えたと表示すると原因が分からなくなる。
+            if (r.status !== 200 || r.body.ok === false) {
+              toast('削除できませんでした: ' + (r.body.error || r.status), 'err');
+              return refresh(true);
+            }
             toast('削除しました', 'ok');
             openTaskId = null; dirty = false; drawer.hidden = true;
             return refresh(true);
@@ -854,7 +870,16 @@
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
     if (!helpEl.hidden) { helpEl.hidden = true; return; }
-    if (!drawer.hidden) { openTaskId = null; dirty = false; drawer.hidden = true; }
+    closeDrawer();
+  });
+
+  // パネルの外をクリックしたら閉じる。
+  // カードは openDetail が拾って別のカードに切り替えるので、ここでは閉じない。
+  document.addEventListener('mousedown', function (e) {
+    if (drawer.hidden || !helpEl.hidden) return;
+    if (drawer.contains(e.target)) return;
+    if (e.target.closest && e.target.closest('.card')) return;
+    closeDrawer();
   });
 
   document.getElementById('archBtn').onclick = function () {

@@ -291,8 +291,12 @@ function Invoke-Route {
         }
 
         if ($method -eq 'DELETE' -and -not $action) {
-            $ok = Remove-Task -Conn $Conn -TaskId $taskId
-            if (-not $ok) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+            try { $ok = Remove-Task -Conn $Conn -TaskId $taskId }
+            catch {
+                Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500
+                return
+            }
+            if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'not found' } 404; return }
             Write-JsonResponse $Context @{ ok = $true }
             return
         }

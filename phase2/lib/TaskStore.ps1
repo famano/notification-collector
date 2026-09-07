@@ -469,14 +469,21 @@ function Set-TaskArchived {
         [object[]] @($val, (Get-Now), $TaskId)) -gt 0)
 }
 
-# 完全削除。カードに紐づく作業ログ・コメントも消す。
-# events は残す (再取り込みで復活させないための冪等キーとして必要)。
+# 完全削除。カードを参照している行をすべて先に消す。
+# 外部キーを張っているテーブルを1つでも取りこぼすと FOREIGN KEY constraint failed で
+# 削除自体が失敗する。テーブルを増やしたらここにも足すこと。
+# 作業フォルダのファイルは消さない (取り戻せなくなるため)。
+# events も残す (再取り込みで復活させないための冪等キーとして必要)。
 function Remove-Task {
     param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
     $Conn.Begin()
     try {
-        [void] $Conn.NonQuery('DELETE FROM task_activity WHERE task_id = ?', [object[]] @($TaskId))
-        [void] $Conn.NonQuery('DELETE FROM task_comments WHERE task_id = ?', [object[]] @($TaskId))
+        [void] $Conn.NonQuery('DELETE FROM task_activity WHERE task_id = ?',  [object[]] @($TaskId))
+        [void] $Conn.NonQuery('DELETE FROM task_comments WHERE task_id = ?',  [object[]] @($TaskId))
+        [void] $Conn.NonQuery('DELETE FROM task_artifacts WHERE task_id = ?', [object[]] @($TaskId))
+        [void] $Conn.NonQuery('DELETE FROM tool_requests WHERE task_id = ?',  [object[]] @($TaskId))
+        # 外部キーではないが、残すと消えたカード向けの許可が居座る
+        [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE scope = 'task' AND scope_id = ?", [object[]] @($TaskId))
         $n = $Conn.NonQuery('DELETE FROM tasks WHERE id = ?', [object[]] @($TaskId))
         $Conn.Commit()
         return ($n -gt 0)
