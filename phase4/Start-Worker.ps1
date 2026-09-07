@@ -46,6 +46,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\..\phase2\lib\ClaudeClient.ps1"
 . "$PSScriptRoot\lib\WorkTools.ps1"
+# Gmail 連携があれば下書きツールが使えるようになる (未設定なら黙って無効)
+$gmailLib = Join-Path $PSScriptRoot '..\phase5\lib\GmailConnector.ps1'
+if (Test-Path $gmailLib) { . $gmailLib }
 
 $VerifyResults = (-not $NoVerify)
 
@@ -133,6 +136,17 @@ function Invoke-WorkItem {
     $detail = Get-TaskDetail -Conn $conn -TaskId $id
     $evt = if ($detail) { $detail.event } else { $null }
 
+    # Gmail 由来なら、返信をスレッドにぶら下げるための識別子を取り出しておく
+    $gmailThreadId = ''
+    $gmailInReplyTo = ''
+    if ($evt -and [string] $evt['source'] -eq 'gmail' -and $evt['raw_json']) {
+        try {
+            $raw = [string] $evt['raw_json'] | ConvertFrom-Json
+            $gmailThreadId  = [string] $raw.threadId
+            $gmailInReplyTo = [string] $raw.messageId
+        } catch { }
+    }
+
     if (Stop-IfCancelled $id) { return }
 
     $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
@@ -178,7 +192,9 @@ function Invoke-WorkItem {
             }
         }
 
-        $r = Invoke-WorkTool -Name $toolName -ToolInput $toolInput -Workspace $workspace -CommandTimeoutSec $CommandTimeoutSec
+        $r = Invoke-WorkTool -Name $toolName -ToolInput $toolInput -Workspace $workspace `
+                -CommandTimeoutSec $CommandTimeoutSec `
+                -GmailThreadId $gmailThreadId -GmailInReplyTo $gmailInReplyTo
         if ($r.artifact) {
             Add-TaskArtifact -Conn $conn -TaskId $id -Path $r.artifact
             Write-Step $id 'file' ("成果物: " + (Split-Path -Leaf $r.artifact)) 'Green'

@@ -148,6 +148,11 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'archived_at') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN archived_at TEXT')
     }
+    # 正規 API で本文を取り直したかの印 (Phase 5)
+    $ecols = @($Conn.Query('PRAGMA table_info(events)')) | ForEach-Object { $_['name'] }
+    if ($ecols -notcontains 'context_fetched') {
+        $Conn.Exec('ALTER TABLE events ADD COLUMN context_fetched TEXT')
+    }
 }
 
 function Get-Now { return (Get-Date).ToString('o') }

@@ -129,7 +129,30 @@ $script:WorkTools = @(
     }
 )
 
-function Get-WorkTools { return $script:WorkTools }
+$script:GmailDraftTool = @{
+    name        = 'create_gmail_draft'
+    description = 'Gmail に本物の下書きを作成する。Gmail から来たカードへの返信ならスレッドにぶら下がる。送信は行わない。ローカルの .eml ではなく実際のメールボックスに作る場合はこちらを使う。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            to      = @{ type = 'string'; description = '宛先。返信なら元の差出人。' }
+            cc      = @{ type = 'string' }
+            subject = @{ type = 'string' }
+            body    = @{ type = 'string' }
+        }
+        required = @('subject', 'body')
+    }
+}
+
+# Gmail 連携が設定されているときだけ下書きツールを見せる。
+# 使えないツールを提示すると、モデルが存在しない手段を前提に計画を立ててしまう。
+function Get-WorkTools {
+    $tools = @($script:WorkTools)
+    if ((Get-Command Test-GmailConfigured -ErrorAction SilentlyContinue) -and (Test-GmailConfigured)) {
+        $tools += $script:GmailDraftTool
+    }
+    return $tools
+}
 
 # ---------------------------------------------------------------- 危険度の判定
 
@@ -157,6 +180,18 @@ function Get-ToolRisk {
                 risky   = $true
                 summary = "外部へ通信します: $($ToolInput.url)"
                 detail  = "目的: $($ToolInput.purpose)`nURL: $($ToolInput.url)`n`n※URL に情報が含まれていないか確認してください。"
+            }
+        }
+        'create_gmail_draft' {
+            # 送信はしないが、利用者本人のメールボックスに物が残る。
+            # ローカルのファイル作成とは影響範囲が違うので承認を取る。
+            $to = if ($ToolInput.to) { $ToolInput.to } else { '(宛先未指定)' }
+            $preview = [string] $ToolInput.body
+            if ($preview.Length -gt 2000) { $preview = $preview.Substring(0, 2000) + "`n…(以下省略)" }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Gmail に下書きを作成します: $($ToolInput.subject)"
+                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n`n--- 本文 ---`n$preview`n`n※作成されるのは下書きだけで、送信はされません。"
             }
         }
         'write_file' {
@@ -216,11 +251,29 @@ function Invoke-WorkTool {
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] $ToolInput,
         [Parameter(Mandatory)] [string] $Workspace,
-        [int] $CommandTimeoutSec = 120
+        [int] $CommandTimeoutSec = 120,
+        # Gmail から来たカードの場合、返信をスレッドにぶら下げるための識別子。
+        # モデルに持ち回らせず、ワーカーが束縛して渡す。
+        [string] $GmailThreadId,
+        [string] $GmailInReplyTo
     )
 
     try {
         switch ($Name) {
+            'create_gmail_draft' {
+                if (-not (Get-Command New-GmailDraft -ErrorAction SilentlyContinue)) {
+                    throw 'Gmail 連携が設定されていません。'
+                }
+                $d = New-GmailDraft -To ([string] $ToolInput.to) -Cc ([string] $ToolInput.cc) `
+                        -Subject ([string] $ToolInput.subject) -Body ([string] $ToolInput.body) `
+                        -ThreadId $GmailThreadId -InReplyTo $GmailInReplyTo
+                $where = if ($GmailThreadId) { '元のスレッドへの返信として' } else { '新規メールとして' }
+                return [pscustomobject]@{
+                    text     = ("Gmail に下書きを作成しました ({0})。下書きID: {1}" -f $where, $d.id)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
             'write_file' {
                 $full = Resolve-TargetPath -Workspace $Workspace -Relative ([string] $ToolInput.path)
                 $content = [string] $ToolInput.content
