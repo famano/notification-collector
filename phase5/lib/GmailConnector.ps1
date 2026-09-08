@@ -201,7 +201,8 @@ function Get-GmailBodyText {
 
 function Get-GmailMessage {
     param([Parameter(Mandatory)] [string] $MessageId)
-    $m = Invoke-GmailApi -Path "/users/me/messages/$MessageId?format=full"
+    # ${MessageId} と括ること。"$MessageId?format" は ? まで変数名に取り込まれて空になる。
+    $m = Invoke-GmailApi -Path "/users/me/messages/${MessageId}?format=full"
     $body = Get-GmailBodyText $m.payload
     return [pscustomobject]@{
         id        = $m.id
