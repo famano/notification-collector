@@ -10,6 +10,7 @@
 | `lib/GmailConnector.ps1` | OAuth、本文取得、本物の下書き作成 |
 | `Connect-Service.ps1` | 設定ウィザード |
 | `Sync-Sources.ps1` | Slack の補完と Gmail の取り込み |
+| `Reset-SlackContext.ps1` | 補完に失敗した印を消して再試行させる |
 
 ## 使い方
 
