@@ -251,6 +251,46 @@ function Invoke-Route {
         return
     }
 
+    # 列ごとのまとめて削除。
+    # 対象は画面が見ていた id をそのまま受け取らず、いまその列にあるものだけに絞る。
+    # ボードは 1.5 秒ごとに更新されるので、押した瞬間に別の列へ移っていたカードを
+    # 巻き込みうる。消してから気付いても戻せない操作なので、ここで落とす。
+    if ($path -eq '/api/tasks/bulk-delete' -and $method -eq 'POST') {
+        $b = Read-JsonBody $Context
+        if (-not $b -or -not $b.column) { Write-JsonResponse $Context @{ error = 'column is required' } 400; return }
+        $col = [string] $b.column
+
+        if ($col -eq 'archived') {
+            $current = @(Get-Tasks -Conn $Conn -IncludeArchived | Where-Object { $_['archived_at'] })
+        }
+        elseif ($ColumnKeys -contains $col) {
+            $current = @(Get-Tasks -Conn $Conn -Column $col)
+        }
+        else {
+            Write-JsonResponse $Context @{ error = 'unknown column' } 400; return
+        }
+
+        $requested = @()
+        if ($null -ne $b.ids) { $requested = @($b.ids | ForEach-Object { [int] $_ }) }
+
+        $inColumn = @{}
+        foreach ($r in $current) { $inColumn[[int] $r['id']] = $true }
+        $targets = @($requested | Where-Object { $inColumn.ContainsKey($_) })
+
+        $deleted = 0
+        if ($targets.Count -gt 0) {
+            try { $deleted = Remove-Tasks -Conn $Conn -TaskIds $targets }
+            catch {
+                Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500
+                return
+            }
+        }
+        Write-JsonResponse $Context @{
+            ok = $true; deleted = $deleted; skipped = ($requested.Count - $targets.Count)
+        }
+        return
+    }
+
     # /api/tasks/{id} と /api/tasks/{id}/{action}
     if ($path -match '^/api/tasks/(\d+)(?:/(\w+))?$') {
         $taskId = [int] $Matches[1]
