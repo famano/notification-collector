@@ -469,24 +469,48 @@ function Set-TaskArchived {
         [object[]] @($val, (Get-Now), $TaskId)) -gt 0)
 }
 
-# 完全削除。カードを参照している行をすべて先に消す。
-# 外部キーを張っているテーブルを1つでも取りこぼすと FOREIGN KEY constraint failed で
-# 削除自体が失敗する。テーブルを増やしたらここにも足すこと。
+# 完全削除の中身。トランザクションは呼び出し側が張る (1枚でも一括でもここを通す)。
+# カードを参照している行をすべて先に消す。外部キーを張っているテーブルを1つでも
+# 取りこぼすと FOREIGN KEY constraint failed で削除自体が失敗する。
+# テーブルを増やしたらここにも足すこと。
 # 作業フォルダのファイルは消さない (取り戻せなくなるため)。
 # events も残す (再取り込みで復活させないための冪等キーとして必要)。
+function Remove-TaskRows {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    [void] $Conn.NonQuery('DELETE FROM task_activity WHERE task_id = ?',  [object[]] @($TaskId))
+    [void] $Conn.NonQuery('DELETE FROM task_comments WHERE task_id = ?',  [object[]] @($TaskId))
+    [void] $Conn.NonQuery('DELETE FROM task_artifacts WHERE task_id = ?', [object[]] @($TaskId))
+    [void] $Conn.NonQuery('DELETE FROM tool_requests WHERE task_id = ?',  [object[]] @($TaskId))
+    # 外部キーではないが、残すと消えたカード向けの許可が居座る
+    [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE scope = 'task' AND scope_id = ?", [object[]] @($TaskId))
+    return ($Conn.NonQuery('DELETE FROM tasks WHERE id = ?', [object[]] @($TaskId)) -gt 0)
+}
+
 function Remove-Task {
     param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
     $Conn.Begin()
     try {
-        [void] $Conn.NonQuery('DELETE FROM task_activity WHERE task_id = ?',  [object[]] @($TaskId))
-        [void] $Conn.NonQuery('DELETE FROM task_comments WHERE task_id = ?',  [object[]] @($TaskId))
-        [void] $Conn.NonQuery('DELETE FROM task_artifacts WHERE task_id = ?', [object[]] @($TaskId))
-        [void] $Conn.NonQuery('DELETE FROM tool_requests WHERE task_id = ?',  [object[]] @($TaskId))
-        # 外部キーではないが、残すと消えたカード向けの許可が居座る
-        [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE scope = 'task' AND scope_id = ?", [object[]] @($TaskId))
-        $n = $Conn.NonQuery('DELETE FROM tasks WHERE id = ?', [object[]] @($TaskId))
+        $ok = Remove-TaskRows -Conn $Conn -TaskId $TaskId
         $Conn.Commit()
-        return ($n -gt 0)
+        return $ok
+    }
+    catch { $Conn.Rollback(); throw }
+}
+
+# 一括削除。列ごとの掃除用。
+# 全件を 1 つのトランザクションで処理する。途中で外部キーに引っかかっても
+# 「何枚かだけ消えた」状態にはならず、押す前に戻る。
+function Remove-Tasks {
+    param([Parameter(Mandatory)] $Conn, [int[]] $TaskIds)
+    if (-not $TaskIds -or $TaskIds.Count -eq 0) { return 0 }
+    $Conn.Begin()
+    try {
+        $n = 0
+        foreach ($id in $TaskIds) {
+            if (Remove-TaskRows -Conn $Conn -TaskId $id) { $n++ }
+        }
+        $Conn.Commit()
+        return $n
     }
     catch { $Conn.Rollback(); throw }
 }

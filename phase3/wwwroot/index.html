@@ -44,6 +44,9 @@
   button.quiet { border-color: transparent; color: var(--muted); }
   button.danger { color: var(--danger); border-color: transparent; }
   button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  /* 列の見出しに出す掃除ボタン。押し間違えたくないので、赤くなるのはホバー時だけ */
+  button.sweep { padding: 1px 7px; font-size: 10.5px; border-color: transparent; color: var(--faint); }
+  button.sweep:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
 
   #worker {
     display: flex; align-items: center; gap: 7px; padding: 3px 11px;
@@ -95,7 +98,8 @@
     border-radius: 8px; display: flex; flex-direction: column; max-height: calc(100vh - 96px);
   }
   .col > .head { padding: 8px 12px 7px; border-bottom: 1px solid var(--line); }
-  .col .name { font-size: 12px; font-weight: 650; }
+  .col > .head .top { display: flex; align-items: center; gap: 6px; }
+  .col .name { font-size: 12px; font-weight: 650; flex: 1; }
   .col .count { color: var(--faint); font-weight: 400; }
   .col .hint { display: block; font-size: 10.5px; color: var(--faint); margin-top: 1px; }
   /* 見るべき列だけ色を持たせ、済んだ列は沈める */
@@ -272,6 +276,9 @@
   };
   var ATTENTION = { todo: 1, doing: 1, review: 1 };
   var QUIET = { done: 1, dismissed: 1 };
+  // まとめて削除を出す列。片付いた列だけに限る。
+  // 未分類・要対応・実行中・レビュー待ちに出すと、まだ見ていないものを一掃できてしまう。
+  var SWEEPABLE = { done: 1, dismissed: 1, archived: 1 };
   var ACT_KIND = {
     start: '開始', step: '経過', llm: '検討', tool: '実行', file: '成果物',
     approve: '承認待ち', deny: '不許可', verify: '検証', issue: '指摘', repair: '修正',
@@ -283,8 +290,12 @@
   };
   var TOOL_LABEL = {
     run_command: 'コマンド実行', http_fetch: '外部通信',
-    write_file: 'ファイル書き込み', read_file: 'ファイル読み取り', list_files: '一覧取得'
+    write_file: 'ファイル書き込み', read_file: 'ファイル読み取り', list_files: '一覧取得',
+    create_gmail_draft: 'Gmail 下書き作成',
+    send_gmail: 'メール送信', send_slack_message: 'Slack へ投稿'
   };
+  // 外に出たら取り消せないツール。承認パネルで見分けがつくようにする。
+  var IRREVERSIBLE = { send_gmail: 1, send_slack_message: 1 };
 
   function toast(msg, kind) {
     toastEl.textContent = msg;
@@ -382,7 +393,8 @@
 
     (d.pending || []).forEach(function (p) {
       var box = el('div', 'ask');
-      box.appendChild(el('div', 'hd', '実行の確認: ' + (TOOL_LABEL[p.tool] || p.tool)));
+      box.appendChild(el('div', 'hd', '実行の確認: ' + (TOOL_LABEL[p.tool] || p.tool)
+        + (IRREVERSIBLE[p.tool] ? '（取り消せません）' : '')));
       box.appendChild(el('div', 'sub', 'カード #' + p.task_id + ' · ' + p.summary + ' · ワーカーは応答があるまで止まっています'));
       // 実行内容は省略せず出す。ここが注入と実行のあいだの唯一の壁になる。
       box.appendChild(el('pre', null, p.detail));
@@ -440,9 +452,12 @@
     data.columns.forEach(function (col) {
       var c = el('div', 'col' + (ATTENTION[col.key] ? ' act' : '') + (QUIET[col.key] ? ' done-ish' : ''));
       var head = el('div', 'head');
+      var top = el('div', 'top');
       var name = el('div', 'name', (COLUMN[col.key] || col.label) + ' ');
       name.appendChild(el('span', 'count', String(col.tasks.length)));
-      head.appendChild(name);
+      top.appendChild(name);
+      if (SWEEPABLE[col.key] && col.tasks.length > 0) top.appendChild(sweepButton(col));
+      head.appendChild(top);
       if (COLUMN_HINT[col.key]) head.appendChild(el('span', 'hint', COLUMN_HINT[col.key]));
       c.appendChild(head);
 
@@ -464,6 +479,32 @@
         });
       }
       board.appendChild(c);
+    });
+  }
+
+  // 列のカードをまとめて消す。1枚ずつ開いて削除するのが面倒な「完了」「対応不要」向け。
+  // 送るのはいま画面に出ている id だけ。サーバ側でも列を確かめ直すので、
+  // 押した拍子に入ってきたカードは巻き込まれない。
+  function sweepButton(col) {
+    var label = COLUMN[col.key] || col.label;
+    var ids = col.tasks.map(function (t) { return Number(t.id); });
+    return actionButton('まとめて削除', 'sweep', '削除中…', function () {
+      if (!confirm('「' + label + '」の ' + ids.length + ' 枚を完全に削除します。\n'
+        + '作業ログとやりとりも消え、元に戻せません。')) return;
+      return api('/api/tasks/bulk-delete', 'POST', { column: col.key, ids: ids }).then(function (r) {
+        // 応答を見てからでないと、失敗しているのに消えたと表示してしまう。
+        if (r.status !== 200 || r.body.ok === false) {
+          toast('削除できませんでした: ' + (r.body.error || r.status), 'err');
+          return refresh(true);
+        }
+        toast(r.body.deleted + ' 枚を削除しました'
+          + (r.body.skipped ? '（' + r.body.skipped + ' 枚は他で更新されたため残しました）' : ''), 'ok');
+        // 消したカードを開いたままにしない
+        if (openTaskId && ids.indexOf(Number(openTaskId)) >= 0) {
+          openTaskId = null; dirty = false; drawer.hidden = true;
+        }
+        return refresh(true);
+      });
     });
   }
 
@@ -809,7 +850,8 @@
       ['要対応', 'ワーカーが次に着手する'],
       ['実行中', 'ワーカーが作業している。ここから動かすと中止要求になる'],
       ['レビュー待ち', '成果物ができた状態。内容を確認して送信可否を決める'],
-      ['完了 / 対応不要', '済んだもの。淡く表示される']
+      ['完了 / 対応不要', '済んだもの。淡く表示される'],
+      ['まとめて削除', '完了・対応不要・アーカイブ済みの見出しに出る。その列のカードを全部消す']
     ]));
 
     box.appendChild(el('h4', null, 'カードの表示'));
@@ -824,8 +866,8 @@
     box.appendChild(el('h4', null, 'ワーカー'));
     box.appendChild(rows([
       ['承認なしで実行', 'カードの作業フォルダ内でのファイル作成・読み取り、メール下書き(.eml)の作成'],
-      ['承認が必要', 'コマンド実行、外部への通信、作業フォルダ外への書き込み・読み取り'],
-      ['しないこと', 'メールやメッセージの送信・投稿。下書きを作るところまで'],
+      ['承認が必要', 'コマンド実行、外部への通信、作業フォルダ外への書き込み・読み取り、Gmail 下書きの作成'],
+      ['取り消せない', 'メール送信と Slack への投稿。承認画面に宛先と本文が全文出る。既定は下書きまでで、送信は指示したときだけ'],
       ['作業中 / 承認待ち', 'ヘッダに対象カードと内容が出る'],
       ['停止中 / 未起動', 'phase4\\Start-Worker.ps1 を実行すると動き出す']
     ]));

@@ -6,8 +6,8 @@
 | ファイル | 役割 |
 |---|---|
 | `lib/SecretStore.ps1` | 資格情報を DPAPI で暗号化して保存 |
-| `lib/SlackConnector.ps1` | 通知のリンクからスレッド全文を取得 |
-| `lib/GmailConnector.ps1` | OAuth、本文取得、本物の下書き作成 |
+| `lib/SlackConnector.ps1` | 通知のリンクからスレッド全文を取得、スレッドへの投稿 |
+| `lib/GmailConnector.ps1` | OAuth、本文取得、本物の下書き作成、送信 |
 | `Connect-Service.ps1` | 設定ウィザード |
 | `Sync-Sources.ps1` | Slack の補完と Gmail の取り込み |
 | `Reset-SlackContext.ps1` | 補完に失敗した印を消して再試行させる |
@@ -34,9 +34,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 `<@U123>` はユーザー名に、`<url|text>` は読める形に均す。
 
 **Socket Mode は使っていない。** 通知リスナーが既にトリガーとして機能しているので、
-常時接続を足す理由がない。必要なのは読み取りだけなので Web API で足りる。
+常時接続を足す理由がない。読み書きとも Web API で足りる。
+
+投稿もできる。ワーカーに `send_slack_message` ツールが増え、`chat.postMessage` で
+**元のスレッドへの返信として**投稿する。チャンネルと `thread_ts` は通知のリンクから
+ワーカーが束縛して渡すので、モデルは投稿先を指定できない。実行前に必ずカンバンで
+承認を取る。投稿名義は利用者本人ではなくこの Bot になる。
 
 必要な Bot Token Scopes は `Connect-Service.ps1 -Service slack` が案内する。
+投稿には `chat:write` が要る。**後から足した場合は再インストールしてトークンを
+取り直すこと。**古いトークンのままだと `missing_scope` で失敗する。
 **Bot は招待されたチャンネルしか読めない。** 通知は来るのに本文が取れない場合、
 たいていアプリがそのチャンネルに入っていない。
 
@@ -51,11 +58,12 @@ OAuth 2.0 のループバック方式。`HttpListener` で受け口を立て、�
   Gmail 由来のカードなら、`threadId` と `In-Reply-To` を自動で付けて
   **元のスレッドへの返信として**下書きが作られる。識別子はワーカーが束縛して渡すので、
   モデルが持ち回る必要はない。
+- 送信 — `send_gmail` ツール。下書きと同じ経路で組み立てて `users.messages.send` に出す。
+  実行前に必ずカンバンで承認を取り、宛先・件名・本文が全文表示される。
 
-**スコープの注意:** 下書き作成には `gmail.compose` が要るが、Google には
-「下書きだけ」のスコープが無く、これは送信も許す。このコードは送信 API
-(`users.messages.send`) を一切呼ばない。気になる場合は `gmail.readonly` だけで
-運用し、下書きはローカルの `.eml` で受け取る運用もできる。
+**スコープの注意:** `gmail.compose` は下書きと送信の両方を許す。Google には
+「下書きだけ」のスコープが無いので、送信を止めたい場合はスコープではなく
+承認画面で拒否する。既存のトークンのまま送信できるので、Gmail は再認証不要。
 
 ## 資格情報の扱い
 
