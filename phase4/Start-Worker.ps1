@@ -10,7 +10,9 @@
     進捗は task_activity に、死活は worker_state に書く。カンバンはこれを読んで
     「いま何をしているか」を表示する。
 
-    送信・投稿は一切行わない。生成物は agent_output に入れて人間の確認に回す。
+    Slack への投稿とメールの送信もできるが、実行前に必ずカンバンで承認を取る。
+    利用者が送信を求めていないかぎり下書きまでで止め、生成物は agent_output に
+    入れて人間の確認に回す。
 
 .PARAMETER Once
     1周だけ実行して終了する (動作確認用)。
@@ -46,9 +48,11 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\..\phase2\lib\ClaudeClient.ps1"
 . "$PSScriptRoot\lib\WorkTools.ps1"
-# Gmail 連携があれば下書きツールが使えるようになる (未設定なら黙って無効)
+# 外部サービス連携があればツールが増える (未設定なら黙って無効)
 $gmailLib = Join-Path $PSScriptRoot '..\phase5\lib\GmailConnector.ps1'
 if (Test-Path $gmailLib) { . $gmailLib }
+$slackLib = Join-Path $PSScriptRoot '..\phase5\lib\SlackConnector.ps1'
+if (Test-Path $slackLib) { . $slackLib }
 
 $VerifyResults = (-not $NoVerify)
 
@@ -147,6 +151,28 @@ function Invoke-WorkItem {
         } catch { }
     }
 
+    # Slack 由来なら、返信の投稿先を取り出しておく。
+    # チャンネルをモデルに決めさせない。取り違えると無関係な相手に届く。
+    $slackChannel = ''
+    $slackChannelName = ''
+    $slackThreadTs = ''
+    if ($evt -and ([string] $evt['link']) -like 'slack://*' -and
+        (Get-Command Test-SlackConfigured -ErrorAction SilentlyContinue) -and (Test-SlackConfigured)) {
+        try {
+            $tg = Get-SlackTarget -Link ([string] $evt['link'])
+            if ($tg) {
+                $slackChannel     = $tg.channel
+                $slackChannelName = $tg.channelName
+                $slackThreadTs    = $tg.threadTs
+            }
+        }
+        catch {
+            # 投稿先が引けなくても作業自体は続けられる。投稿ツールが出ないだけ。
+            Write-Step $id 'step' ("Slack の投稿先を確認できませんでした: " + $_.Exception.Message) 'Yellow'
+        }
+    }
+    $gmailThreadLabel = if ($gmailThreadId) { '元のスレッドへの返信として送信' } else { '新規メールとして送信' }
+
     if (Stop-IfCancelled $id) { return }
 
     $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
@@ -159,10 +185,13 @@ function Invoke-WorkItem {
         $what = switch ($toolName) {
             'write_file'         { "ファイルを作成しています: $($toolInput.path)" }
             'create_email_draft' { "メールの下書きを作成しています: $($toolInput.subject)" }
+            'create_gmail_draft' { "Gmail に下書きを作成しています: $($toolInput.subject)" }
             'read_file'          { "ファイルを読んでいます: $($toolInput.path)" }
             'list_files'         { 'ファイル一覧を確認しています' }
             'run_command'        { "コマンドを実行しようとしています: $($toolInput.purpose)" }
             'http_fetch'         { "外部から取得しようとしています: $($toolInput.url)" }
+            'send_slack_message' { "Slack に投稿しようとしています: $slackChannelName" }
+            'send_gmail'         { "メールを送信しようとしています: $($toolInput.to)" }
             default              { "実行中: $toolName" }
         }
         Write-Step $id 'tool' $what 'DarkCyan'
@@ -174,7 +203,8 @@ function Invoke-WorkItem {
 
         # 危険なツールは承認を取ってから実行する。
         # 拒否は例外にせずモデルに返す。理由が伝われば別の手を考えられる。
-        $risk = Get-ToolRisk -Name $toolName -ToolInput $toolInput -Workspace $workspace
+        $risk = Get-ToolRisk -Name $toolName -ToolInput $toolInput -Workspace $workspace `
+                    -SlackChannelName $slackChannelName -GmailThreadLabel $gmailThreadLabel
         if ($risk.risky) {
             $decision = Wait-ToolApproval -TaskId $id -Tool $toolName -Risk $risk
             if ($decision -ne 'approved') {
@@ -194,7 +224,8 @@ function Invoke-WorkItem {
 
         $r = Invoke-WorkTool -Name $toolName -ToolInput $toolInput -Workspace $workspace `
                 -CommandTimeoutSec $CommandTimeoutSec `
-                -GmailThreadId $gmailThreadId -GmailInReplyTo $gmailInReplyTo
+                -GmailThreadId $gmailThreadId -GmailInReplyTo $gmailInReplyTo `
+                -SlackChannel $slackChannel -SlackThreadTs $slackThreadTs
         if ($r.artifact) {
             Add-TaskArtifact -Conn $conn -TaskId $id -Path $r.artifact
             Write-Step $id 'file' ("成果物: " + (Split-Path -Leaf $r.artifact)) 'Green'
@@ -209,7 +240,8 @@ function Invoke-WorkItem {
 
     while ($true) {
         $res = Invoke-ClaudeWork -Task $Task -Evt $evt -Policy $policy -Instructions $instructions `
-            -Tools (Get-WorkTools) -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
+            -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel)) `
+            -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
             -RepairIssues $issues
 
         if ($res.aborted) { Stop-IfCancelled $id | Out-Null; return }
@@ -280,7 +312,7 @@ function Invoke-WorkItem {
 }
 
 Write-Host 'ワーカーを開始しました。停止するには Ctrl+C' -ForegroundColor Green
-Write-Host '(送信・投稿は行いません。生成物はレビュー待ちに置かれます)' -ForegroundColor DarkGray
+Write-Host '(送信・投稿は承認を取ってから行います。生成物はレビュー待ちに置かれます)' -ForegroundColor DarkGray
 
 try {
     while ($true) {

@@ -48,12 +48,18 @@ function Connect-Slack {
        channels:history  groups:history  im:history  mpim:history
        channels:read     groups:read     im:read     mpim:read
        users:read
+       chat:write        ← 投稿する場合のみ。読むだけなら不要
   3. 「Install to Workspace」で導入 (管理者の承認が要る場合があります)
   4. 表示される Bot User OAuth Token (xoxb- で始まる) を控える
   5. 読みたいチャンネルにこのアプリを招待する (/invite @アプリ名)
 
   注意: Bot は招待されたチャンネルしか読めません。DM を読ませたい場合は
         im:history が必要で、それでも Bot 自身宛の DM に限られます。
+
+  投稿について: chat:write を後から足した場合は、再インストールしてトークンを
+        取り直さないと有効になりません (missing_scope で失敗します)。
+        投稿はワーカーの送信ツールからのみ行い、実行前にカンバンで承認を求めます。
+        投稿名義は自分ではなくこの Bot になります。
 
 '@ -ForegroundColor DarkGray
 
@@ -88,9 +94,10 @@ function Connect-Gmail {
 
   要求するスコープ:
     gmail.readonly … 本文の取得
-    gmail.compose  … 下書きの作成
-  注意: Google には「下書きだけ」のスコープがありません。compose は送信も許しますが、
-        このコードは送信 API を一切呼びません。
+    gmail.compose  … 下書きの作成と送信
+  注意: Google には「下書きだけ」のスコープがありません。compose は送信も許します。
+        送信はワーカーの送信ツールからのみ行い、実行前にカンバンで承認を求めます。
+        送らせたくない場合はスコープではなく、承認画面で拒否してください。
 
 '@ -ForegroundColor DarkGray
 

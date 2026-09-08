@@ -290,8 +290,12 @@
   };
   var TOOL_LABEL = {
     run_command: 'コマンド実行', http_fetch: '外部通信',
-    write_file: 'ファイル書き込み', read_file: 'ファイル読み取り', list_files: '一覧取得'
+    write_file: 'ファイル書き込み', read_file: 'ファイル読み取り', list_files: '一覧取得',
+    create_gmail_draft: 'Gmail 下書き作成',
+    send_gmail: 'メール送信', send_slack_message: 'Slack へ投稿'
   };
+  // 外に出たら取り消せないツール。承認パネルで見分けがつくようにする。
+  var IRREVERSIBLE = { send_gmail: 1, send_slack_message: 1 };
 
   function toast(msg, kind) {
     toastEl.textContent = msg;
@@ -389,7 +393,8 @@
 
     (d.pending || []).forEach(function (p) {
       var box = el('div', 'ask');
-      box.appendChild(el('div', 'hd', '実行の確認: ' + (TOOL_LABEL[p.tool] || p.tool)));
+      box.appendChild(el('div', 'hd', '実行の確認: ' + (TOOL_LABEL[p.tool] || p.tool)
+        + (IRREVERSIBLE[p.tool] ? '（取り消せません）' : '')));
       box.appendChild(el('div', 'sub', 'カード #' + p.task_id + ' · ' + p.summary + ' · ワーカーは応答があるまで止まっています'));
       // 実行内容は省略せず出す。ここが注入と実行のあいだの唯一の壁になる。
       box.appendChild(el('pre', null, p.detail));
@@ -861,8 +866,8 @@
     box.appendChild(el('h4', null, 'ワーカー'));
     box.appendChild(rows([
       ['承認なしで実行', 'カードの作業フォルダ内でのファイル作成・読み取り、メール下書き(.eml)の作成'],
-      ['承認が必要', 'コマンド実行、外部への通信、作業フォルダ外への書き込み・読み取り'],
-      ['しないこと', 'メールやメッセージの送信・投稿。下書きを作るところまで'],
+      ['承認が必要', 'コマンド実行、外部への通信、作業フォルダ外への書き込み・読み取り、Gmail 下書きの作成'],
+      ['取り消せない', 'メール送信と Slack への投稿。承認画面に宛先と本文が全文出る。既定は下書きまでで、送信は指示したときだけ'],
       ['作業中 / 承認待ち', 'ヘッダに対象カードと内容が出る'],
       ['停止中 / 未起動', 'phase4\\Start-Worker.ps1 を実行すると動き出す']
     ]));

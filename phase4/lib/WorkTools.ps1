@@ -7,7 +7,12 @@
 #
 #   分類の基準は「取り返しがつくか」と「作業フォルダの外に影響するか」。
 #     安全  … カードの作業フォルダ内のテキスト読み書き
-#     要承認 … コマンド実行、フォルダ外への書き込み、ネットワークアクセス
+#     要承認 … コマンド実行、フォルダ外への書き込み、ネットワークアクセス、
+#              そして外向きの送信 (Slack への投稿、メールの送信)
+#
+#   送信は他のツールと同じ承認の仕組みに乗せてあるが、取り消しがきかない点だけは違う。
+#   宛先と本文は承認画面に省略せず全文出す。投稿先・返信先はモデルに決めさせず、
+#   カードの元通知からワーカーが束縛して渡す (Slack のチャンネル、Gmail のスレッド)。
 #
 #   要承認のものは、承認画面に実行内容を省略せず出す。通知本文（第三者が書いた文字列）が
 #   入力に混ざりうるため、この画面が注入と実行のあいだに立つ唯一の壁になる。
@@ -129,6 +134,36 @@ $script:WorkTools = @(
     }
 )
 
+# 送信ツール。外に出たら取り消せないので、他のツールと違って
+# 「使える状態か」だけでなく「返す先が分かっているか」でも出し分ける。
+$script:SlackSendTool = @{
+    name        = 'send_slack_message'
+    description = '元の Slack スレッドに返信を投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。一度投稿すると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ文面を報告に載せるだけにする。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text            = @{ type = 'string'; description = '投稿する本文。そのまま投稿される。' }
+            reply_in_thread = @{ type = 'boolean'; description = '既定 true。false にすると元スレッドではなくチャンネルへの新規投稿になる。' }
+        }
+        required = @('text')
+    }
+}
+
+$script:GmailSendTool = @{
+    name        = 'send_gmail'
+    description = 'メールを実際に送信する。実行前に必ず利用者の承認を求める。Gmail から来たカードへの返信なら元のスレッドにぶら下がる。一度送ると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ create_gmail_draft か create_email_draft で下書きに留める。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            to      = @{ type = 'string'; description = '宛先。返信なら元の差出人。空欄では送信できない。' }
+            cc      = @{ type = 'string' }
+            subject = @{ type = 'string' }
+            body    = @{ type = 'string' }
+        }
+        required = @('to', 'subject', 'body')
+    }
+}
+
 $script:GmailDraftTool = @{
     name        = 'create_gmail_draft'
     description = 'Gmail に本物の下書きを作成する。Gmail から来たカードへの返信ならスレッドにぶら下がる。送信は行わない。ローカルの .eml ではなく実際のメールボックスに作る場合はこちらを使う。'
@@ -144,12 +179,20 @@ $script:GmailDraftTool = @{
     }
 }
 
-# Gmail 連携が設定されているときだけ下書きツールを見せる。
+# 連携が設定されているときだけ、そのサービスのツールを見せる。
 # 使えないツールを提示すると、モデルが存在しない手段を前提に計画を立ててしまう。
+#
+# Slack の投稿は返信先が要る。カードの元通知が Slack でなければ投稿先が無いので、
+# 設定済みでも出さない (呼び出し側が -HasSlackTarget で伝える)。
 function Get-WorkTools {
+    param([switch] $HasSlackTarget)
     $tools = @($script:WorkTools)
     if ((Get-Command Test-GmailConfigured -ErrorAction SilentlyContinue) -and (Test-GmailConfigured)) {
         $tools += $script:GmailDraftTool
+        $tools += $script:GmailSendTool
+    }
+    if ($HasSlackTarget -and (Get-Command Test-SlackConfigured -ErrorAction SilentlyContinue) -and (Test-SlackConfigured)) {
+        $tools += $script:SlackSendTool
     }
     return $tools
 }
@@ -164,10 +207,34 @@ function Get-ToolRisk {
     param(
         [Parameter(Mandatory)] [string] $Name,
         [Parameter(Mandatory)] $ToolInput,
-        [Parameter(Mandatory)] [string] $Workspace
+        [Parameter(Mandatory)] [string] $Workspace,
+        # 送信先はモデルの入力ではなくワーカーが束縛したものを出す。
+        # 承認画面に「モデルが言った宛先」を出しては壁にならない。
+        [string] $SlackChannelName,
+        [string] $GmailThreadLabel
     )
 
     switch ($Name) {
+        'send_slack_message' {
+            # 投稿は取り消せない。全文をそのまま出す。
+            $where = if ($SlackChannelName) { $SlackChannelName } else { '(元の通知のチャンネル)' }
+            $inThread = ($null -eq $ToolInput.reply_in_thread) -or ([bool] $ToolInput.reply_in_thread)
+            $how = if ($inThread) { '元のスレッドへの返信として' } else { 'チャンネルへの新規投稿として' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Slack に投稿します: $where"
+                detail  = "投稿先: $where`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+            }
+        }
+        'send_gmail' {
+            $to = if ($ToolInput.to) { $ToolInput.to } else { '(宛先未指定)' }
+            $how = if ($GmailThreadLabel) { $GmailThreadLabel } else { '新規メールとして送信' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "メールを送信します: $($ToolInput.subject)"
+                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。相手に届きます。"
+            }
+        }
         'run_command' {
             return [pscustomobject]@{
                 risky   = $true
@@ -255,11 +322,44 @@ function Invoke-WorkTool {
         # Gmail から来たカードの場合、返信をスレッドにぶら下げるための識別子。
         # モデルに持ち回らせず、ワーカーが束縛して渡す。
         [string] $GmailThreadId,
-        [string] $GmailInReplyTo
+        [string] $GmailInReplyTo,
+        # Slack から来たカードの場合の投稿先。同じ理由でワーカーが束縛する。
+        [string] $SlackChannel,
+        [string] $SlackThreadTs
     )
 
     try {
         switch ($Name) {
+            'send_slack_message' {
+                if (-not (Get-Command Send-SlackMessage -ErrorAction SilentlyContinue)) {
+                    throw 'Slack 連携が設定されていません。'
+                }
+                if (-not $SlackChannel) { throw 'このカードには Slack の投稿先がありません。' }
+                $inThread = ($null -eq $ToolInput.reply_in_thread) -or ([bool] $ToolInput.reply_in_thread)
+                $ts = if ($inThread) { $SlackThreadTs } else { '' }
+                $r = Send-SlackMessage -Channel $SlackChannel -Text ([string] $ToolInput.text) -ThreadTs $ts
+                $where = if ($inThread) { 'スレッドへの返信として' } else { 'チャンネルへの新規投稿として' }
+                $link = if ($r.permalink) { " {0}" -f $r.permalink } else { '' }
+                return [pscustomobject]@{
+                    text     = ("Slack に投稿しました ({0})。取り消しはできません。{1}" -f $where, $link)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'send_gmail' {
+                if (-not (Get-Command Send-GmailMessage -ErrorAction SilentlyContinue)) {
+                    throw 'Gmail 連携が設定されていません。'
+                }
+                [void] (Send-GmailMessage -To ([string] $ToolInput.to) -Cc ([string] $ToolInput.cc) `
+                        -Subject ([string] $ToolInput.subject) -Body ([string] $ToolInput.body) `
+                        -ThreadId $GmailThreadId -InReplyTo $GmailInReplyTo)
+                $where = if ($GmailThreadId) { '元のスレッドへの返信として' } else { '新規メールとして' }
+                return [pscustomobject]@{
+                    text     = ("メールを送信しました ({0})。取り消しはできません。宛先: {1}" -f $where, $ToolInput.to)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
             'create_gmail_draft' {
                 if (-not (Get-Command New-GmailDraft -ErrorAction SilentlyContinue)) {
                     throw 'Gmail 連携が設定されていません。'

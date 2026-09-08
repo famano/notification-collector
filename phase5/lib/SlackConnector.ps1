@@ -8,7 +8,11 @@
 #   正規 API で本文を取り直せる。
 #
 # Socket Mode は使わない。通知リスナーが既にトリガーとして機能しているので、
-# 常時接続を足す必要がなく、必要なのは読み取り (Web API) だけ。
+# 常時接続を足す必要がない。
+#
+# 投稿 (chat.postMessage) も持つ。読み取りと違い取り消しがきかないので、
+# 呼ぶ前に必ずカンバンで承認を取る (判定は phase4/lib/WorkTools.ps1)。
+# 投稿先はモデルに決めさせず、カードの元通知のリンクから束縛して渡す。
 
 . "$PSScriptRoot\SecretStore.ps1"
 
@@ -58,6 +62,27 @@ function Invoke-SlackApi {
     $obj = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json
     if (-not $obj.ok) {
         # Slack は HTTP 200 で ok:false を返す。握り潰すと原因が分からなくなる。
+        throw ("Slack API {0} が失敗しました: {1}" -f $Method, $obj.error)
+    }
+    return $obj
+}
+
+# 書き込み系。GET と違い引数は JSON ボディで送る。
+function Invoke-SlackApiPost {
+    param([Parameter(Mandatory)] [string] $Method, [Parameter(Mandatory)] [hashtable] $Body)
+    $token = Get-Secret -Name 'slack.botToken'
+    if (-not $token) { throw 'Slack のトークンが設定されていません。Connect-Service.ps1 -Service slack を実行してください。' }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $json = $Body | ConvertTo-Json -Depth 10 -Compress
+    $resp = Invoke-WebRequest -Uri "$script:SlackApi/$Method" -Method Post `
+                -Headers @{ Authorization = "Bearer $token" } `
+                -ContentType 'application/json; charset=utf-8' `
+                -Body ([Text.Encoding]::UTF8.GetBytes($json)) `
+                -UseBasicParsing -TimeoutSec 30
+    $obj = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json
+    if (-not $obj.ok) {
+        # missing_scope や not_in_channel はここで名前が出ないと原因が分からない
         throw ("Slack API {0} が失敗しました: {1}" -f $Method, $obj.error)
     }
     return $obj
@@ -144,4 +169,51 @@ function Get-SlackThread {
         messageCount = @($r.messages).Count
         permalink    = $permalink
     }
+}
+
+# ---------------------------------------------------------------- 投稿
+
+function Get-SlackTarget {
+    <#
+      .SYNOPSIS
+        通知のリンクから「どこに返すか」を決める。表示用の名前も一緒に返す。
+      .OUTPUTS
+        [pscustomobject] channel / channelName / threadTs  (解釈できなければ $null)
+    #>
+    param([Parameter(Mandatory)] [string] $Link)
+    $ref = ConvertFrom-SlackLink $Link
+    if (-not $ref) { return $null }
+    return [pscustomobject]@{
+        channel     = $ref.channel
+        channelName = (Resolve-SlackChannel $ref.channel)
+        threadTs    = $ref.threadTs
+    }
+}
+
+function Send-SlackMessage {
+    <#
+      .SYNOPSIS
+        Slack に投稿する。取り消せないので、呼び出し側は必ず承認を取ってから呼ぶこと。
+      .PARAMETER ThreadTs
+        指定するとスレッドへの返信になる。省略するとチャンネルへの新規投稿。
+      .OUTPUTS
+        [pscustomobject] ts / channel / permalink
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Channel,
+        [Parameter(Mandatory)] [string] $Text,
+        [string] $ThreadTs
+    )
+    if (-not $Text.Trim()) { throw '本文が空です。' }
+
+    $body = @{ channel = $Channel; text = $Text }
+    if ($ThreadTs) { $body['thread_ts'] = $ThreadTs }
+    $r = Invoke-SlackApiPost -Method 'chat.postMessage' -Body $body
+
+    $permalink = ''
+    try {
+        $p = Invoke-SlackApi -Method 'chat.getPermalink' -Query @{ channel = $r.channel; message_ts = $r.ts }
+        $permalink = $p.permalink
+    } catch { }
+    return [pscustomobject]@{ ts = $r.ts; channel = $r.channel; permalink = $permalink }
 }

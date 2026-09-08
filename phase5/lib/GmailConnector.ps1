@@ -1,5 +1,5 @@
 ﻿# GmailConnector.ps1
-# Gmail API。通知経路に依存せず、メール本文を直接取得し、本物の下書きを作る。
+# Gmail API。通知経路に依存せず、メール本文を直接取得し、下書きの作成と送信を行う。
 #
 # 認証は OAuth 2.0 のループバック方式（デスクトップアプリ）。
 # 既に HttpListener を持っているので、リダイレクト受けを自前で立てられる。
@@ -11,9 +11,11 @@ $script:GmailApi   = 'https://gmail.googleapis.com/gmail/v1'
 $script:GoogleAuth = 'https://accounts.google.com/o/oauth2/v2/auth'
 $script:GoogleToken = 'https://oauth2.googleapis.com/token'
 
-# readonly は本文取得、compose は下書き作成に必要。
+# readonly は本文取得、compose は下書き作成と送信に必要。
 # 注意: Google には「下書きだけ」のスコープが無く、compose は送信も許す。
-# このコードは送信 API (users.messages.send) を一切呼ばない。
+# 送信は Send-GmailMessage からのみ行い、そこに至るには必ずカンバンでの承認を通る
+# (判定は phase4/lib/WorkTools.ps1)。既存のトークンのままで送信できてしまうので、
+# 送らせたくない場合はスコープではなく承認側で止めること。
 $script:GmailScopes = @(
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.compose'
@@ -235,20 +237,14 @@ function Get-GmailRecent {
 
 # ---------------------------------------------------------------- 下書き作成
 
-function New-GmailDraft {
-    <#
-      .SYNOPSIS
-        Gmail に本物の下書きを作る。送信は行わない。
-      .PARAMETER ThreadId / InReplyTo
-        返信にする場合に指定する。スレッドにぶら下がる。
-    #>
+# 下書きと送信で同じ本文を使う。片方だけ整形を直して食い違うのを避ける。
+function New-GmailRawMessage {
     param(
         [string] $To, [string] $Cc,
         [Parameter(Mandatory)] [string] $Subject,
         [Parameter(Mandatory)] [string] $Body,
-        [string] $ThreadId, [string] $InReplyTo
+        [string] $InReplyTo
     )
-
     $sb = New-Object Text.StringBuilder
     if ($To) { [void] $sb.AppendLine("To: $To") }
     if ($Cc) { [void] $sb.AppendLine("Cc: $Cc") }
@@ -264,12 +260,53 @@ function New-GmailDraft {
     # 本文も base64 にする。生の UTF-8 を 8bit で流すと環境により壊れる。
     [void] $sb.AppendLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Body)))
 
-    $raw = ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes($sb.ToString()))
+    return ConvertTo-Base64Url ([Text.Encoding]::UTF8.GetBytes($sb.ToString()))
+}
+
+function New-GmailDraft {
+    <#
+      .SYNOPSIS
+        Gmail に本物の下書きを作る。送信は行わない。
+      .PARAMETER ThreadId / InReplyTo
+        返信にする場合に指定する。スレッドにぶら下がる。
+    #>
+    param(
+        [string] $To, [string] $Cc,
+        [Parameter(Mandatory)] [string] $Subject,
+        [Parameter(Mandatory)] [string] $Body,
+        [string] $ThreadId, [string] $InReplyTo
+    )
+    $raw = New-GmailRawMessage -To $To -Cc $Cc -Subject $Subject -Body $Body -InReplyTo $InReplyTo
     $payload = @{ message = @{ raw = $raw } }
     if ($ThreadId) { $payload.message['threadId'] = $ThreadId }
 
     $d = Invoke-GmailApi -Path '/users/me/drafts' -Method 'Post' -Body $payload
     return [pscustomobject]@{ id = $d.id; messageId = $d.message.id; threadId = $d.message.threadId }
+}
+
+function Send-GmailMessage {
+    <#
+      .SYNOPSIS
+        メールを送信する。取り消せないので、呼び出し側は必ず承認を取ってから呼ぶこと。
+      .PARAMETER ThreadId / InReplyTo
+        返信にする場合に指定する。元のスレッドにぶら下がる。
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $To, [string] $Cc,
+        [Parameter(Mandatory)] [string] $Subject,
+        [Parameter(Mandatory)] [string] $Body,
+        [string] $ThreadId, [string] $InReplyTo
+    )
+    # 宛先の無い送信は Gmail 側でも弾かれるが、その前に止める。
+    # 空欄のまま出して「送ったつもり」になるのが一番まずい。
+    if (-not $To.Trim()) { throw '宛先が空です。' }
+
+    $raw = New-GmailRawMessage -To $To -Cc $Cc -Subject $Subject -Body $Body -InReplyTo $InReplyTo
+    $payload = @{ raw = $raw }
+    if ($ThreadId) { $payload['threadId'] = $ThreadId }
+
+    $m = Invoke-GmailApi -Path '/users/me/messages/send' -Method 'Post' -Body $payload
+    return [pscustomobject]@{ id = $m.id; threadId = $m.threadId }
 }
 
 function ConvertTo-RfcHeader {
