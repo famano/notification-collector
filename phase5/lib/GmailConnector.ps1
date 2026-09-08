@@ -139,15 +139,34 @@ function Invoke-GmailApi {
     )
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $headers = @{ Authorization = "Bearer $(Get-GmailAccessToken)" }
-    $args = @{
+    # $args は自動変数なので避ける。splat 先で取り違えると原因が追えなくなる。
+    $req = @{
         Uri = "$script:GmailApi$Path"; Method = $Method; Headers = $headers
         UseBasicParsing = $true; TimeoutSec = 60
     }
     if ($Body) {
-        $args['ContentType'] = 'application/json'
-        $args['Body'] = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 10 -Compress))
+        $req['ContentType'] = 'application/json'
+        $req['Body'] = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 10 -Compress))
     }
-    $resp = Invoke-WebRequest @args
+    try {
+        $resp = Invoke-WebRequest @req
+    }
+    catch [Net.WebException] {
+        # Google は失敗理由を本文の JSON に入れてくる。
+        # Slack 側で ok:false を握り潰さないのと同じ理由で、ここでも本文まで出す。
+        $detail = ''
+        $r = $_.Exception.Response
+        if ($r) {
+            $sr = New-Object IO.StreamReader($r.GetResponseStream())
+            try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose() }
+            $parsed = $null
+            try { $parsed = $raw | ConvertFrom-Json } catch { }
+            $detail = if ($parsed -and $parsed.error) {
+                "{0} ({1})" -f $parsed.error.message, $parsed.error.status
+            } else { $raw }
+        }
+        throw ("Gmail API {0} が失敗しました: {1} / {2}" -f $Path, $_.Exception.Message, $detail)
+    }
     return ([Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()) | ConvertFrom-Json)
 }
 

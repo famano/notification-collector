@@ -16,6 +16,9 @@ phase5/data/
 .env*
 secrets.json
 token*.json
+# OAuth クライアント (Google Cloud からダウンロードした素のまま)。
+# Connect-Service.ps1 で DPAPI に取り込んだ後はリポジトリに置く必要がない。
+client_secret*.json
 
 # Windows / エディタ
 Thumbs.db
