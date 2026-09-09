@@ -197,6 +197,15 @@ function Get-WorkTools {
     return $tools
 }
 
+# 実行すると外に出て、取り消せないツール。
+# 承認の要否とは別の軸。承認が要るだけのツール (コマンド実行など) は失敗しても
+# やり直せるが、こちらは送ったあとに何をしても戻らないので、
+# 呼び出し側は「もう一度やらせる」判断の前にこれを見る。
+function Test-IrreversibleTool {
+    param([Parameter(Mandatory)] [string] $Name)
+    return @('send_gmail', 'send_slack_message') -contains $Name
+}
+
 # ---------------------------------------------------------------- 危険度の判定
 
 function Get-ToolRisk {

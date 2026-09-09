@@ -176,6 +176,12 @@ function Invoke-WorkItem {
     if (Stop-IfCancelled $id) { return }
 
     $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
+
+    # このカードで実際に外へ出したもの。送信はファイルとして残らないので、
+    # 検証と報告のために別に控える。GetNewClosure() は変数を複製するが、
+    # 参照型なら中身は共有されるので、クロージャからの追記が外にも見える。
+    $sentItems = [System.Collections.ArrayList]::new()
+
     Write-Step $id 'llm' '対応内容を検討しています…'
 
     # ツール実行のたびに作業ログへ残し、その直前に中止要求を見る。
@@ -230,6 +236,12 @@ function Invoke-WorkItem {
             Add-TaskArtifact -Conn $conn -TaskId $id -Path $r.artifact
             Write-Step $id 'file' ("成果物: " + (Split-Path -Leaf $r.artifact)) 'Green'
         }
+        # 送信は取り消せない。何を出したかを作業ログに独立した種別で残し、
+        # 検証にも回せるよう控えておく。
+        if (-not $r.isError -and (Test-IrreversibleTool -Name $toolName)) {
+            [void] $sentItems.Add($risk.detail)
+            Write-Step $id 'sent' $risk.summary 'Green'
+        }
         if ($r.isError) { Write-Step $id 'step' ("ツールが失敗: " + $r.text) 'Yellow' }
         return $r
     }.GetNewClosure()
@@ -257,7 +269,8 @@ function Invoke-WorkItem {
             try { $c = [IO.File]::ReadAllText([string] $a['path'], [Text.Encoding]::UTF8) } catch { $c = '(読み取れませんでした)' }
             $arts += [pscustomobject]@{ name = $a['name']; content = $c }
         }
-        $v = (Invoke-ClaudeVerify -Task $Task -Policy $policy -Artifacts $arts -Report $res.text -Instructions $instructions).result
+        $v = (Invoke-ClaudeVerify -Task $Task -Policy $policy -Artifacts $arts -Report $res.text `
+                -Instructions $instructions -Sent ([string[]] $sentItems.ToArray())).result
         $verdict = $v
 
         $high = @($v.issues | Where-Object { $_.severity -eq 'high' })
@@ -268,6 +281,13 @@ function Invoke-WorkItem {
 
         Write-Step $id 'verify' ("検証: 要修正 {0} 件 — {1}" -f $high.Count, $v.summary) 'Yellow'
         foreach ($i in $high) { Write-Step $id 'issue' ("[{0}] {1}: {2}" -f $i.severity, $i.where, $i.problem) 'Yellow' }
+
+        # 送信済みのカードは直しに回さない。送ったものは取り消せず、もう一度
+        # モデルを走らせると同じ相手に二通目が出かねない。指摘は人間に渡す。
+        if ($sentItems.Count -gt 0) {
+            Write-Step $id 'verify' '送信済みのため修正は行いません。指摘は人間の確認に回します。' 'Yellow'
+            break
+        }
 
         $round++
         if ($round -gt $MaxRepairs) {
@@ -283,6 +303,11 @@ function Invoke-WorkItem {
     $summary = $res.text
     if ($files.Count -gt 0) {
         $summary += "`n`n作成したファイル:`n" + (($files | ForEach-Object { '- ' + $_['name'] }) -join "`n")
+    }
+    # 送信はファイルに残らない。報告の先頭近くに出して見落とさないようにする。
+    if ($sentItems.Count -gt 0) {
+        $summary += "`n`n送信済み ({0} 件):`n" -f $sentItems.Count
+        foreach ($x in $sentItems) { $summary += ('- ' + (($x -split "`n")[0]) + "`n") }
     }
     if ($verdict) {
         $mark = if ($verdict.verdict -eq 'ok' -and $verdict.completed) { '問題なし' } else { '要確認' }
@@ -303,7 +328,9 @@ function Invoke-WorkItem {
     [void] $conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($id))
     [void] (Set-TaskColumn -Conn $conn -TaskId $id -Column 'review')
 
-    $msg = if ($files.Count -gt 0) {
+    $msg = if ($sentItems.Count -gt 0) {
+        "{0} 件を送信しました。レビュー待ちに移動します。" -f $sentItems.Count
+    } elseif ($files.Count -gt 0) {
         "{0} 件のファイルを作成しました。レビュー待ちに移動します。" -f $files.Count
     } else {
         'ファイルの作成はありませんでした。レビュー待ちに移動します。'
@@ -313,6 +340,16 @@ function Invoke-WorkItem {
 
 Write-Host 'ワーカーを開始しました。停止するには Ctrl+C' -ForegroundColor Green
 Write-Host '(送信・投稿は承認を取ってから行います。生成物はレビュー待ちに置かれます)' -ForegroundColor DarkGray
+
+# どのツールが使える状態で起動したかを最初に出す。
+# ライブラリは起動時にしか読み込まない。コードを更新したのに動きが変わらないときは、
+# まずこの行を見れば、更新前のプロセスが動いたままかどうかが分かる。
+function Test-Connected { param([string] $Fn) return ((Get-Command $Fn -ErrorAction SilentlyContinue) -and (& $Fn)) }
+$gmailOn = Test-Connected 'Test-GmailConfigured'
+$slackOn = Test-Connected 'Test-SlackConfigured'
+Write-Host ('連携: Gmail={0} / Slack={1}' -f
+    $(if ($gmailOn) { '有効 (下書き・送信)' } else { '無効' }),
+    $(if ($slackOn) { '有効 (Slack 由来のカードに投稿)' } else { '無効' })) -ForegroundColor DarkGray
 
 try {
     while ($true) {
