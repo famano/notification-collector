@@ -16,6 +16,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase4\Start-Worker.ps1
 **ワーカーを起動していない限り、何をしても動きません。** カンバンは別プロセスなので、
 ボードを開いているだけでは作業は進みません。
 
+**逆に、ワーカーはカードを作りません。** 見ているのは `tasks` テーブルだけで、
+Gmail も Slack も通知 DB も読みません。新しいメールがカードになるには
+`Start-Collector.ps1` (取り込みとトリアージ) が別に常駐している必要があります。
+ワーカーとカンバンだけを起動して待っても、「要対応」は永久に空のままです。
+
 拾う条件（[`Get-NextWorkItem`](../phase2/lib/TaskStore.ps1)）:
 
 | 条件 | 内容 |
@@ -69,6 +74,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase4\Start-Worker.ps1
 
 | ツール | 承認 | 内容 |
 |---|---|---|
+| `propose_reply` | 不要 | 返信文面をカンバンの「送る文面」欄に載せる（返信先があるカードのみ） |
 | `create_email_draft` | 不要 | メールの下書きを `.eml` として作成 |
 | `write_file` | 場合による | テキストファイルを作成 |
 | `read_file` / `list_files` | 場合による | ファイルの読み取り・一覧 |
@@ -79,6 +85,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase4\Start-Worker.ps1
 | `send_slack_message` | **必要** | 元の Slack スレッドへの投稿（Slack 連携時、かつ Slack 由来のカードのみ） |
 
 成果物は `phase4/output/task-NNNN/` に出る。カード詳細に一覧が出て中身も確認できる。
+
+### 送信を指示されていないときは、文面をカードに載せる
+
+返信先があるカードで利用者が送信を指示していない場合、`propose_reply` で
+**カンバンの「送る文面」欄に文面を置く**（`tasks.draft_text`）。利用者はその欄で
+内容を直し、そこから送信できる。
+
+外へは出ないので承認は要らない。書き込むのは `draft_text` で、`user_edited`
+（利用者が確定させた版）は踏まない。何度作り直しても手を入れた内容は消えない。
+
+**報告に文面を書くだけで終わらせない。** それだと利用者は文面を手で貼り直すことになり、
+「カンバンで完結する」という前提が崩れる。システムプロンプトでもそう指示してある。
+返信先が無いカードではこのツール自体を見せない ―― 宛先の無い返信を書き始めるため。
 
 ### 送信は、承認を取ってから行う
 

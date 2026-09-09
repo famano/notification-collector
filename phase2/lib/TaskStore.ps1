@@ -148,10 +148,35 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'archived_at') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN archived_at TEXT')
     }
+    # ワーカーが提案する「外に出る文面」。agent_output (人向けの報告) とは別物。
+    # 3つに分けている理由:
+    #   agent_output … 何をしたか・何を確認すべきかの説明。読むためのもの
+    #   draft_text   … 送られる候補の本文。再実行のたびに上書きしてよい
+    #   user_edited  … 利用者が確定させた版。これが実際に送られる。上書きしない
+    if ($cols -notcontains 'draft_text') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN draft_text TEXT')
+    }
     # 正規 API で本文を取り直したかの印 (Phase 5)
     $ecols = @($Conn.Query('PRAGMA table_info(events)')) | ForEach-Object { $_['name'] }
     if ($ecols -notcontains 'context_fetched') {
         $Conn.Exec('ALTER TABLE events ADD COLUMN context_fetched TEXT')
+    }
+    # 元の会話へ戻るための https リンク (Phase 5)。
+    # link は通知の launch なのでアプリ独自スキームだったり空だったりする。
+    # ブラウザから確実に踏めるものは別に持つ。
+    if ($ecols -notcontains 'permalink') {
+        $Conn.Exec('ALTER TABLE events ADD COLUMN permalink TEXT')
+    }
+    # 同じメッセージを指す通知と同期を突き合わせるための同一性。
+    # source_key は経路ごとに別物 (通知は Windows の tag、同期は API の主キー) なので、
+    # 「何を指しているか」は別の軸で持つ必要がある。
+    if ($ecols -notcontains 'dedup_key') {
+        $Conn.Exec('ALTER TABLE events ADD COLUMN dedup_key TEXT')
+        $Conn.Exec('CREATE INDEX IF NOT EXISTS idx_events_dedup ON events(dedup_key)')
+    }
+    # 同じものを指す正のイベントの id。入っている側はカードにしない。
+    if ($ecols -notcontains 'superseded_by') {
+        $Conn.Exec('ALTER TABLE events ADD COLUMN superseded_by TEXT')
     }
 }
 
@@ -176,14 +201,196 @@ function Add-Event {
         [Parameter(Mandatory)] [string] $Source,
         [Parameter(Mandatory)] [string] $SourceKey,
         [string] $App, [string] $AppId, [string] $OccurredAt,
-        [string] $Title, [string] $Body, [string] $Link, [string] $RawJson
+        [string] $Title, [string] $Body, [string] $Link, [string] $RawJson,
+        # 通知と同期で同じものを指すときの突き合わせ用 (New-EventIdentity で作る)
+        [string] $DedupKey
     )
     $id = "$Source|$SourceKey"
     $changed = $Conn.NonQuery(
-        'INSERT OR IGNORE INTO events (id, source, source_key, app, app_id, occurred_at, ingested_at, title, body, link, raw_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-        [object[]] @($id, $Source, $SourceKey, $App, $AppId, $OccurredAt, (Get-Now), $Title, $Body, $Link, $RawJson))
+        'INSERT OR IGNORE INTO events (id, source, source_key, app, app_id, occurred_at, ingested_at, title, body, link, raw_json, dedup_key)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        [object[]] @($id, $Source, $SourceKey, $App, $AppId, $OccurredAt, (Get-Now), $Title, $Body, $Link, $RawJson, $DedupKey))
+    # 既存行には INSERT OR IGNORE が効かない。この列より前に入ったイベントにも
+    # 後から同一性が付くように、取り込みのたびに書き直す (計算は決定的)。
+    if (-not $changed -and $DedupKey) { Set-EventIdentity -Conn $Conn -EventId $id -Key $DedupKey }
     return [pscustomobject]@{ id = $id; isNew = ($changed -gt 0) }
+}
+
+# ---------------------------------------------------------------- 通知と同期の突き合わせ
+#
+# 同じメッセージが2つの経路で入ってくる。Slack のメンションはトーストと
+# conversations.history の両方に現れ、メールも Chrome の Web 通知と Gmail API の
+# 両方から取れる。source_key は経路ごとに別物なので events の UNIQUE では弾けず、
+# 素直に流すとカードが2枚立つ。
+#
+# そこで「何を指しているか」を dedup_key として別に持ち、経路をまたいで突き合わせる。
+# **正は必ず同期側**。通知には表示用テキストしか無いが、同期は本文・スレッド全文・
+# 返信先を持っている。カードの出口 (送る/実施) まで面倒を見られるのは同期側だけ。
+
+# 同一性に使う文字列をそろえる。通知と API で空白や大小が揺れるため。
+function ConvertTo-IdentityText {
+    param([string] $Value, [int] $Max = 80)
+    if (-not $Value) { return '' }
+    $t = ($Value -replace '\s+', ' ').Trim().ToLowerInvariant()
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max) }
+    return $t
+}
+
+# 通知側と同期側が同じ文字列を作れるように、組み立てはここに集約する。
+#   slack … チャンネル ID と ts。通知の launch (slack://) にも API にも同じものが入っている
+#   mail  … 件名と差出人の表示名。メール通知にメッセージ ID は載らないので内容で突き合わせる
+function New-EventIdentity {
+    param(
+        [Parameter(Mandatory)] [ValidateSet('slack', 'mail')] [string] $Kind,
+        # Mandatory を付けないこと。件名の無いメールのように材料が空のものがあり、
+        # 必須にすると束縛エラーで同期ごと止まる。空は「突き合わせない」であって異常ではない。
+        [AllowNull()] [AllowEmptyCollection()] [string[]] $Parts
+    )
+    if (-not $Parts) { return $null }
+    $norm = @($Parts | ForEach-Object { ConvertTo-IdentityText $_ })
+    # 材料が欠けているものは突き合わせない。空文字どうしが一致してしまう。
+    if (@($norm | Where-Object { $_ }).Count -ne $norm.Count) { return $null }
+    return ($Kind + ':' + ($norm -join '|'))
+}
+
+# From ヘッダから表示名だけを取り出す。
+#   "F.Amano" <notifications@github.com> → F.Amano
+# ブラウザのメール通知に出るのはこの表示名なので、突き合わせの材料になる。
+function Get-MailDisplayName {
+    param([string] $From)
+    if (-not $From) { return '' }
+    $v = $From.Trim()
+    $i = $v.IndexOf('<')
+    if ($i -gt 0)     { $v = $v.Substring(0, $i) }
+    elseif ($i -eq 0) { $v = $v.Trim('<', '>') }
+    return $v.Trim().Trim('"').Trim()
+}
+
+# 通知が「どのメッセージを指しているか」を割り出す。
+# 引数は notifications.jsonl の1行を ConvertFrom-Json したもの。
+# 分からないものは $null。突き合わせないだけで、これまで通りカードになる。
+function Get-NotificationIdentity {
+    param($N)
+
+    # Slack: launch は slack://channel?id=<channel>&message=<ts>。
+    # ここに入っているのは conversations.history が返すものと同じ主キーで、
+    # 通知をトリガーに本文を取り直せるのと同じ理屈で、同期版と結び付けられる。
+    $launch = [string] $N.launch
+    if ($launch -like 'slack://*') {
+        $q = @{}
+        $i = $launch.IndexOf('?')
+        if ($i -ge 0) {
+            foreach ($pair in ($launch.Substring($i + 1) -split '&')) {
+                $kv = $pair -split '=', 2
+                if ($kv.Count -eq 2) { $q[$kv[0]] = [Uri]::UnescapeDataString($kv[1]) }
+            }
+        }
+        if ($q['id'] -and $q['message']) {
+            return New-EventIdentity -Kind 'slack' -Parts @($q['id'], $q['message'])
+        }
+        return $null
+    }
+
+    # Gmail: ブラウザの Web 通知。差出人の表示名が title、件名が body に入る。
+    # メッセージ ID は通知に載らないので、内容で突き合わせるほかない。
+    # 同じ差出人から同じ件名が15分以内に2通来ると同じ鍵になるが、
+    # 束ねるのは「通知1件と同期1件」の1対1だけなので、メールが消えることはない。
+    if (([string] $N.attribution -like '*mail.google.com*') -or ($launch -like '*mail.google.com*')) {
+        return New-EventIdentity -Kind 'mail' -Parts @($N.body, $N.title)
+    }
+    return $null
+}
+
+# 保存済みの events の行から同一性を計算し直す。
+# 取り込み時に付ける経路 (Add-Event -DedupKey) と同じ結果になること。
+# この列より前に入ったイベントを遡って突き合わせるために要る。
+function Get-EventIdentityFromRow {
+    param([Parameter(Mandatory)] $Row)
+    $raw = $null
+    try { $raw = [string] $Row['raw_json'] | ConvertFrom-Json } catch { }
+    if (-not $raw) { return $null }
+
+    switch ([string] $Row['source']) {
+        'notification' { return Get-NotificationIdentity $raw }
+        'slack'        { return New-EventIdentity -Kind 'slack' -Parts @($raw.channel, $raw.ts) }
+        'gmail'        { return New-EventIdentity -Kind 'mail'  -Parts @($raw.subject, (Get-MailDisplayName $raw.from)) }
+    }
+    return $null
+}
+
+function Set-EventIdentity {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $EventId, [string] $Key)
+    if (-not $Key) { return }
+    [void] $Conn.NonQuery('UPDATE events SET dedup_key = ? WHERE id = ?', [object[]] @($Key, $EventId))
+}
+
+# 同期 (正規 API) が通知に勝つ。数字の大小で比べる。
+function Get-EventRank {
+    param([string] $Source)
+    if ($Source -eq 'notification') { return 1 }
+    return 2
+}
+
+# 同じものを指す「反対側の経路」のイベントを1件返す。
+#
+# 経路をまたぐものしか見ないのが肝心。同じ経路どうしを束ねると、
+# 件名も差出人も同じメールが続けて2通来たとき (CI の失敗通知など) に
+# 片方が消える。通知1件と同期1件を1対1で結ぶ。
+function Find-EventCounterpart {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] $Evt,
+        # 通知の到着と API の受信時刻はふつう数秒差。広く取っても実害は無いが、
+        # 同じ件名のメールが並ぶ間隔より狭くしておく。
+        [int] $WindowSeconds = 900
+    )
+    $key = [string] $Evt['dedup_key']
+    if (-not $key) { return $null }
+    $rows = @($Conn.Query(
+        'SELECT e.* FROM events e
+          WHERE e.dedup_key = ? AND e.id <> ? AND e.source <> ?
+            AND e.superseded_by IS NULL
+            AND NOT EXISTS (SELECT 1 FROM events x WHERE x.superseded_by = e.id)
+            AND ABS(julianday(e.occurred_at) - julianday(?)) * 86400 <= ?
+          ORDER BY ABS(julianday(e.occurred_at) - julianday(?)) ASC
+          LIMIT 1',
+        [object[]] @($key, $Evt['id'], $Evt['source'], $Evt['occurred_at'], $WindowSeconds, $Evt['occurred_at'])))
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
+function Set-EventSuperseded {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $EventId, [Parameter(Mandatory)] [string] $CanonicalId)
+    [void] $Conn.NonQuery('UPDATE events SET superseded_by = ? WHERE id = ?', [object[]] @($CanonicalId, $EventId))
+}
+
+function Test-EventTriaged {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $EventId)
+    return (@($Conn.Query('SELECT 1 FROM triage_log WHERE event_id = ? LIMIT 1', [object[]] @($EventId))).Count -gt 0)
+}
+
+function Test-EventSuperseded {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $EventId)
+    $r = @($Conn.Query('SELECT superseded_by FROM events WHERE id = ?', [object[]] @($EventId)))
+    if ($r.Count -eq 0) { return $false }
+    return [bool] $r[0]['superseded_by']
+}
+
+function Get-TaskIdByEvent {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $EventId)
+    $r = @($Conn.Query('SELECT id FROM tasks WHERE event_id = ?', [object[]] @($EventId)))
+    if ($r.Count -eq 0) { return $null }
+    return [int] $r[0]['id']
+}
+
+# カードの土台を差し替える。列・コメント・利用者の編集はそのまま、
+# 中身の出どころだけ通知から同期に移る。
+# version は上げない。カードの内容を書き換えたわけではないので、
+# 作業中のワーカーの書き戻しを弾く理由が無い。
+function Move-TaskEvent {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [Parameter(Mandatory)] [string] $EventId)
+    [void] $Conn.NonQuery('UPDATE tasks SET event_id = ?, updated_at = ? WHERE id = ?',
+                          [object[]] @($EventId, (Get-Now), $TaskId))
 }
 
 # まだ判定していないイベント (triage_log に記録が無いもの)
@@ -192,6 +399,7 @@ function Get-UntriagedEvents {
     return $Conn.Query(
         'SELECT e.* FROM events e
           WHERE NOT EXISTS (SELECT 1 FROM triage_log t WHERE t.event_id = e.id)
+            AND e.superseded_by IS NULL
           ORDER BY e.occurred_at ASC
           LIMIT ?', [object[]] @($Limit))
 }
@@ -589,7 +797,7 @@ function Get-TaskDetail {
 
 # 更新できるカラムはホワイトリストで固定する。キーを SQL に埋めるため、
 # 呼び出し側の入力をそのまま通してはいけない。
-$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'agent_output')
+$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'agent_output', 'draft_text')
 
 function Update-TaskFields {
     param(

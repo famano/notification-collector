@@ -55,6 +55,7 @@ function Connect-Slack {
 
   注意: Bot は招待されたチャンネルしか読めません。DM を読ませたい場合は
         im:history が必要で、それでも Bot 自身宛の DM に限られます。
+        自分宛の DM まで拾いたい場合は、次に聞く User Token を入れてください。
 
   投稿について: chat:write を後から足した場合は、再インストールしてトークンを
         取り直さないと有効になりません (missing_scope で失敗します)。
@@ -63,12 +64,38 @@ function Connect-Slack {
 
 '@ -ForegroundColor DarkGray
 
-    $sec = Read-Host '  Bot User OAuth Token (xoxb-...)' -AsSecureString
+    $sec = Read-Host '  Bot User OAuth Token (xoxb-... / 空欄でスキップ)' -AsSecureString
     $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
         [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
-    if (-not $token) { Write-Host '  入力がありません。中止します。' -ForegroundColor Yellow; return }
+    if ($token) { Set-Secret -Name 'slack.botToken' -Value $token }
 
-    Set-Secret -Name 'slack.botToken' -Value $token
+    # ---- ユーザートークン (任意) ----
+    Write-Host ''
+    Write-Host @'
+  User Token (任意)
+
+  Bot トークンだけだと、拾えるのは「Bot を招待したチャンネル」に限られます。
+  夜のあいだに来た DM や、Bot が居ないチャンネルのメンションは取りこぼします。
+  User Token (xoxp-) を入れると、読み取りは自分が見えている範囲すべてになります。
+
+  取り方: 同じアプリの OAuth & Permissions → User Token Scopes に
+      channels:history  groups:history  im:history  mpim:history
+      channels:read     groups:read     im:read     mpim:read     users:read
+  を足して再インストールすると xoxp- のトークンが出ます。
+
+  読み取りだけに使います。投稿は Bot トークンがある限り Bot 名義のままです。
+
+'@ -ForegroundColor DarkGray
+
+    $sec2 = Read-Host '  User OAuth Token (xoxp-... / 空欄でスキップ)' -AsSecureString
+    $utoken = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec2))
+    if ($utoken) { Set-Secret -Name 'slack.userToken' -Value $utoken }
+
+    if (-not (Test-SlackConfigured)) {
+        Write-Host '  トークンが入力されませんでした。中止します。' -ForegroundColor Yellow; return
+    }
+
     Write-Host '  保存しました。接続を確認します…' -ForegroundColor DarkGray
     try {
         $r = Invoke-SlackApi -Method 'auth.test'
@@ -76,7 +103,47 @@ function Connect-Slack {
     }
     catch {
         Write-Host ("  接続できませんでした: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        return
     }
+
+    Set-SlackSelfUserId
+}
+
+# 掃き寄せのメンション判定に使う「自分」を決める。
+# ユーザートークンなら auth.test がそのまま本人を返すので聞かない。
+function Set-SlackSelfUserId {
+    if (Get-Secret -Name 'slack.userToken') {
+        try {
+            $id = [string] (Invoke-SlackApi -Method 'auth.test').user_id
+            Set-Secret -Name 'slack.selfUserId' -Value $id
+            Write-Host ("  自分のユーザーID: {0} (User Token から判定)" -f $id) -ForegroundColor Green
+            return
+        } catch { }
+    }
+
+    Write-Host ''
+    Write-Host '  自分の Slack ユーザーID' -ForegroundColor Cyan
+    Write-Host '  メンションされた投稿を拾うのに要ります。メールアドレスか表示名で探します。' -ForegroundColor DarkGray
+    $q = Read-Host '  自分のメールアドレスか表示名 (空欄でスキップ)'
+    if (-not $q) {
+        Write-Host '  スキップしました。メンションは拾えません (DM と既知スレッドの続きのみ)。' -ForegroundColor Yellow
+        return
+    }
+    try { $hits = @(Find-SlackUserId -Query $q) }
+    catch { Write-Host ("  検索できませんでした: {0}" -f $_.Exception.Message) -ForegroundColor Red; return }
+
+    if ($hits.Count -eq 0) { Write-Host '  見つかりませんでした。' -ForegroundColor Yellow; return }
+    if ($hits.Count -gt 1) {
+        Write-Host '  候補が複数あります:' -ForegroundColor Yellow
+        for ($i = 0; $i -lt $hits.Count -and $i -lt 10; $i++) {
+            Write-Host ("    [{0}] {1}  {2}  {3}" -f $i, $hits[$i].id, $hits[$i].realName, $hits[$i].email)
+        }
+        $n = Read-Host '  番号を選んでください (空欄で中止)'
+        if ($n -eq '' -or -not ($n -match '^\d+$') -or [int] $n -ge $hits.Count) { return }
+        $hits = @($hits[[int] $n])
+    }
+    Set-Secret -Name 'slack.selfUserId' -Value $hits[0].id
+    Write-Host ("  自分のユーザーID: {0} ({1})" -f $hits[0].id, $hits[0].realName) -ForegroundColor Green
 }
 
 function Connect-Gmail {

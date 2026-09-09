@@ -69,6 +69,8 @@
     border-left: 3px solid var(--danger); background: var(--panel);
     color: var(--danger); font-size: 12px;
   }
+  /* 収集とワーカーは別々に落ちるので、両方出ることがある */
+  #warn div + div { margin-top: 4px; }
 
   /* 承認待ち。作業が止まっているので最も目立たせる */
   #perm { margin: 12px 16px -4px; }
@@ -130,6 +132,17 @@
   .card .foot .files { color: var(--ok); }
   .card .warnflag { color: var(--danger); font-weight: 600; cursor: help; }
   .card .now { margin-top: 6px; font-size: 11px; color: var(--ok); font-weight: 600; }
+  /* 元の会話へ戻る導線。カードでは末尾に小さく、ドロワーでは見出しの隣に置く */
+  a.open {
+    color: var(--accent); text-decoration: none; white-space: nowrap;
+    border: 1px solid transparent; border-radius: 5px;
+  }
+  a.open:hover { text-decoration: underline; }
+  .card .foot a.open { margin-left: auto; font-size: 10.5px; }
+  #drawer a.open.btn {
+    font-size: 12px; padding: 5px 11px; border-color: var(--border); background: var(--panel);
+  }
+  #drawer a.open.btn:hover { border-color: var(--accent); text-decoration: none; }
 
   /* ---------- ドロワー ---------- */
   #drawer {
@@ -185,6 +198,13 @@
     border: 1px solid var(--border); background: var(--panel); color: var(--text); resize: vertical;
   }
   #draftBox { min-height: 130px; }
+  /* 送り先。取り消せない操作の直前に出るので、欄より先に目に入る位置に置く */
+  .dest {
+    font-size: 11.5px; color: var(--muted); margin: -3px 0 7px;
+    padding: 5px 8px; border-left: 2px solid var(--high); background: var(--panel);
+    border-radius: 0 4px 4px 0; word-break: break-word;
+  }
+  .dest b { color: var(--text); }
   .hintline { font-size: 10.5px; color: var(--faint); margin-top: 4px; }
 
   .act { display: flex; gap: 9px; font-size: 12px; padding: 3px 0; align-items: baseline; }
@@ -261,6 +281,7 @@
   var permEl = document.getElementById('perm');
   var lastRev = null, lastPending = 0, dragging = false, openTaskId = null, dirty = false;
   var showArchived = false, workerTaskId = null, workerAlive = false;
+  var workerWarn = '', collectorWarn = '';
   // 折りたたみの開閉はカードを開き直しても保つ
   var openSections = {};
 
@@ -329,6 +350,22 @@
     return e;
   }
 
+  // 元の会話へ飛ぶリンク。サーバ側でもスキームを絞っているが、ここでも見る。
+  // href に入るのは通知の launch、つまり第三者が決めた文字列なので、
+  // javascript: や data: が一段でも通ればボード上でスクリプトが動いてしまう。
+  // 表示する文字はサーバが決めたラベルだけで、URL 自体は文面にしない
+  // (見えている文字と飛び先が違う、という細工を作らないため)。
+  var OPENABLE = /^(https?|mailto|slack|msteams):/i;
+  function openLinkEl(link, cls, text) {
+    if (!link || !link.url || !OPENABLE.test(link.url)) return null;
+    var a = el('a', 'open' + (cls ? ' ' + cls : ''), text || link.label || '元のメッセージを開く');
+    a.href = link.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.title = link.url;
+    return a;
+  }
+
   function actionButton(text, cls, busyText, fn) {
     var b = el('button', cls, text);
     b.onclick = function () {
@@ -373,13 +410,44 @@
     workerEl.querySelector('.txt').textContent = 'ワーカー ' + txt;
     workerEl.title = 'ワーカー: ' + label + (msg ? '\n' + msg : '');
 
-    if (workerAlive) {
-      warnEl.hidden = true;
-    } else {
-      warnEl.textContent = 'ワーカーが動いていないため、「要対応」のカードには誰も着手しません。'
+    workerWarn = workerAlive ? ''
+      : 'ワーカーが動いていないため、「要対応」のカードには誰も着手しません。'
         + ' phase4\\Start-Worker.ps1 を起動してください。';
-      warnEl.hidden = false;
+    renderWarnings();
+  }
+
+  // ---------------------------------------------------------------- 収集
+
+  // 収集が止まっていると、メールが届いてもカードは1枚も増えない。
+  // 「要対応が無い」のと見分けが付かないので、止まっていることを明示する。
+  function renderCollector(c) {
+    var state = (c && c.state) || 'never';
+    // トリアージは1件ずつ LLM を呼ぶので数分かかることがある。
+    // 動いているものを「止まった」と言わないよう、しきい値は長めに取る。
+    var stale = c && c.staleSeconds != null && c.staleSeconds > 900;
+
+    if (state === 'never') {
+      collectorWarn = 'メールと通知の取り込みが一度も動いていません。'
+        + ' Start-Collector.ps1 を起動してください（これが無いとカードは作られません）。';
+    } else if (state === 'stopped' || stale) {
+      collectorWarn = '取り込みが止まっています'
+        + (stale && c.staleSeconds != null ? '（最終 ' + Math.floor(c.staleSeconds / 60) + '分前）' : '')
+        + '。新しいメールや通知はカードになりません。Start-Collector.ps1 を起動してください。';
+    } else if (state === 'error') {
+      // 動いてはいるが取り込めていない。放っておくと静かに漏れ続ける。
+      collectorWarn = '取り込みが失敗しています： ' + (c.message || '原因不明')
+        + '（収集は動き続けています）';
+    } else {
+      collectorWarn = '';
     }
+    renderWarnings();
+  }
+
+  function renderWarnings() {
+    var msgs = [collectorWarn, workerWarn].filter(Boolean);
+    warnEl.innerHTML = '';
+    msgs.forEach(function (m) { warnEl.appendChild(el('div', '', m)); });
+    warnEl.hidden = msgs.length === 0;
   }
 
   // ---------------------------------------------------------------- 承認
@@ -452,6 +520,7 @@
   function renderBoard(data) {
     board.innerHTML = '';
     renderWorker(data.worker);
+    renderCollector(data.collector);
     data.columns.forEach(function (col) {
       var c = el('div', 'col' + (ATTENTION[col.key] ? ' act' : '') + (QUIET[col.key] ? ' done-ish' : ''));
       var head = el('div', 'head');
@@ -532,6 +601,13 @@
         : 'ワーカーは次の区切りで作業をやめます';
       foot.appendChild(w);
     }
+    var open = openLinkEl(t.open_link, null, '元を開く ↗');
+    if (open) {
+      // カードのクリックはドロワーを開く。リンクだけは通さない。
+      open.addEventListener('click', function (ev) { ev.stopPropagation(); });
+      open.draggable = false;
+      foot.appendChild(open);
+    }
     card.appendChild(foot);
     if (running) card.appendChild(el('div', 'now', '● ワーカーが作業中'));
 
@@ -583,6 +659,7 @@
     api('/api/rev').then(function (r) {
       // 版はハートビートでは変わらないので、死活はここで毎回描き直す
       if (r.body.worker) renderWorker(r.body.worker);
+      if (r.body.collector) renderCollector(r.body.collector);
       if (r.body.rev && r.body.rev !== lastRev) refresh(false);
       else if (r.body.pending !== lastPending) { lastPending = r.body.pending; loadApprovals(); }
       lastPending = r.body.pending;
@@ -617,7 +694,7 @@
     return api('/api/tasks/' + id).then(function (r) {
       if (r.status !== 200) return;
       openTaskId = id;
-      var t = r.body.task, ev = r.body.event;
+      var t = r.body.task, ev = r.body.event, openLink = r.body.openLink, outlet = r.body.outlet;
       var comments = r.body.comments || [], activity = r.body.activity || [], files = r.body.artifacts || [];
       var scroll = keepScroll ? drawer.scrollTop : 0;
 
@@ -628,6 +705,11 @@
       var head = el('div', 'row');
       head.appendChild(el('h3', null, t.title));
       var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
+      // 元の会話は折りたたみの中ではなく見出しの隣に置く。
+      // 「相手の言い分を確かめる」のはカードを開いた直後にやることなので、
+      // 一番下まで開かないと辿り着けないのでは導線として遅い。
+      var openBtn = openLinkEl(openLink, 'btn');
+      if (openBtn) head.appendChild(openBtn);
       var close = el('button', 'quiet', '閉じる');
       close.onclick = function () { closeDrawer(); };
       head.appendChild(close);
@@ -680,18 +762,36 @@
         pad.appendChild(box);
       }
 
-      // --- 主役2: 自分の下書き / 修正 ---
+      // --- 主役2: このカードの出口 ---
+      // 送り先があるカードは「送る文面」、無いカードは「対応の記録」。
+      // どちらも、書いた内容がカードを閉じる操作に直結する。
+      // 保存しても何も起きない欄にはしない。
+      var sendable = outlet && outlet.kind !== 'none';
       var edit = el('div', 'primary');
-      edit.appendChild(el('div', 'cap', '自分の下書き / 修正'));
+      edit.appendChild(el('div', 'cap', sendable ? '送る文面' : '対応の記録'));
+      if (sendable) {
+        var dest = el('div', 'dest');
+        dest.appendChild(el('b', null, outlet.label));
+        dest.appendChild(document.createTextNode(' — この欄の内容がそのまま送られます'));
+        edit.appendChild(dest);
+      }
       var ta = document.createElement('textarea');
       ta.id = 'draftBox';
-      ta.value = t.user_edited || '';
-      ta.placeholder = 'ここに書いた内容はワーカーが再実行しても消えません。';
+      // ワーカーの提案 (draft_text) は下敷き。自分が直した版があればそちらが優先。
+      // 再実行しても user_edited は上書きされない。
+      ta.value = t.user_edited || t.draft_text || '';
+      ta.placeholder = sendable
+        ? '送る本文。ここに書いた内容はワーカーが再実行しても消えません。'
+        : 'やったこと・決めたことを残す（空のままでも完了にできます）。';
       ta.oninput = function () { dirty = true; };
       edit.appendChild(ta);
+      if (sendable && !t.user_edited && t.draft_text) {
+        edit.appendChild(el('div', 'hintline', 'ワーカーが用意した文面です。保存するか送ると、あなたの版として確定します。'));
+      }
 
       var er = el('div', 'row'); er.style.marginTop = '7px';
-      er.appendChild(actionButton('保存', 'primary', '保存中…', function () {
+      // 主役は出口のボタン（送る / 完了にする）。保存は「まだ閉じない」ときの逃げ道なので沈める。
+      er.appendChild(actionButton('保存', null, '保存中…', function () {
         return api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
           .then(function (r2) {
             if (r2.status === 409) toast('他で更新されていたため保存できませんでした', 'err');
@@ -700,6 +800,40 @@
             return refresh(true);
           });
       }));
+
+      if (sendable) {
+        // 取り消せない操作。宛先と全文を出してから確認を取る。
+        // 宛先はここで決めず、サーバがカードの元イベントから決める。
+        er.appendChild(actionButton('この内容で送る', 'primary', '送信中…', function () {
+          var body = ta.value;
+          if (!body.trim()) { toast('本文が空です', 'err'); return; }
+          if (!confirm('次の内容を送信します。取り消せません。\n\n宛先: ' + outlet.label
+            + '\n\n--- 本文 ---\n' + body)) return;
+          return api('/api/tasks/' + t.id + '/send', 'POST',
+              { text: body, version: t.version, confirm: true })
+            .then(function (r2) {
+              if (r2.status === 409) { toast('他で更新されていたため送信しませんでした', 'err'); return refresh(true); }
+              if (r2.status !== 200 || r2.body.ok === false) {
+                toast('送信できませんでした: ' + (r2.body.error || r2.status), 'err');
+                return refresh(true);
+              }
+              dirty = false;
+              toast('送信しました（' + r2.body.to + '）。完了に移しました', 'ok');
+              return refresh(true);
+            });
+        }));
+      } else {
+        er.appendChild(actionButton('これで完了にする', 'primary', '処理中…', function () {
+          return api('/api/tasks/' + t.id + '/done', 'POST', { text: ta.value, version: t.version })
+            .then(function (r2) {
+              if (r2.status === 409) { toast('他で更新されていたため完了にできませんでした', 'err'); return refresh(true); }
+              dirty = false;
+              toast('完了にしました', 'ok');
+              return refresh(true);
+            });
+        }));
+      }
+
       if (t.agent_output) {
         er.appendChild(actionButton('報告を取り込む', null, '…', function () {
           ta.value = t.agent_output; dirty = true;
@@ -782,11 +916,13 @@
         pad.appendChild(foldable('event', '元の通知', null, function (b) {
           b.appendChild(pre((ev.app_id || '') + '\n' + hhmm(ev.occurred_at)));
           if (ev.body) b.appendChild(pre(ev.body));
+          var a2 = openLinkEl(openLink, 'btn');
+          if (a2) b.appendChild(a2);
           if (ev.link) {
-            // リンクは踏ませない。文字列として出すだけ。
-            var a = el('div', null, ev.link);
-            a.style.cssText = 'color:var(--faint);word-break:break-all;font-size:11px';
-            b.appendChild(a);
+            // 飛び先そのものは文字列として別に出す。開く前に確かめられるように。
+            var raw = el('div', null, ev.link);
+            raw.style.cssText = 'color:var(--faint);word-break:break-all;font-size:11px;margin-top:6px';
+            b.appendChild(raw);
           }
         }));
       }
@@ -862,6 +998,9 @@
       ['左の色帯', '緊急度。赤=高、青=中、灰=低'],
       ['#1', 'カード番号。ワーカーの作業ログと照合するときに使う'],
       ['成果物 n', 'ワーカーが実際に作ったファイルの数'],
+      ['元を開く ↗', '元のメッセージを別タブで開く。Slack は補完済みなら permalink、それ以外は通知のリンク'],
+      ['送る文面', '返信先があるカードで出る。この欄の内容がそのまま送られる。宛先はカードの元通知から決まり、変更できない'],
+      ['対応の記録', '返信先が無いカードで出る。「これで完了にする」で保存して完了に移る。空でもよい'],
       ['着手対象外', '中止要求が残っており、ワーカーが飛ばす'],
       ['版', '更新のたびに増える番号。同時編集の衝突検出に使う']
     ]));

@@ -206,9 +206,20 @@ function Get-GmailMessage {
     # ${MessageId} と括ること。"$MessageId?format" は ? まで変数名に取り込まれて空になる。
     $m = Invoke-GmailApi -Path "/users/me/messages/${MessageId}?format=full"
     $body = Get-GmailBodyText $m.payload
+
+    # internalDate は Google が受信した時刻 (epoch ミリ秒)。
+    # Date ヘッダは送信側の申告で信用できず、取り込み時刻を使うと
+    # 何日ぶんかまとめて取ったときに全部「いま」になって順序が壊れる。
+    $received = $null
+    if ($m.internalDate) {
+        try { $received = [DateTimeOffset]::FromUnixTimeMilliseconds([long] $m.internalDate).LocalDateTime } catch { }
+    }
+
     return [pscustomobject]@{
         id        = $m.id
         threadId  = $m.threadId
+        receivedAt   = $received
+        internalDate = $(if ($m.internalDate) { [long] $m.internalDate } else { 0 })
         subject   = Get-GmailHeader $m.payload 'Subject'
         from      = Get-GmailHeader $m.payload 'From'
         to        = Get-GmailHeader $m.payload 'To'
@@ -225,14 +236,34 @@ function Get-GmailRecent {
     <#
       .SYNOPSIS
         条件に合うメールの一覧を取り、本文まで取得して返す。
+      .DESCRIPTION
+        nextPageToken を辿るので、1ページ (最大100件) を超えても取り切る。
+        ページングしないと「取り込めたのは最新の N 件だけ」という
+        気付きにくい取りこぼしが出る。
       .PARAMETER Query
-        Gmail の検索構文。既定は「受信トレイの未読、1日以内」。
+        Gmail の検索構文。
+      .PARAMETER Max
+        取得する上限。取りこぼしより暴走を嫌う場面用の安全弁。
     #>
-    param([string] $Query = 'in:inbox is:unread newer_than:1d', [int] $Max = 20)
-    $list = Invoke-GmailApi -Path ("/users/me/messages?q={0}&maxResults={1}" -f [Uri]::EscapeDataString($Query), $Max)
+    param([string] $Query = 'in:inbox newer_than:1d', [int] $Max = 20)
     $out = @()
-    foreach ($m in @($list.messages)) { $out += Get-GmailMessage -MessageId $m.id }
-    return $out
+    $token = $null
+    while ($out.Count -lt $Max) {
+        $page = [Math]::Min(100, $Max - $out.Count)
+        $path = "/users/me/messages?q={0}&maxResults={1}" -f [Uri]::EscapeDataString($Query), $page
+        if ($token) { $path += "&pageToken=$token" }
+        $list = Invoke-GmailApi -Path $path
+        # 該当 0 件のとき Gmail は messages 自体を返さない。
+        # @($null) は「$null が1個入った配列」なので、素直に回すと
+        # 空の MessageId で1回呼びに行って落ちる。新着が無い周回は必ずここを通る。
+        if (-not $list.messages) { break }
+        foreach ($m in @($list.messages)) { $out += Get-GmailMessage -MessageId $m.id }
+        $token = $list.nextPageToken
+        if (-not $token) { break }
+    }
+    # 古い順。カードは届いた順に並ぶほうが読みやすく、
+    # 途中で失敗しても「そこまでは取り切った」と言える。
+    return @($out | Sort-Object internalDate)
 }
 
 # ---------------------------------------------------------------- 下書き作成

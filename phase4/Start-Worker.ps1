@@ -173,6 +173,10 @@ function Invoke-WorkItem {
     }
     $gmailThreadLabel = if ($gmailThreadId) { '元のスレッドへの返信として送信' } else { '新規メールとして送信' }
 
+    # このカードに「返信先」があるか。あるなら出口は送信、無いなら自分で実施して終わる。
+    # 送り先の無いカードに返信ツールを見せると、宛先の無い返信を書き始める。
+    $hasOutlet = [bool] $slackChannel -or ($evt -and ([string] $evt['source']) -eq 'gmail')
+
     if (Stop-IfCancelled $id) { return }
 
     $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
@@ -198,6 +202,7 @@ function Invoke-WorkItem {
             'http_fetch'         { "外部から取得しようとしています: $($toolInput.url)" }
             'send_slack_message' { "Slack に投稿しようとしています: $slackChannelName" }
             'send_gmail'         { "メールを送信しようとしています: $($toolInput.to)" }
+            'propose_reply'      { '返信案をカードに載せています' }
             default              { "実行中: $toolName" }
         }
         Write-Step $id 'tool' $what 'DarkCyan'
@@ -206,6 +211,23 @@ function Invoke-WorkItem {
 
     $onTool = {
         param($toolName, $toolInput)
+
+        # 返信文面はカードの「送る文面」欄に載せる。外へは出ないので承認は要らない。
+        # draft_text に入れるのは、user_edited (利用者が確定させた版) を踏まないため。
+        # 何度作り直しても、利用者が手を入れた内容は消えない。
+        if ($toolName -eq 'propose_reply') {
+            $text = [string] $toolInput.text
+            if (-not $text.Trim()) {
+                return [pscustomobject]@{ text = '本文が空です。'; artifact = $null; isError = $true }
+            }
+            [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ draft_text = $text })
+            Write-Step $id 'file' 'カンバンの「送る文面」に返信案を載せました' 'Green'
+            return [pscustomobject]@{
+                text     = 'カンバンの「送る文面」欄に載せました。利用者が確認し、必要なら直してから送信します。'
+                artifact = $null
+                isError  = $false
+            }
+        }
 
         # 危険なツールは承認を取ってから実行する。
         # 拒否は例外にせずモデルに返す。理由が伝われば別の手を考えられる。
@@ -252,7 +274,7 @@ function Invoke-WorkItem {
 
     while ($true) {
         $res = Invoke-ClaudeWork -Task $Task -Evt $evt -Policy $policy -Instructions $instructions `
-            -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel)) `
+            -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel) -HasOutlet:$hasOutlet) `
             -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
             -RepairIssues $issues
 

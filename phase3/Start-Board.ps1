@@ -28,6 +28,18 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 
+# 送信経路。カンバンだけで仕事を終わらせるには、最後の一手 (送る) もここに要る。
+# Phase 5 が無い・未設定でもボード自体は動くように、読み込みは任意扱いにする。
+$script:Connectors = $false
+try {
+    . "$PSScriptRoot\..\phase5\lib\SlackConnector.ps1"
+    . "$PSScriptRoot\..\phase5\lib\GmailConnector.ps1"
+    $script:Connectors = $true
+}
+catch {
+    Write-Host ("外部サービス連携を読み込めませんでした (送信は使えません): {0}" -f $_.Exception.Message) -ForegroundColor DarkGray
+}
+
 $WebRoot = Join-Path $PSScriptRoot 'wwwroot'
 
 $Columns = @(
@@ -108,13 +120,114 @@ function Get-ArtifactCounts {
     return $map
 }
 
+# ---------------------------------------------------------------- 元のメッセージへのリンク
+#
+# カードから元の会話へ 1 クリックで戻れるようにする。踏ませる以上、
+# スキームは許可制にする。link は通知の launch 属性、つまり第三者が
+# 決めた文字列なので、javascript: や data: をそのまま href に入れると
+# 通知の送り主がボード上でスクリプトを実行できてしまう。
+# 表示するラベルとリンク先の文字列は分けて持ち、ラベルは常に自前で決める
+# (「ここをクリック」の中身が別の URL、という細工を成立させないため)。
+$script:OpenableSchemes = @('https', 'http', 'mailto', 'slack', 'msteams')
+
+function Get-SafeOpenLink {
+    param([string] $Url)
+    if (-not $Url) { return $null }
+    $u = $Url.Trim()
+    # 制御文字・空白が混ざったものは弾く。改行を挟んでスキーム判定を
+    # すり抜ける細工があるため、判定前ではなく判定と同時に落とす。
+    if ($u -match '[\x00-\x1f\x7f\s]') { return $null }
+    $i = $u.IndexOf(':')
+    if ($i -le 0) { return $null }
+    if ($script:OpenableSchemes -notcontains $u.Substring(0, $i).ToLowerInvariant()) { return $null }
+    return $u
+}
+
+function Get-OpenLinkLabel {
+    param([string] $Url, [string] $App)
+    if ($Url -match '^https?://[^/]*slack\.com/' -or $Url -match '^slack:') { return 'Slack で開く' }
+    if ($Url -match '^https?://mail\.google\.com/')                          { return 'Gmail で開く' }
+    if ($Url -match '^msteams:')                                             { return 'Teams で開く' }
+    if ($Url -match '^mailto:')                                              { return 'メールを書く' }
+    if ($App) { return "$App で開く" }
+    return '元のメッセージを開く'
+}
+
+# タスク id → リンク。カード一覧は tasks しか読まないので、ここで一括して引く。
+function Get-EventLinkMap {
+    param($Conn)
+    $map = @{}
+    foreach ($r in $Conn.Query(
+        'SELECT t.id AS task_id, e.app, e.link, e.permalink
+           FROM tasks t JOIN events e ON e.id = t.event_id')) {
+        # permalink (正規 API で取り直した https) を優先し、無ければ通知のリンク
+        $url = Get-SafeOpenLink ([string] $r['permalink'])
+        if (-not $url) { $url = Get-SafeOpenLink ([string] $r['link']) }
+        if ($url) {
+            $map[[string] $r['task_id']] = [pscustomobject]@{
+                url = $url; label = (Get-OpenLinkLabel $url ([string] $r['app']))
+            }
+        }
+    }
+    return $map
+}
+
+# ---------------------------------------------------------------- カードの出口
+#
+# カードは「何をもって完了とするか」で2種類しかない。
+#   送る   … 返信・投稿で終わるもの。宛先がカードの元イベントから束縛できる
+#   実施   … 自分が手を動かして終わるもの。送り先が無い (PC の内部通知など)
+# どちらも最後に残るのは1つのテキストで、違うのは押すボタンだけ。
+#
+# 宛先はここで決める。**リクエストからは受け取らない。** 受け取れる作りにすると、
+# ボードに流し込まれた第三者の文面から宛先を差し替える道ができてしまう。
+function Get-TaskOutlet {
+    param($Event)
+
+    $none = [pscustomobject]@{ kind = 'none'; label = ''; to = ''; subject = '' }
+    if (-not $Event -or -not $script:Connectors) { return $none }
+
+    if (([string] $Event['source']) -eq 'gmail' -and (Test-GmailConfigured)) {
+        $raw = $null
+        try { $raw = [string] $Event['raw_json'] | ConvertFrom-Json } catch { }
+        if (-not $raw -or -not $raw.from) { return $none }
+        $subject = [string] $raw.subject
+        if ($subject -notmatch '^\s*Re:') { $subject = "Re: $subject" }
+        return [pscustomobject]@{
+            kind    = 'gmail'
+            label   = ("{0} へメールを返信" -f $raw.from)
+            to      = [string] $raw.from
+            subject = $subject
+        }
+    }
+
+    if (([string] $Event['link']) -like 'slack://*' -and (Test-SlackConfigured)) {
+        try {
+            $tg = Get-SlackTarget -Link ([string] $Event['link'])
+            if ($tg) {
+                return [pscustomobject]@{
+                    kind    = 'slack'
+                    label   = ("{0} のスレッドへ投稿" -f $tg.channelName)
+                    to      = $tg.channelName
+                    subject = ''
+                }
+            }
+        }
+        catch { }   # 投稿先を引けないだけ。カードは「実施」として扱えばよい
+    }
+    return $none
+}
+
 function ConvertTo-CardObject {
-    param($Row, $Counts)
+    param($Row, $Counts, $Links)
     $o = ConvertTo-PlainObject $Row
     $n = 0
     $key = [string] $Row['id']
     if ($Counts.ContainsKey($key)) { $n = $Counts[$key] }
     Add-Member -InputObject $o -NotePropertyName 'artifact_count' -NotePropertyValue $n -Force
+    $link = $null
+    if ($Links -and $Links.ContainsKey($key)) { $link = $Links[$key] }
+    Add-Member -InputObject $o -NotePropertyName 'open_link' -NotePropertyValue $link -Force
     return $o
 }
 
@@ -122,6 +235,7 @@ function Get-BoardPayload {
     param($Conn, [switch] $Archived)
 
     $counts = Get-ArtifactCounts $Conn
+    $links  = Get-EventLinkMap $Conn
 
     if ($Archived) {
         $rows = @(Get-Tasks -Conn $Conn -IncludeArchived | Where-Object { $_['archived_at'] })
@@ -129,21 +243,40 @@ function Get-BoardPayload {
             rev     = (Get-BoardRevision -Conn $Conn)
             columns = @([pscustomobject]@{
                 key   = 'archived'; label = 'アーカイブ済み'
-                tasks = @($rows | ForEach-Object { ConvertTo-CardObject $_ $counts })
+                tasks = @($rows | ForEach-Object { ConvertTo-CardObject $_ $counts $links })
             })
             worker  = (Get-WorkerPayload $Conn)
+            collector = (Get-CollectorPayload $Conn)
         }
     }
 
     $all = @(Get-Tasks -Conn $Conn)
     $cols = foreach ($c in $Columns) {
-        $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-CardObject $_ $counts })
+        $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-CardObject $_ $counts $links })
         [pscustomobject]@{ key = $c.key; label = $c.label; tasks = $items }
     }
     return [pscustomobject]@{
         rev     = (Get-BoardRevision -Conn $Conn)
         columns = @($cols)
         worker  = (Get-WorkerPayload $Conn)
+        collector = (Get-CollectorPayload $Conn)
+    }
+}
+
+# 収集の死活。ワーカーが動いていてもここが止まっていればカードは1枚も増えず、
+# 画面上は「要対応が無い」と見分けが付かない。だから別に出す。
+function Get-CollectorPayload {
+    param($Conn)
+    $hb = Get-Setting -Conn $Conn -Key 'collector.heartbeat'
+    if (-not $hb) {
+        return [pscustomobject]@{ state = 'never'; message = '収集は一度も起動していません'; staleSeconds = $null }
+    }
+    $age = $null
+    try { $age = [int] ((Get-Date) - [DateTime] $hb).TotalSeconds } catch { }
+    return [pscustomobject]@{
+        state        = (Get-Setting -Conn $Conn -Key 'collector.state' -Default 'unknown')
+        message      = (Get-Setting -Conn $Conn -Key 'collector.message')
+        staleSeconds = $age
     }
 }
 
@@ -231,6 +364,7 @@ function Invoke-Route {
         Write-JsonResponse $Context ([pscustomobject]@{
             rev     = (Get-BoardRevision -Conn $Conn)
             worker  = (Get-WorkerPayload $Conn)
+            collector = (Get-CollectorPayload $Conn)
             # 承認待ちは待たせるほど作業が止まるので、毎回のポーリングで返す
             pending = @(Get-PendingToolRequests -Conn $Conn).Count
         })
@@ -299,10 +433,18 @@ function Invoke-Route {
         if ($method -eq 'GET' -and -not $action) {
             $d = Get-TaskDetail -Conn $Conn -TaskId $taskId
             if (-not $d) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+            $openLink = $null
+            if ($d.event) {
+                $u = Get-SafeOpenLink ([string] $d.event['permalink'])
+                if (-not $u) { $u = Get-SafeOpenLink ([string] $d.event['link']) }
+                if ($u) { $openLink = [pscustomobject]@{ url = $u; label = (Get-OpenLinkLabel $u ([string] $d.event['app'])) } }
+            }
             Write-JsonResponse $Context ([pscustomobject]@{
                 task     = (ConvertTo-PlainObject $d.task)
                 comments = @($d.comments | ForEach-Object { ConvertTo-PlainObject $_ })
                 event    = (ConvertTo-PlainObject $d.event)
+                openLink = $openLink
+                outlet   = (Get-TaskOutlet $d.event)
                 activity = @(Get-TaskActivity -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
                 artifacts = @(Get-TaskArtifacts -Conn $Conn -TaskId $taskId | ForEach-Object {
                     [pscustomobject]@{ id = $_['id']; name = $_['name']; bytes = $_['bytes']; created_at = $_['created_at'] }
@@ -384,6 +526,72 @@ function Invoke-Route {
                 Write-JsonResponse $Context @{ ok = $true; archived = $on }
                 return
             }
+            # 「実施」で終わるカードの出口。宛先が無いカードでも、書いた内容が
+            # カードを閉じる操作に直結する ―― 保存しても何も起きない欄にしない。
+            # 中身は空でもよい。書けば「なぜ完了にしたか」の記録として残る。
+            'done' {
+                if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
+                $text = [string] $b.text
+                $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
+                        -Fields @{ user_edited = $text } -ExpectedVersion $expected
+                if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                $note = if ($text.Trim()) { '利用者が対応の記録を残して完了にしました' } else { '利用者が完了にしました' }
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message $note
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # 「送る」で終わるカードの出口。取り消せないので、ここだけは条件を厚くする:
+            #   - 宛先はサーバが元イベントから決める。リクエストの宛先は受け取らない
+            #   - confirm が無いと送らない (UI の確認ダイアログを通った印)
+            #   - 送る文面は先に user_edited へ保存する。送ったものと残るものを一致させる
+            #   - version 照合。画面が古いまま押した場合は 409 で止める
+            'send' {
+                if (-not $b -or -not $b.confirm) {
+                    Write-JsonResponse $Context @{ error = '確認が必要です' } 400; return
+                }
+                $text = [string] $b.text
+                if (-not $text.Trim()) { Write-JsonResponse $Context @{ error = '本文が空です' } 400; return }
+
+                $d = Get-TaskDetail -Conn $Conn -TaskId $taskId
+                if (-not $d) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+                $outlet = Get-TaskOutlet $d.event
+                if ($outlet.kind -eq 'none') {
+                    Write-JsonResponse $Context @{ error = 'このカードには送り先がありません' } 400; return
+                }
+
+                $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
+                        -Fields @{ user_edited = $text } -ExpectedVersion $expected
+                if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+
+                try {
+                    if ($outlet.kind -eq 'gmail') {
+                        $raw = [string] $d.event['raw_json'] | ConvertFrom-Json
+                        [void] (Send-GmailMessage -To $outlet.to -Subject $outlet.subject -Body $text `
+                                -ThreadId ([string] $raw.threadId) -InReplyTo ([string] $raw.messageId))
+                        $sentTo = $outlet.to
+                        $permalink = ''
+                    }
+                    else {
+                        $tg = Get-SlackTarget -Link ([string] $d.event['link'])
+                        $r = Send-SlackMessage -Channel $tg.channel -Text $text -ThreadTs $tg.threadTs
+                        $sentTo = $tg.channelName
+                        $permalink = $r.permalink
+                    }
+                }
+                catch {
+                    $msg = $_.Exception.Message
+                    Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'error' -Message ("送信に失敗しました: " + $msg)
+                    Write-JsonResponse $Context @{ ok = $false; error = $msg } 500
+                    return
+                }
+
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'sent' `
+                    -Message ("利用者がカンバンから送信しました: {0}" -f $sentTo)
+                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                Write-JsonResponse $Context @{ ok = $true; to = $sentTo; permalink = $permalink }
+                return
+            }
             default {
                 if ($method -eq 'PATCH' -or $method -eq 'POST') {
                     if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
@@ -433,8 +641,18 @@ try {
         try {
             # DNS リバインディング対策。127.0.0.1 バインドでも Host は検証しておく。
             $hostHeader = $ctx.Request.Headers['Host']
+            # 状態を変える要求は Origin も見る。ブラウザは別サイトからの POST に
+            # 必ず Origin を付けるので、外のページが localhost を叩いて
+            # 削除や送信を起こす経路をここで塞ぐ。同一オリジンからは付かないか、
+            # 自分自身の Origin が付く。
+            $origin = $ctx.Request.Headers['Origin']
+            $badOrigin = ($ctx.Request.HttpMethod -ne 'GET' -and $origin -and
+                          $origin -notmatch "^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
             if ($hostHeader -and $hostHeader -notmatch '^(localhost|127\.0\.0\.1)(:\d+)?$') {
                 $ctx.Response.StatusCode = 400
+            }
+            elseif ($badOrigin) {
+                $ctx.Response.StatusCode = 403
             }
             else {
                 Invoke-Route $ctx $conn

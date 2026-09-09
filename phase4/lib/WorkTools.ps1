@@ -149,6 +149,22 @@ $script:SlackSendTool = @{
     }
 }
 
+# 返信先があるカードの既定の出口。
+# 送信ツールと違って外に出ないので承認は要らない。カンバンの「送る文面」欄に載り、
+# 利用者が読んで直して、そこから送る。文面をチャットの中だけで返して終わりにすると
+# 利用者は結局それを手で貼り直すことになるので、必ずこれを呼ばせる。
+$script:ProposeReplyTool = @{
+    name        = 'propose_reply'
+    description = 'このカードの返信文面をカンバンの「送る文面」欄に載せる。送信はしない。返信先があるカードで、利用者が送信を指示していないときはこれを使う。利用者はこの欄で内容を直し、そのまま送信できる。何度呼んでも上書きされるが、利用者が既に手を入れた内容は消えない。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text = @{ type = 'string'; description = 'そのまま送れる状態の本文。前置きや説明を混ぜない。' }
+        }
+        required = @('text')
+    }
+}
+
 $script:GmailSendTool = @{
     name        = 'send_gmail'
     description = 'メールを実際に送信する。実行前に必ず利用者の承認を求める。Gmail から来たカードへの返信なら元のスレッドにぶら下がる。一度送ると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ create_gmail_draft か create_email_draft で下書きに留める。'
@@ -185,8 +201,11 @@ $script:GmailDraftTool = @{
 # Slack の投稿は返信先が要る。カードの元通知が Slack でなければ投稿先が無いので、
 # 設定済みでも出さない (呼び出し側が -HasSlackTarget で伝える)。
 function Get-WorkTools {
-    param([switch] $HasSlackTarget)
+    param([switch] $HasSlackTarget, [switch] $HasOutlet)
     $tools = @($script:WorkTools)
+    # 返信先があるカードでだけ出す。送り先の無いカードに「返信文面を載せる」道具を
+    # 見せると、モデルが宛先の無い返信を書き始める。
+    if ($HasOutlet) { $tools += $script:ProposeReplyTool }
     if ((Get-Command Test-GmailConfigured -ErrorAction SilentlyContinue) -and (Test-GmailConfigured)) {
         $tools += $script:GmailDraftTool
         $tools += $script:GmailSendTool
