@@ -191,6 +191,9 @@
   .act .ts { color: var(--faint); font-size: 10.5px; flex: none; font-variant-numeric: tabular-nums; }
   .act .k { flex: none; width: 5em; color: var(--faint); font-size: 10.5px; }
   .act.done .k, .act.file .k { color: var(--ok); font-weight: 600; }
+  /* 送信は取り消せない。作業ログを流し読みしても目に留まるようにする */
+  .act.sent .k { color: var(--high); font-weight: 700; }
+  .act.sent { font-weight: 600; }
   .act.error .k, .act.cancelled .k { color: var(--danger); font-weight: 600; }
 
   .cmt { padding: 7px 0 7px 10px; border-left: 2px solid var(--line); margin-bottom: 8px; }
@@ -280,7 +283,7 @@
   // 未分類・要対応・実行中・レビュー待ちに出すと、まだ見ていないものを一掃できてしまう。
   var SWEEPABLE = { done: 1, dismissed: 1, archived: 1 };
   var ACT_KIND = {
-    start: '開始', step: '経過', llm: '検討', tool: '実行', file: '成果物',
+    start: '開始', step: '経過', llm: '検討', tool: '実行', file: '成果物', sent: '送信済み',
     approve: '承認待ち', deny: '不許可', verify: '検証', issue: '指摘', repair: '修正',
     done: '完了', error: 'エラー', cancelled: '中止', user: '操作'
   };
@@ -886,6 +889,7 @@
     box.appendChild(rows([
       ['何をするか', '作成後に別の会話で成果物を点検する。途中終了・空欄・依頼との食い違いを見る'],
       ['要修正なら', '指摘をワーカーに戻して直させ、再度検証する'],
+      ['送信済みなら', '直しには回さない。送ったものは取り消せず、二通目が出かねないため。指摘はコメントに残る'],
       ['残った指摘', 'カードのコメントに残り、報告にも「要確認」と出る']
     ]));
     helpEl.appendChild(box);
