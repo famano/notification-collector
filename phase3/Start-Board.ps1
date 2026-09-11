@@ -228,6 +228,14 @@ function ConvertTo-CardObject {
     $link = $null
     if ($Links -and $Links.ContainsKey($key)) { $link = $Links[$key] }
     Add-Member -InputObject $o -NotePropertyName 'open_link' -NotePropertyValue $link -Force
+
+    # 「あなたにしかできない1手」は画面で組み立てるのでオブジェクトにして渡す。
+    # 文字列のまま渡すと、クライアント側で JSON を二重に解く羽目になる。
+    $hs = $null
+    if ($Row['human_step']) {
+        try { $hs = [string] $Row['human_step'] | ConvertFrom-Json } catch { $hs = $null }
+    }
+    Add-Member -InputObject $o -NotePropertyName 'human_step_obj' -NotePropertyValue $hs -Force
     return $o
 }
 
@@ -446,6 +454,9 @@ function Invoke-Route {
                 openLink = $openLink
                 outlet   = (Get-TaskOutlet $d.event)
                 activity = @(Get-TaskActivity -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
+                # 実際に何を叩いて何が返ったか。「手を尽くしたのか」を
+                # 報告の書きぶりではなくここで確かめられるようにする。
+                attempts = @(Get-TaskAttempts -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
                 artifacts = @(Get-TaskArtifacts -Conn $Conn -TaskId $taskId | ForEach-Object {
                     [pscustomobject]@{ id = $_['id']; name = $_['name']; bytes = $_['bytes']; created_at = $_['created_at'] }
                 })

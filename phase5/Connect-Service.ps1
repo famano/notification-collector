@@ -13,7 +13,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('slack', 'gmail')] [string] $Service,
+    [ValidateSet('slack', 'gmail', 'github')] [string] $Service,
     [switch] $Status,
     [switch] $Test
 )
@@ -28,6 +28,15 @@ function Show-Status {
     Write-Host '設定状況' -ForegroundColor Cyan
     Write-Host ("  Slack : {0}" -f $(if (Test-SlackConfigured) { '設定済み' } else { '未設定' }))
     Write-Host ("  Gmail : {0}" -f $(if (Test-GmailConfigured) { '設定済み' } else { '未設定' }))
+    Write-Host ("  GitHub: {0}" -f $(if (Get-Secret -Name 'github.token') { '設定済み' } else { '未設定' }))
+    if (Test-GmailConfigured) {
+        # Calendar は後から足したスコープなので、古いトークンには入っていない。
+        # 「Gmail は設定済みなのに出欠が返せない」理由がここで分かるようにする。
+        $cal = $false
+        try { $cal = Test-GoogleScope 'https://www.googleapis.com/auth/calendar.events' } catch { }
+        Write-Host ("    └ カレンダー操作: {0}" -f $(if ($cal) { '可' } else { '不可 (gmail を設定し直すと有効になります)' })) `
+            -ForegroundColor $(if ($cal) { 'DarkGray' } else { 'Yellow' })
+    }
     $names = @(Get-SecretNames)
     if ($names.Count -gt 0) {
         Write-Host ''
@@ -185,8 +194,65 @@ function Connect-Gmail {
     }
 }
 
+function Connect-GitHub {
+    <#
+      .DESCRIPTION
+        GitHub は OAuth アプリを用意しなくても、個人アクセストークン (PAT) を
+        貼るだけで済む。ワーカーはこれを使って、非公開リポジトリの CI ログを読み、
+        コラボレーター招待を承諾する。
+
+        完了カードを洗った結果、29枚中8枚が「権限が無くて進めない」で
+        止まっていた。うち7枚はこのトークンがあれば閉じられたもの。
+    #>
+    Write-Host ''
+    Write-Host 'GitHub の個人アクセストークン (PAT) を設定します。' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  取り方: https://github.com/settings/tokens' -ForegroundColor DarkGray
+    Write-Host '    Fine-grained token を作り、対象リポジトリに対して以下を許可:' -ForegroundColor DarkGray
+    Write-Host '      - Actions: Read-only        (CI の失敗内容を読む)' -ForegroundColor DarkGray
+    Write-Host '      - Contents: Read-only       (README など)' -ForegroundColor DarkGray
+    Write-Host '      - Metadata: Read-only' -ForegroundColor DarkGray
+    Write-Host '    招待の承諾も任せる場合は、アカウント権限の' -ForegroundColor DarkGray
+    Write-Host '      - Repository invitations: Read and write' -ForegroundColor DarkGray
+    Write-Host '    classic token なら repo スコープでまとめて足ります。' -ForegroundColor DarkGray
+    Write-Host ''
+    $sec = Read-Host 'GitHub トークン' -AsSecureString
+    $tok = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    if (-not $tok) { Write-Host '入力がありませんでした。' -ForegroundColor Yellow; return }
+
+    Set-Secret -Name 'github.token' -Value $tok
+    Write-Host 'GitHub の資格情報を保存しました。' -ForegroundColor Green
+
+    # 保存したら必ず疎通を見る。貼り間違いを後のカードで気づくのは高くつく。
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $r = Invoke-RestMethod -Uri 'https://api.github.com/user' -TimeoutSec 20 `
+                -Headers @{ Authorization = "Bearer $tok"; 'User-Agent' = 'notification-collector' }
+        Write-Host ("GitHub OK: {0}" -f $r.login) -ForegroundColor Green
+    }
+    catch {
+        Write-Host ("GitHub NG: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        Write-Host 'トークンを確認してもう一度実行してください。' -ForegroundColor Yellow
+    }
+}
+
+function Test-GitHubConfigured {
+    return [bool] (Get-Secret -Name 'github.token')
+}
+
 function Test-Connections {
     Write-Host ''
+    if (Test-GitHubConfigured) {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $r = Invoke-RestMethod -Uri 'https://api.github.com/user' -TimeoutSec 20 `
+                    -Headers @{ Authorization = "Bearer $(Get-Secret -Name 'github.token')"; 'User-Agent' = 'notification-collector' }
+            Write-Host ("GitHub OK: {0}" -f $r.login) -ForegroundColor Green
+        }
+        catch { Write-Host ("GitHub NG: {0}" -f $_.Exception.Message) -ForegroundColor Red }
+    } else { Write-Host 'GitHub: 未設定' -ForegroundColor DarkGray }
+
     if (Test-SlackConfigured) {
         try { $r = Invoke-SlackApi -Method 'auth.test'; Write-Host ("Slack OK: {0} / {1}" -f $r.team, $r.user) -ForegroundColor Green }
         catch { Write-Host ("Slack NG: {0}" -f $_.Exception.Message) -ForegroundColor Red }
@@ -203,8 +269,9 @@ if ($Status) { Show-Status; return }
 if ($Test)   { Test-Connections; return }
 
 switch ($Service) {
-    'slack' { Connect-Slack }
-    'gmail' { Connect-Gmail }
+    'slack'  { Connect-Slack }
+    'gmail'  { Connect-Gmail }
+    'github' { Connect-GitHub }
     default {
         Show-Status
         Write-Host '使い方:' -ForegroundColor Cyan

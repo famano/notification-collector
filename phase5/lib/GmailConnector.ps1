@@ -16,9 +16,16 @@ $script:GoogleToken = 'https://oauth2.googleapis.com/token'
 # 送信は Send-GmailMessage からのみ行い、そこに至るには必ずカンバンでの承認を通る
 # (判定は phase4/lib/WorkTools.ps1)。既存のトークンのままで送信できてしまうので、
 # 送らせたくない場合はスコープではなく承認側で止めること。
+#
+# Calendar は「出欠を返す」ためだけに足している。カードの出口が
+# 「招待メール内のリンクをご自身で踏んでください」になるのを避けるため。
+# 既存のリフレッシュトークンにはこのスコープが入っていない。取り直すまでは
+# Calendar が使えないので、その検出は Test-GoogleScope が行い、
+# phase4 側で「設定カード」に化ける (require_human_step の credential_missing)。
 $script:GmailScopes = @(
     'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/gmail.compose'
+    'https://www.googleapis.com/auth/gmail.compose',
+    'https://www.googleapis.com/auth/calendar.events'
 ) -join ' '
 
 function Test-GmailConfigured {
@@ -130,7 +137,30 @@ function Get-GmailAccessToken {
     $script:GmailToken = $resp.access_token
     # 期限ぎりぎりで使わないよう少し早めに切る
     $script:GmailTokenExpiry = (Get-Date).AddSeconds([int] $resp.expires_in - 60)
+    # 実際に付与されたスコープを控える。要求したスコープと一致するとは限らない。
+    # リフレッシュトークンは発行時のスコープしか持たないので、コードに
+    # calendar を足しても既存のトークンには入っていない。
+    if ($resp.scope) { $script:GoogleGrantedScopes = @(([string] $resp.scope) -split '\s+') }
     return $script:GmailToken
+}
+
+$script:GoogleGrantedScopes = @()
+
+function Test-GoogleScope {
+    <#
+      .SYNOPSIS
+        いま持っているトークンに指定のスコープが入っているか。
+      .DESCRIPTION
+        入っていなければ、その API は叩く前に諦めてよい。403 を食ってから
+        「できませんでした」と報告するより、最初から「権限が足りない」と
+        名指しできるほうが、設定カードに変換できるぶん利用者の手数が減る。
+    #>
+    param([Parameter(Mandatory)] [string] $Scope)
+    if (-not (Test-GmailConfigured)) { return $false }
+    if ($script:GoogleGrantedScopes.Count -eq 0) {
+        try { [void] (Get-GmailAccessToken) } catch { return $false }
+    }
+    return ($script:GoogleGrantedScopes -contains $Scope)
 }
 
 function Invoke-GmailApi {
@@ -180,25 +210,121 @@ function Get-GmailHeader {
     return ''
 }
 
-# text/plain を優先し、無ければ HTML からタグを落とす
+function ConvertFrom-HtmlToText {
+    param([string] $Html)
+    $txt = $Html -replace '(?s)<(script|style).*?</\1>', ''
+    $txt = $txt -replace '<br\s*/?>', "`n" -replace '</p>', "`n" -replace '</tr>', "`n" -replace '</div>', "`n"
+    $txt = $txt -replace '<[^>]+>', ''
+    $txt = $txt -replace '&nbsp;', ' ' -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"' -replace '&#39;', "'"
+    # タグを落とすと空行が大量に残る。3行以上の連続は2行に畳む。
+    return ($txt -replace '[ \t]+\n', "`n" -replace '(\r?\n){3,}', "`n`n").Trim()
+}
+
+# 本文を取り出す。
+#
+# 以前は「text/plain を見つけたら即 return」だったが、これが実害を出していた。
+# multipart/alternative の text/plain に署名だけを入れ、本文は text/html にしか
+# 持たない送信元 (メーラーや配信基盤に多い) では、署名だけを本文として保存し、
+# カードが「本文不明」のまま起票されていた。実際にそれで、弁護士からのメールが
+# 署名のみのカードになり、ワーカーが「Gmail を開いてご確認ください」と
+# 報告して終わる、このアプリの理念と正面から反する結果になった。
+#
+# なので plain と html の両方を集め、情報量の多いほうを採る。
 function Get-GmailBodyText {
     param($Part)
-    if (-not $Part) { return '' }
-    if ($Part.mimeType -eq 'text/plain' -and $Part.body.data) {
-        return [Text.Encoding]::UTF8.GetString((ConvertFrom-Base64Url $Part.body.data))
+    $found = Get-GmailBodyParts $Part
+    $plain = [string] $found.plain
+    $html  = [string] $found.html
+    if (-not $html)  { return $plain.Trim() }
+    if (-not $plain) { return (ConvertFrom-HtmlToText $html) }
+
+    $htmlText = ConvertFrom-HtmlToText $html
+    # 「plain が html より明らかに短い」= plain は署名やフォールバック文だけ、と見なす。
+    # 同等の長さなら plain を採る (整形が崩れないぶん読みやすい)。
+    if ($plain.Trim().Length * 2 -lt $htmlText.Length) { return $htmlText }
+    return $plain.Trim()
+}
+
+# MIME ツリーを歩いて text/plain と text/html を両方集める。
+# 最初に見つかった1つで打ち切らないのが Get-GmailBodyText との違い。
+function Get-GmailBodyParts {
+    param($Part, $Acc)
+    if (-not $Acc) { $Acc = [pscustomobject]@{ plain = ''; html = '' } }
+    if (-not $Part) { return $Acc }
+
+    if ($Part.body.data) {
+        $text = [Text.Encoding]::UTF8.GetString((ConvertFrom-Base64Url $Part.body.data))
+        if ($Part.mimeType -eq 'text/plain' -and -not $Acc.plain) { $Acc.plain = $text }
+        elseif ($Part.mimeType -eq 'text/html' -and -not $Acc.html) { $Acc.html = $text }
     }
-    foreach ($p in @($Part.parts)) {
-        $t = Get-GmailBodyText $p
-        if ($t) { return $t }
+    foreach ($p in @($Part.parts)) { [void] (Get-GmailBodyParts $p $Acc) }
+    return $Acc
+}
+
+# 添付の一覧。本文に出ない資料がここにしか無いことがある
+# (「添付の動画をご確認のうえ」「課題文は本メッセージに添付」など)。
+function Get-GmailAttachmentList {
+    param($Part, $Acc)
+    if (-not $Acc) { $Acc = [System.Collections.ArrayList]::new() }
+    if (-not $Part) { return $Acc }
+    if ($Part.filename -and $Part.body.attachmentId) {
+        [void] $Acc.Add([pscustomobject]@{
+            filename     = [string] $Part.filename
+            mimeType     = [string] $Part.mimeType
+            size         = [int] $Part.body.size
+            attachmentId = [string] $Part.body.attachmentId
+        })
     }
-    if ($Part.mimeType -eq 'text/html' -and $Part.body.data) {
-        $html = [Text.Encoding]::UTF8.GetString((ConvertFrom-Base64Url $Part.body.data))
-        $txt = $html -replace '(?s)<(script|style).*?</\1>', ''
-        $txt = $txt -replace '<br\s*/?>', "`n" -replace '</p>', "`n"
-        $txt = $txt -replace '<[^>]+>', ''
-        return ($txt -replace '&nbsp;', ' ' -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>').Trim()
+    foreach ($p in @($Part.parts)) { [void] (Get-GmailAttachmentList $p $Acc) }
+    return $Acc
+}
+
+function Get-GmailAttachmentBytes {
+    param(
+        [Parameter(Mandatory)] [string] $MessageId,
+        [Parameter(Mandatory)] [string] $AttachmentId
+    )
+    $a = Invoke-GmailApi -Path "/users/me/messages/${MessageId}/attachments/${AttachmentId}"
+    return (ConvertFrom-Base64Url $a.data)
+}
+
+function Get-GmailThread {
+    <#
+      .SYNOPSIS
+        スレッド全文を取得して読める形にする。
+      .DESCRIPTION
+        カード化のときに取れているのは通知の元になった1通だけで、経緯は入っていない。
+        「元通知を見ずに済ませる」には、前後のやり取りまでカードに載っている必要がある。
+    #>
+    param([Parameter(Mandatory)] [string] $ThreadId, [int] $Limit = 30)
+    $t = Invoke-GmailApi -Path "/users/me/threads/${ThreadId}?format=full"
+    $msgs = @($t.messages)
+    if ($msgs.Count -gt $Limit) { $msgs = $msgs[($msgs.Count - $Limit)..($msgs.Count - 1)] }
+
+    $lines = @()
+    $attachments = [System.Collections.ArrayList]::new()
+    foreach ($m in $msgs) {
+        $from = Get-GmailHeader $m.payload 'From'
+        $date = Get-GmailHeader $m.payload 'Date'
+        $body = Get-GmailBodyText $m.payload
+        $lines += ("--- {0} / {1}`n{2}" -f $from, $date, $body)
+        foreach ($a in @(Get-GmailAttachmentList $m.payload)) {
+            [void] $attachments.Add([pscustomobject]@{
+                messageId    = [string] $m.id
+                filename     = $a.filename
+                mimeType     = $a.mimeType
+                size         = $a.size
+                attachmentId = $a.attachmentId
+            })
+        }
     }
-    return ''
+    return [pscustomobject]@{
+        threadId     = [string] $t.id
+        subject      = Get-GmailHeader $msgs[0].payload 'Subject'
+        messageCount = $msgs.Count
+        text         = ($lines -join "`n`n")
+        attachments  = @($attachments)
+    }
 }
 
 function Get-GmailMessage {
@@ -229,6 +355,7 @@ function Get-GmailMessage {
         snippet   = $m.snippet
         body      = $body
         labelIds  = @($m.labelIds)
+        attachments = @(Get-GmailAttachmentList $m.payload)
     }
 }
 

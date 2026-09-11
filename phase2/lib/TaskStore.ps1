@@ -178,6 +178,64 @@ function Invoke-SchemaMigration {
     if ($ecols -notcontains 'superseded_by') {
         $Conn.Exec('ALTER TABLE events ADD COLUMN superseded_by TEXT')
     }
+
+    # 「同じ件」を束ねるキー。dedup_key (同じメッセージか) の一段上で、
+    # 別々のメールが同じ用事を指しているときに束ねる。
+    # 例: CI の失敗通知はコミットごとに別メールだが、用事は1つ。
+    if ($cols -notcontains 'subject_key') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN subject_key TEXT')
+        $Conn.Exec('CREATE INDEX IF NOT EXISTS idx_tasks_subject ON tasks(subject_key)')
+    }
+    # 同じ件が何度来たか。カードを増やす代わりにこれを増やす。
+    if ($cols -notcontains 'occurrence_count') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1')
+    }
+    if ($cols -notcontains 'last_occurred_at') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN last_occurred_at TEXT')
+    }
+    # カードの形。出口が形で決まる。
+    #   reply    … 返信先がある。出口は「送る」
+    #   action   … 外部サービスの状態を変える。出口は API 呼び出し
+    #   human    … 人間の身体が要る。出口は「あなたにしかできない1手」
+    #   setup    … 資格情報の不足。1回直せば同種のカードがまとめて通るようになる
+    #   info     … 見せるだけ
+    if ($cols -notcontains 'shape') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN shape TEXT')
+    }
+    # 人間にしかできない1手 (JSON)。逃げ場ではなく正式な出口なので、
+    # 何を試したかの証跡を必ず一緒に持たせる。
+    if ($cols -notcontains 'human_step') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN human_step TEXT')
+    }
+
+    # 件ごとの台帳。カードをまたいで「前回こう分かった」を持ち越す。
+    $Conn.Exec(@'
+CREATE TABLE IF NOT EXISTS dossier (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_key TEXT NOT NULL,
+  task_id     INTEGER,
+  kind        TEXT NOT NULL,
+  note        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dossier_subject ON dossier(subject_key, id);
+'@)
+
+    # ワーカーがこのカードで実際に試したこと。
+    # require_human_step を「試さずに呼ぶ」のを防ぐ判定に使い、
+    # 承認画面と報告にも証跡として出す。
+    $Conn.Exec(@'
+CREATE TABLE IF NOT EXISTS task_attempts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id    INTEGER NOT NULL,
+  tool       TEXT NOT NULL,
+  target     TEXT,
+  outcome    TEXT NOT NULL,
+  detail     TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_task ON task_attempts(task_id, id);
+'@)
 }
 
 function Get-Now { return (Get-Date).ToString('o') }
@@ -424,17 +482,129 @@ function New-Task {
         [string] $EventId,
         [Parameter(Mandatory)] [string] $Title,
         [string] $Summary, $NeedsAction, [string] $Urgency, [string] $Category,
-        [string] $Reason, [string] $ProposedActions, [string] $Column = 'inbox'
+        [string] $Reason, [string] $ProposedActions, [string] $Column = 'inbox',
+        [string] $SubjectKey, [string] $Shape
     )
     $now = Get-Now
     $na  = if ($null -eq $NeedsAction) { $null } else { [int][bool] $NeedsAction }
+    # $EventId は [string] なので $null を渡すと '' になる。'' は events に
+    # 存在しない id なので、そのまま入れると外部キー制約で落ちる。
+    # 元通知を持たないカード (手起票・設定カード) は NULL でなければならない。
+    $eid = if ([string]::IsNullOrEmpty($EventId)) { $null } else { $EventId }
     $changed = $Conn.NonQuery(
         'INSERT OR IGNORE INTO tasks
-           (event_id, board_column, title, summary, needs_action, urgency, category, reason, proposed_actions, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-        [object[]] @($EventId, $Column, $Title, $Summary, $na, $Urgency, $Category, $Reason, $ProposedActions, $now, $now))
+           (event_id, board_column, title, summary, needs_action, urgency, category, reason, proposed_actions, created_at, updated_at, subject_key, shape, last_occurred_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [object[]] @($eid, $Column, $Title, $Summary, $na, $Urgency, $Category, $Reason, $ProposedActions, $now, $now, $SubjectKey, $Shape, $now))
     if ($changed -gt 0) { return $Conn.LastRowId }
     return $null
+}
+
+# ---------------------------------------------------------------- 試行の証跡
+#
+# 「調べずに諦めた」と「本当に手が無い」を、報告の言葉づかいではなく
+# 実際に何を叩いたかで区別するために残す。
+
+function Add-TaskAttempt {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [string] $Tool,
+        [string] $Target,
+        [Parameter(Mandatory)] [string] $Outcome,   # 'ok' / 'failed' / 'denied'
+        [string] $Detail
+    )
+    [void] $Conn.NonQuery(
+        'INSERT INTO task_attempts (task_id, tool, target, outcome, detail, created_at) VALUES (?,?,?,?,?,?)',
+        [object[]] @($TaskId, $Tool, $Target, $Outcome, $Detail, (Get-Now)))
+}
+
+function Get-TaskAttempts {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    return @($Conn.Query('SELECT * FROM task_attempts WHERE task_id = ? ORDER BY id', [object[]] @($TaskId)))
+}
+
+function Get-AttemptSummary {
+    <#
+      .SYNOPSIS
+        何を試して何が返ったかの一覧。人間の1手と一緒にカードへ出す。
+    #>
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $rows = @(Get-TaskAttempts -Conn $Conn -TaskId $TaskId)
+    if ($rows.Count -eq 0) { return '' }
+    $lines = foreach ($r in $rows) {
+        $mark = switch ([string] $r['outcome']) {
+            'ok'     { '○' }
+            'denied' { '×(不許可)' }
+            default  { '×' }
+        }
+        ("{0} {1} {2} {3}" -f $mark, [string] $r['tool'], [string] $r['target'], [string] $r['detail']).Trim()
+    }
+    return ($lines -join "`n")
+}
+
+# 資格情報が足りないカードから作る「設定カード」。
+#
+# 実データを当てると、完了カード29枚のうち8枚が同じ形で詰まっていた ――
+# 非公開リポジトリを読む権限、招待を承諾する権限、カレンダーの出欠を返す権限。
+# これは1枚ずつ人間に投げ返す問題ではなく、一度設定すれば同種がまとめて通る。
+# なので人間の1手としてカードを閉じず、独立した設定カードに変換する。
+function New-SetupTask {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [string] $What,      # 何の権限か (例: 'GitHub トークン')
+        [Parameter(Mandatory)] [string] $HowTo,     # 設定方法
+        [string] $Why,                              # なぜ要るか
+        [int]    $BlockedTaskId = 0,
+        # 束ねるための正規化されたサービス名 (github / google / slack …)。
+        # $What はモデルの自由記述なので、カードごとに言い回しが変わる。
+        # それを鍵にすると同じ権限の設定カードが何枚も立ち、
+        # 「一度直せば同種がまとめて通る」という狙いが崩れる。
+        [string] $ServiceKey
+    )
+    $key = if ($ServiceKey) { 'setup:' + $ServiceKey } else { 'setup:' + $What }
+    # 同じ設定カードを何枚も立てない。既にあればそこに用件を足す。
+    $existing = @($Conn.Query(
+        "SELECT * FROM tasks WHERE subject_key = ? AND archived_at IS NULL AND board_column NOT IN ('done','dismissed') ORDER BY id DESC LIMIT 1",
+        [object[]] @($key)))
+    if ($existing.Count -gt 0) {
+        $tid = [int] $existing[0]['id']
+        if ($BlockedTaskId) {
+            [void] (Add-TaskComment -Conn $Conn -TaskId $tid -Author 'agent' `
+                -Body ("カード #{0} もこの設定を待っています。" -f $BlockedTaskId))
+        }
+        [void] $Conn.NonQuery(
+            'UPDATE tasks SET occurrence_count = COALESCE(occurrence_count,1) + 1, last_occurred_at = ?, updated_at = ? WHERE id = ?',
+            [object[]] @((Get-Now), (Get-Now), $tid))
+        return $tid
+    }
+
+    $summary = $Why
+    if (-not $summary) { $summary = ("{0} が無いため、対応を進められないカードがあります。" -f $What) }
+    # 列は review。todo に置くとワーカーが拾ってしまうが、設定カードに
+    # ワーカーがやれることは無い (資格情報を入れるのは人間の作業)。
+    # 拾わせると、自分自身を指す require_human_step を作り直すだけで
+    # API 呼び出しを1回無駄にする。review は「人間が見る番」の列なので意味も合う。
+    $id = New-Task -Conn $Conn -EventId $null `
+            -Title ("設定が必要: {0}" -f $What) `
+            -Summary $summary -NeedsAction $true -Urgency 'normal' -Category 'setup' `
+            -Reason '権限不足で止まったカードから自動生成されました。' `
+            -ProposedActions $HowTo -Column 'review' -SubjectKey $key -Shape 'setup'
+    if ($id) {
+        [void] (Update-TaskFields -Conn $Conn -TaskId $id -Fields @{
+            human_step = (@{
+                blocker = 'credential_missing'
+                what    = $What
+                how_to  = $HowTo
+                why     = $summary
+            } | ConvertTo-Json -Depth 5 -Compress)
+        })
+        if ($BlockedTaskId) {
+            [void] (Add-TaskComment -Conn $Conn -TaskId $id -Author 'agent' `
+                -Body ("カード #{0} がこの設定を待っています。" -f $BlockedTaskId))
+        }
+    }
+    return $id
 }
 
 function Get-Tasks {
@@ -755,10 +925,13 @@ function Get-NextWorkItem {
     $now = Get-Now
     $Conn.Begin()
     try {
-        # リース切れの doing も回収対象に含める (ワーカーが落ちた場合の復旧)
+        # リース切れの doing も回収対象に含める (ワーカーが落ちた場合の復旧)。
+        # 設定カードは除く。人間が資格情報を入れるまで進みようがないので、
+        # ワーカーに回すと同じ結論を作り直すだけになる。
         $rows = @($Conn.Query(
             "SELECT * FROM tasks
               WHERE archived_at IS NULL AND cancel_requested = 0
+                AND (shape IS NULL OR shape <> 'setup')
                 AND (board_column = 'todo'
                      OR (board_column = 'doing' AND (agent_lease_until IS NULL OR agent_lease_until < ?)))
               ORDER BY CASE urgency WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, id ASC
@@ -797,7 +970,8 @@ function Get-TaskDetail {
 
 # 更新できるカラムはホワイトリストで固定する。キーを SQL に埋めるため、
 # 呼び出し側の入力をそのまま通してはいけない。
-$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'agent_output', 'draft_text')
+$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'agent_output', 'draft_text',
+                            'shape', 'human_step', 'subject_key')
 
 function Update-TaskFields {
     param(

@@ -47,6 +47,7 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\..\phase2\lib\ClaudeClient.ps1"
+. "$PSScriptRoot\..\phase2\lib\Dossier.ps1"
 . "$PSScriptRoot\lib\WorkTools.ps1"
 # 外部サービス連携があればツールが増える (未設定なら黙って無効)
 $gmailLib = Join-Path $PSScriptRoot '..\phase5\lib\GmailConnector.ps1'
@@ -177,6 +178,96 @@ function Invoke-WorkItem {
     # 送り先の無いカードに返信ツールを見せると、宛先の無い返信を書き始める。
     $hasOutlet = [bool] $slackChannel -or ($evt -and ([string] $evt['source']) -eq 'gmail')
 
+    # この件の台帳。同じ件の前回までの知見を recall で引けるようにする。
+    $subjectKey = [string] $Task['subject_key']
+    if (-not $subjectKey -and $evt) {
+        # 移行期のカード (subject_key を持たずに起票されたもの) はここで補う。
+        $subjectKey = Get-SubjectKey -Evt $evt
+        if ($subjectKey) {
+            [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ subject_key = $subjectKey })
+        }
+    }
+    $dossierText = ''
+    if ($subjectKey) { $dossierText = Get-DossierText -Conn $conn -SubjectKey $subjectKey }
+    # サービス単位の事実 (権限が無い等) も混ぜる。件が変わっても効くため。
+    $svcText = Get-ServiceDossierText -Conn $conn
+    if ($svcText) {
+        if ($dossierText) { $dossierText += "`n" }
+        $dossierText += "外部サービスについて分かっていること:`n" + $svcText
+    }
+    if ($dossierText) {
+        Write-Step $id 'step' 'この件の前回までの記録を読み込みました' 'DarkCyan'
+    }
+
+    # 何度目の発生か。2回目以降は、前回と同じ調査を繰り返さないよう明示する。
+    $occurrence = [int] $(if ($Task['occurrence_count']) { $Task['occurrence_count'] } else { 1 })
+
+    # 出自を取り直せるカードかどうか。取り直せないカード (手起票、
+    # 取得 API を持たない通知) に open_source を強制しても意味がない。
+    $sourceUnavailable = $true
+    if ($evt) {
+        $src = [string] $evt['source']
+        $ap  = [string] $evt['app']
+        $sourceUnavailable = -not ($src -eq 'gmail' -or ([string] $evt['link']) -like 'slack://*' -or $ap -like 'Claude*')
+    }
+
+    # 人間送りの出口が妥当かを、報告の言葉づかいではなく証跡で判定するために控える。
+    $humanStep = $null
+
+    # --- 出自の取り直しは、モデルに頼まず先にワーカーがやる ---
+    #
+    # 「まず open_source を呼べ」とプロンプトで指示する形も試したが、
+    # 守られなかった。カードに載っている見出しだけで十分だと判断して
+    # write_file に直行し、結果として本文の後半を読まないまま報告が出る。
+    #
+    # このアプリは他の箇所でも、守らせたい性質は指示ではなく構造で担保している
+    # (投稿先を束縛する、資格情報を注入する)。ここも同じにする。
+    # 先に取ってから渡せば「読んでいない」という状態が存在しなくなる。
+    $sourceText = ''
+    $sourceNote = ''
+    if (-not $sourceUnavailable) {
+        Write-Step $id 'tool' '元のやり取りを取り直しています' 'DarkCyan'
+        try {
+            $sc = Get-SourceContext -Evt $evt
+            $sourceNote = [string] $sc.note
+            if ($sc.ok) {
+                $parts = @()
+                if ($sc.identifiers -and $sc.identifiers.Count -gt 0) {
+                    $idLines = foreach ($k in $sc.identifiers.Keys) {
+                        if ($sc.identifiers[$k]) { "  $k = $($sc.identifiers[$k])" }
+                    }
+                    $parts += "識別子 (http_request で使えます):`n" + ($idLines -join "`n")
+                }
+                if ($sc.attachments.Count -gt 0) {
+                    $atLines = foreach ($a in $sc.attachments) {
+                        "  id=$($a.id)  $($a.name)  $($a.mimeType)  $($a.size) バイト"
+                    }
+                    $parts += "添付 (fetch_attachment で中身を読めます):`n" + ($atLines -join "`n")
+                }
+                if ($sc.links.Count -gt 0) {
+                    $parts += "本文中のリンク:`n" + (($sc.links | ForEach-Object { "  $_" }) -join "`n")
+                }
+                $parts += "本文:`n" + $sc.text
+                $sourceText = ($parts -join "`n`n")
+                Write-Step $id 'step' ("元のやり取りを取得しました ({0} 文字)" -f $sc.text.Length) 'Green'
+            }
+            else {
+                Write-Step $id 'step' ('元のやり取りは取り直せませんでした: ' + $sc.note) 'Yellow'
+            }
+            # 先に取ったぶんも証跡に残す。これを残さないと、
+            # 人間送りのゲートが「まだ読んでいない」と誤判定する。
+            Add-TaskAttempt -Conn $conn -TaskId $id -Tool 'open_source' `
+                -Target ([string] $sc.kind) -Outcome $(if ($sc.ok) { 'ok' } else { 'failed' }) `
+                -Detail $(if ($sc.ok) { "{0} 文字を取得" -f $sc.text.Length } else { $sc.note })
+        }
+        catch {
+            $sourceNote = $_.Exception.Message
+            Write-Step $id 'step' ('元のやり取りの取得に失敗しました: ' + $sourceNote) 'Yellow'
+            Add-TaskAttempt -Conn $conn -TaskId $id -Tool 'open_source' -Target 'error' `
+                -Outcome 'failed' -Detail $sourceNote
+        }
+    }
+
     if (Stop-IfCancelled $id) { return }
 
     $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
@@ -199,7 +290,15 @@ function Invoke-WorkItem {
             'read_file'          { "ファイルを読んでいます: $($toolInput.path)" }
             'list_files'         { 'ファイル一覧を確認しています' }
             'run_command'        { "コマンドを実行しようとしています: $($toolInput.purpose)" }
-            'http_fetch'         { "外部から取得しようとしています: $($toolInput.url)" }
+            'http_request'       {
+                $m = if ($toolInput.method) { ([string] $toolInput.method).ToUpper() } else { 'GET' }
+                "$m $($toolInput.url)"
+            }
+            'open_source'        { '元のやり取りを取り直しています' }
+            'fetch_attachment'   { "添付を取り込んでいます: $($toolInput.name)" }
+            'recall'             { 'この件の過去の記録を確認しています' }
+            'record_finding'     { '分かったことを台帳に残しています' }
+            'require_human_step' { '利用者本人の操作が要るか判断しています' }
             'send_slack_message' { "Slack に投稿しようとしています: $slackChannelName" }
             'send_gmail'         { "メールを送信しようとしています: $($toolInput.to)" }
             'propose_reply'      { '返信案をカードに載せています' }
@@ -229,6 +328,93 @@ function Invoke-WorkItem {
             }
         }
 
+        # 件の台帳に残す。カードをまたいで効く事実だけをここに入れる。
+        if ($toolName -eq 'record_finding') {
+            $note = [string] $toolInput.note
+            if (-not $subjectKey) {
+                return [pscustomobject]@{
+                    text = 'このカードには件を束ねるキーがないため、台帳に残せません。報告に書いてください。'
+                    artifact = $null; isError = $true
+                }
+            }
+            [void] (Add-DossierNote -Conn $conn -SubjectKey $subjectKey -Note $note -TaskId $id)
+            Write-Step $id 'file' ('台帳に記録: ' + $note) 'Green'
+            return [pscustomobject]@{
+                text = '台帳に残しました。次に同じ件が来たときに読まれます。'
+                artifact = $null; isError = $false
+            }
+        }
+
+        # 人間にしかできない1手としてカードを閉じる。
+        # ここが「安易な逃げ」になっていないかを、証跡で判定する。
+        if ($toolName -eq 'require_human_step') {
+            $blocker = [string] $toolInput.blocker
+            $attempts = @(Get-TaskAttempts -Conn $conn -TaskId $id)
+            $allowed = Test-HumanStepAllowed -Attempts $attempts -Blocker $blocker `
+                            -SourceUnavailable:$sourceUnavailable
+            if (-not $allowed.ok) {
+                Write-Step $id 'step' ('人間送りを差し戻しました: ' + $allowed.reason) 'Yellow'
+                return [pscustomobject]@{
+                    text = $allowed.reason + ' まだ手はあります。'
+                    artifact = $null; isError = $true
+                }
+            }
+
+            # 権限不足は、この人に投げ返す問題ではない。一度設定すれば
+            # 同じ壁で止まっている他のカードもまとめて通るようになる。
+            if ($blocker -eq 'credential_missing') {
+                $what = [string] $toolInput.what_is_missing
+                if (-not $what) { $what = '外部サービスの権限' }
+
+                # どのサービスの権限かは、モデルの文章ではなく
+                # 実際に失敗したリクエストのホストから決める。
+                # そうしないと言い回しの違いで設定カードが増殖する。
+                $svc = ''
+                foreach ($a in @($attempts)) {
+                    if ([string] $a['tool'] -ne 'http_request') { continue }
+                    if ([string] $a['outcome'] -eq 'ok') { continue }
+                    $t = [string] $a['target']
+                    if ($t -match 'https?://\S+') { $svc = Get-ServiceKey -Url $Matches[0] }
+                }
+
+                $setupId = New-SetupTask -Conn $conn -What $what `
+                    -HowTo ([string] $toolInput.step) `
+                    -Why ([string] $toolInput.tried) -BlockedTaskId $id -ServiceKey $svc
+                Write-Step $id 'step' ("設定カード #{0} を作りました ({1})" -f $setupId, $what) 'Cyan'
+                $script:PendingSetupId = $setupId
+
+                # 権限の不足はこの件だけの事実ではない。同じサービスを使う
+                # 別の件でも同じ壁に当たるので、サービス単位の台帳にも残す。
+                if ($svc) {
+                    [void] (Add-DossierNote -Conn $conn -SubjectKey ('svc:' + $svc) -TaskId $id -Kind 'credential' `
+                        -Note ("{0} が未設定のため操作できません。{1}" -f $what, [string] $toolInput.tried))
+                }
+            }
+
+            $humanStep = [pscustomobject]@{
+                blocker  = $blocker
+                step     = [string] $toolInput.step
+                url      = [string] $toolInput.url
+                deadline = [string] $toolInput.deadline
+                what_is_missing = [string] $toolInput.what_is_missing
+                tried    = [string] $toolInput.tried
+                setup_task_id = $(if ($blocker -eq 'credential_missing') { $script:PendingSetupId } else { $null })
+            }
+            # 'setup' は New-SetupTask が作るカード専用の印。権限待ちで止まった
+            # 元のカードは 'blocked' にする。ここを 'setup' にすると、
+            # ワーカーの取得対象から外れて (設定カードは拾わない仕様のため)、
+            # 資格情報を入れたあとも二度と再開されなくなる。
+            [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{
+                human_step = ($humanStep | ConvertTo-Json -Depth 5 -Compress)
+                shape = $(if ($blocker -eq 'credential_missing') { 'blocked' } else { 'human' })
+            })
+            Write-Step $id 'file' ('本人の操作が要ります: ' + $humanStep.step) 'Yellow'
+            return [pscustomobject]@{
+                text = 'カードに「あなたにしかできない1手」として載せました。報告にも同じことを短く書いてください。'
+                artifact = $null; isError = $false
+            }
+        }
+
         # 危険なツールは承認を取ってから実行する。
         # 拒否は例外にせずモデルに返す。理由が伝われば別の手を考えられる。
         $risk = Get-ToolRisk -Name $toolName -ToolInput $toolInput -Workspace $workspace `
@@ -243,6 +429,10 @@ function Invoke-WorkItem {
                     default     { '承認されませんでした。' }
                 }
                 Write-Step $id 'deny' ("実行しませんでした: " + $risk.summary) 'Yellow'
+                # 不許可も試行の一部。「試したが利用者が止めた」と
+                # 「そもそも試していない」は別物なので、証跡に残す。
+                Add-TaskAttempt -Conn $conn -TaskId $id -Tool $toolName `
+                    -Target ([string] $toolInput.url) -Outcome 'denied' -Detail $why
                 return [pscustomobject]@{
                     text = "$why 別の手段を検討するか、必要であればその旨を報告してください。"
                     artifact = $null; isError = $true
@@ -253,14 +443,29 @@ function Invoke-WorkItem {
         $r = Invoke-WorkTool -Name $toolName -ToolInput $toolInput -Workspace $workspace `
                 -CommandTimeoutSec $CommandTimeoutSec `
                 -GmailThreadId $gmailThreadId -GmailInReplyTo $gmailInReplyTo `
-                -SlackChannel $slackChannel -SlackThreadTs $slackThreadTs
+                -SlackChannel $slackChannel -SlackThreadTs $slackThreadTs `
+                -SourceEvent $evt -DossierText $dossierText
+
+        # 「実際に何を叩いて何が返ったか」を残す。require_human_step の妥当性は
+        # 報告の書きぶりではなくこれで判定する。
+        if (@('http_request', 'open_source', 'fetch_attachment', 'run_command') -contains $toolName) {
+            $target = if ($toolInput.url) {
+                $m = if ($toolInput.method) { ([string] $toolInput.method).ToUpper() } else { 'GET' }
+                "$m $($toolInput.url)"
+            } else { '' }
+            $head = ($r.text -split "`n")[0]
+            if ($head.Length -gt 200) { $head = $head.Substring(0, 200) }
+            Add-TaskAttempt -Conn $conn -TaskId $id -Tool $toolName -Target $target `
+                -Outcome $(if ($r.isError) { 'failed' } else { 'ok' }) -Detail $head
+        }
+
         if ($r.artifact) {
             Add-TaskArtifact -Conn $conn -TaskId $id -Path $r.artifact
             Write-Step $id 'file' ("成果物: " + (Split-Path -Leaf $r.artifact)) 'Green'
         }
         # 送信は取り消せない。何を出したかを作業ログに独立した種別で残し、
         # 検証にも回せるよう控えておく。
-        if (-not $r.isError -and (Test-IrreversibleTool -Name $toolName)) {
+        if (-not $r.isError -and (Test-IrreversibleTool -Name $toolName -ToolInput $toolInput)) {
             [void] $sentItems.Add($risk.detail)
             Write-Step $id 'sent' $risk.summary 'Green'
         }
@@ -276,7 +481,8 @@ function Invoke-WorkItem {
         $res = Invoke-ClaudeWork -Task $Task -Evt $evt -Policy $policy -Instructions $instructions `
             -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel) -HasOutlet:$hasOutlet) `
             -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
-            -RepairIssues $issues
+            -RepairIssues $issues -Occurrence $occurrence -Dossier $dossierText `
+            -SourceText $sourceText -SourceNote $sourceNote
 
         if ($res.aborted) { Stop-IfCancelled $id | Out-Null; return }
         if (Stop-IfCancelled $id) { return }
@@ -291,8 +497,11 @@ function Invoke-WorkItem {
             try { $c = [IO.File]::ReadAllText([string] $a['path'], [Text.Encoding]::UTF8) } catch { $c = '(読み取れませんでした)' }
             $arts += [pscustomobject]@{ name = $a['name']; content = $c }
         }
+        $humanStepJson = ''
+        if ($humanStep) { $humanStepJson = ($humanStep | ConvertTo-Json -Depth 5) }
         $v = (Invoke-ClaudeVerify -Task $Task -Policy $policy -Artifacts $arts -Report $res.text `
-                -Instructions $instructions -Sent ([string[]] $sentItems.ToArray())).result
+                -Instructions $instructions -Sent ([string[]] $sentItems.ToArray()) `
+                -Attempts (Get-AttemptSummary -Conn $conn -TaskId $id) -HumanStep $humanStepJson).result
         $verdict = $v
 
         $high = @($v.issues | Where-Object { $_.severity -eq 'high' })
@@ -323,6 +532,22 @@ function Invoke-WorkItem {
 
     $files = @(Get-TaskArtifacts -Conn $conn -TaskId $id)
     $summary = $res.text
+
+    # 本人の1手は報告の先頭に置く。これがこのカードの結論なので、
+    # 経過の下に埋めると読まれない。
+    if ($humanStep) {
+        $head = "【あなたの操作が必要です】`n" + $humanStep.step
+        if ($humanStep.url)      { $head += "`n→ " + $humanStep.url }
+        if ($humanStep.deadline) { $head += "`n期限: " + $humanStep.deadline }
+        if ($humanStep.blocker -eq 'credential_missing' -and $humanStep.setup_task_id) {
+            $head += ("`n※これは権限の不足です。設定カード #{0} を作りました。" -f $humanStep.setup_task_id) +
+                     '一度設定すれば、同じ理由で止まっている他のカードもまとめて進みます。'
+        }
+        $tried = Get-AttemptSummary -Conn $conn -TaskId $id
+        if ($tried) { $head += "`n`nここに至るまでに試したこと:`n" + $tried }
+        $summary = $head + "`n`n---`n`n" + $summary
+    }
+
     if ($files.Count -gt 0) {
         $summary += "`n`n作成したファイル:`n" + (($files | ForEach-Object { '- ' + $_['name'] }) -join "`n")
     }

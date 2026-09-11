@@ -130,7 +130,26 @@
   }
   .card .foot .u-high { color: var(--high); font-weight: 600; }
   .card .foot .files { color: var(--ok); }
+  .card .foot .recur { color: var(--muted); cursor: help; }
   .card .warnflag { color: var(--danger); font-weight: 600; cursor: help; }
+  /* 本人にしかできない1手。カードの表に出す ―― 開かないと分からないのでは、
+     期限のあるもの (本人確認リンクなど) を取り逃がす */
+  .card .humanstep {
+    margin-top: 8px; padding: 7px 9px; border-radius: 6px;
+    background: color-mix(in srgb, var(--high) 9%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--high) 32%, transparent);
+  }
+  .card .humanstep .hs-l {
+    font-size: 10px; font-weight: 700; letter-spacing: .04em;
+    color: var(--high); text-transform: none;
+  }
+  .card .humanstep .hs-s { font-size: 11.5px; line-height: 1.5; margin-top: 3px; word-break: break-word; }
+  .card .humanstep .hs-d { font-size: 10.5px; color: var(--high); font-weight: 600; margin-top: 4px; }
+  .card .humanstep .hs-go {
+    display: inline-block; margin-top: 6px; font-size: 11px; font-weight: 600;
+    color: var(--accent); text-decoration: none;
+  }
+  .card .humanstep .hs-go:hover { text-decoration: underline; }
   .card .now { margin-top: 6px; font-size: 11px; color: var(--ok); font-weight: 600; }
   /* 元の会話へ戻る導線。カードでは末尾に小さく、ドロワーでは見出しの隣に置く */
   a.open {
@@ -207,6 +226,17 @@
   .dest b { color: var(--text); }
   .hintline { font-size: 10.5px; color: var(--faint); margin-top: 4px; }
 
+  /* 試行の証跡。等幅にして、何をどこへ投げたかが縦に揃って読めるようにする */
+  .att {
+    display: flex; gap: 8px; font-size: 11.5px; padding: 3px 0; align-items: baseline;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace; flex-wrap: wrap;
+  }
+  .att .o { font-weight: 700; }
+  .att.ok .o { color: var(--ok); }
+  .att.failed .o, .att.denied .o { color: var(--danger); }
+  .att .tl { color: var(--accent); }
+  .att .tg { color: var(--fg); word-break: break-all; }
+  .att .dt { color: var(--muted); word-break: break-word; }
   .act { display: flex; gap: 9px; font-size: 12px; padding: 3px 0; align-items: baseline; }
   .act .ts { color: var(--faint); font-size: 10.5px; flex: none; font-variant-numeric: tabular-nums; }
   .act .k { flex: none; width: 5em; color: var(--faint); font-size: 10.5px; }
@@ -588,10 +618,35 @@
     card.appendChild(el('div', 't', t.title));
     if (t.summary) card.appendChild(el('div', 's', t.summary));
 
+    // 「あなたにしかできない1手」はカードの表で出す。開かないと分からないのでは
+    // 意味がない ―― 期限のあるもの (本人確認リンクなど) を取り逃がす。
+    if (t.human_step_obj && t.human_step_obj.step) {
+      var hs = t.human_step_obj;
+      var box = el('div', 'humanstep');
+      box.appendChild(el('div', 'hs-l', hs.blocker === 'credential_missing'
+        ? '設定すれば自動で進みます' : 'あなたの操作が必要です'));
+      box.appendChild(el('div', 'hs-s', hs.step));
+      if (hs.deadline) box.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
+      if (hs.url) {
+        var a = el('a', 'hs-go', 'ここで行う ↗');
+        a.href = hs.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.addEventListener('click', function (ev) { ev.stopPropagation(); });
+        a.draggable = false;
+        box.appendChild(a);
+      }
+      card.appendChild(box);
+    }
+
     // 補助情報は小さく淡く一行に。強調するのは緊急度「高」と警告だけ。
     var foot = el('div', 'foot');
     foot.appendChild(el('span', null, '#' + t.id));
     if (t.urgency === 'high') foot.appendChild(el('span', 'u-high', '緊急度 高'));
+    // 同じ件が何度も来ていることは、カードを増やさない代わりにここで見せる。
+    if (t.occurrence_count > 1) {
+      var oc = el('span', 'recur', t.occurrence_count + ' 回目');
+      oc.title = '同じ件が ' + t.occurrence_count + ' 回届いています。カードは1枚にまとめています';
+      foot.appendChild(oc);
+    }
     if (t.artifact_count > 0) foot.appendChild(el('span', 'files', '成果物 ' + t.artifact_count));
     if (t.cancel_requested) {
       // 要対応にあるのに中止要求が残っていると、ワーカーは永久に飛ばす
@@ -696,6 +751,7 @@
       openTaskId = id;
       var t = r.body.task, ev = r.body.event, openLink = r.body.openLink, outlet = r.body.outlet;
       var comments = r.body.comments || [], activity = r.body.activity || [], files = r.body.artifacts || [];
+      var attempts = r.body.attempts || [];
       var scroll = keepScroll ? drawer.scrollTop : 0;
 
       drawer.innerHTML = '';
@@ -863,6 +919,22 @@
       }
       if (t.reason) {
         pad.appendChild(foldable('reason', 'この判定にした理由', null, function (b) { b.appendChild(pre(t.reason)); }));
+      }
+
+      // 実際に外へ何を投げ、何が返ったか。ワーカーが「できませんでした」と
+      // 言っているとき、それが手を尽くした結果なのか、試さずに諦めたのかは
+      // ここでしか判別できない。
+      if (attempts.length) {
+        pad.appendChild(foldable('attempts', '試したこと', attempts.length, function (b) {
+          attempts.forEach(function (a) {
+            var row = el('div', 'att ' + a.outcome);
+            row.appendChild(el('span', 'o', a.outcome === 'ok' ? '○' : (a.outcome === 'denied' ? '×' : '×')));
+            row.appendChild(el('span', 'tl', a.tool));
+            if (a.target) row.appendChild(el('span', 'tg', a.target));
+            if (a.detail) row.appendChild(el('span', 'dt', a.detail));
+            b.appendChild(row);
+          });
+        }));
       }
 
       pad.appendChild(foldable('activity', 'ワーカーの作業ログ', activity.length, function (b) {

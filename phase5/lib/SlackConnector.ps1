@@ -104,6 +104,52 @@ function Invoke-SlackApiPost {
     return $obj
 }
 
+# スレッドに付いているファイル。
+# 本文だけでは足りないことがある ——「添付の動画をご確認のうえ登録を」
+# 「課題文は本メッセージに添付しております」のように、
+# やるべきことの実体が添付にしか無いケースが実際にあった。
+function Get-SlackThreadFiles {
+    param([Parameter(Mandatory)] [string] $Link, [int] $Limit = 50)
+    $ref = ConvertFrom-SlackLink $Link
+    if (-not $ref) { return @() }
+    $r = Invoke-SlackApi -Method 'conversations.replies' -Query @{
+        channel = $ref.channel; ts = $ref.threadTs; limit = $Limit
+    }
+    $files = @()
+    foreach ($m in @($r.messages)) {
+        foreach ($f in @($m.files)) {
+            if (-not $f.id) { continue }
+            $files += [pscustomobject]@{
+                id = [string] $f.id; name = [string] $f.name
+                mimetype = [string] $f.mimetype; size = [int] $f.size
+            }
+        }
+    }
+    return $files
+}
+
+function Get-SlackFileBytes {
+    <#
+      .SYNOPSIS
+        Slack のファイルを取得する。
+      .DESCRIPTION
+        url_private は認証が要る。ブラウザのようにトークン無しで取ると
+        ログイン用の HTML が返ってきて、中身を取り違えるので必ずヘッダを付ける。
+    #>
+    param([Parameter(Mandatory)] [string] $FileId)
+    $token = Get-SlackReadToken
+    if (-not $token) { throw 'Slack のトークンが設定されていません。' }
+    $info = Invoke-SlackApi -Method 'files.info' -Query @{ file = $FileId }
+    $url = [string] $info.file.url_private_download
+    if (-not $url) { $url = [string] $info.file.url_private }
+    if (-not $url) { throw "ファイル $FileId のダウンロード先が取得できませんでした。" }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $resp = Invoke-WebRequest -Uri $url -Method Get -Headers @{ Authorization = "Bearer $token" } `
+                -UseBasicParsing -TimeoutSec 60
+    return $resp.RawContentStream.ToArray()
+}
+
 # ユーザーIDは何度も出てくるので引いた結果を使い回す
 $script:SlackUserCache = @{}
 function Resolve-SlackUser {

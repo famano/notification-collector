@@ -31,6 +31,10 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\TaskStore.ps1"
 . "$PSScriptRoot\lib\ClaudeClient.ps1"
+. "$PSScriptRoot\lib\Dossier.ps1"
+# Slack のリンクから件のキーを作るのに使う (未設定なら無くても動く)
+$slackLibPath = Join-Path $PSScriptRoot '..\phase5\lib\SlackConnector.ps1'
+if (Test-Path $slackLibPath) { . $slackLibPath }
 
 if (-not $JsonlPath)  { $JsonlPath  = Join-Path $PSScriptRoot '..\phase1\data\notifications.jsonl' }
 if (-not $PolicyPath) { $PolicyPath = Join-Path $PSScriptRoot 'config\policy.json' }
@@ -158,7 +162,7 @@ try {
     $events = @(Get-UntriagedEvents -Conn $conn -Limit $Limit)
     Write-Host ("未判定: {0} 件" -f $events.Count) -ForegroundColor Cyan
 
-    $stats = @{ ignored = 0; llm = 0; tasks = 0; failed = 0; deferred = 0; merged = 0 }
+    $stats = @{ ignored = 0; llm = 0; tasks = 0; failed = 0; deferred = 0; merged = 0; stacked = 0 }
 
     foreach ($e in $events) {
         $label = "{0} / {1}" -f $e['app_id'], $e['title']
@@ -206,11 +210,37 @@ try {
 
             # 対応不要でもカードは作る。「見たうえで不要と判断した」履歴を board に残すため。
             $column = if ($t.needs_action) { 'todo' } else { 'dismissed' }
+
+            # 同じ「件」で開いているカードがあれば、増やさずにそこへ積む。
+            #
+            # dedup_key は「同じメッセージか」を見るので、CI の失敗通知のように
+            # 実行ごとに別メールが届くものは弾けない。実際それで、同じ
+            # ワークフローの失敗が5枚のカードになり、5回とも同じ調査をやり直し、
+            # 5回とも同じ権限の壁にぶつかっていた。
+            $skey = Get-SubjectKey -Evt $e
+            $open = if ($skey -and $t.needs_action) { Get-OpenTaskBySubject -Conn $conn -SubjectKey $skey } else { $null }
+            if ($open) {
+                $n = Add-TaskOccurrence -Conn $conn -TaskId ([int] $open['id']) -EventId ([string] $e['id'])
+                [void] (Add-TaskComment -Conn $conn -TaskId ([int] $open['id']) -Author 'agent' `
+                    -Body ("同じ件がもう一度届きました ({0} 回目): {1}" -f $n, $t.title))
+                $stats.stacked++
+                Write-Host ("  [積む  ] #{0} に {1} 回目として追加 — {2}" -f $open['id'], $n, $t.title) -ForegroundColor DarkCyan
+                continue
+            }
+
             $id = New-Task -Conn $conn -EventId $e['id'] -Title $t.title -Summary $t.summary `
                     -NeedsAction $t.needs_action -Urgency $t.urgency -Category $t.category `
                     -Reason $t.reason -ProposedActions ($t.proposed_actions | ConvertTo-Json -Depth 6 -Compress) `
-                    -Column $column
+                    -Column $column -SubjectKey $skey
             if ($id) { $stats.tasks++ }
+
+            # 過去に同じ件で分かったことがあれば、最初から持たせる。
+            if ($id -and $skey) {
+                $prior = Get-DossierText -Conn $conn -SubjectKey $skey
+                if ($prior) {
+                    Write-Host ("          (この件は過去にも扱っています。前回の記録を引き継ぎます)") -ForegroundColor DarkGray
+                }
+            }
 
             $mark = if ($t.needs_action) { '要対応' } else { '不要  ' }
             $color = if ($t.needs_action) { 'Green' } else { 'DarkGray' }
@@ -227,8 +257,8 @@ try {
         Write-Host ("DryRun: ルールで除外 {0} 件 / 同期待ち {1} 件 / 統合 {2} 件 / LLM に回る {3} 件 (書き込みなし)" -f `
             $stats.ignored, $stats.deferred, $stats.merged, $stats.llm) -ForegroundColor Yellow
     } else {
-        Write-Host ("除外 {0} / 同期待ち {1} / 統合 {2} / 判定 {3} / タスク作成 {4} / 失敗 {5}" -f `
-            $stats.ignored, $stats.deferred, $stats.merged, $stats.llm, $stats.tasks, $stats.failed) -ForegroundColor Yellow
+        Write-Host ("除外 {0} / 同期待ち {1} / 統合 {2} / 判定 {3} / タスク作成 {4} / 既存に集約 {5} / 失敗 {6}" -f `
+            $stats.ignored, $stats.deferred, $stats.merged, $stats.llm, $stats.tasks, $stats.stacked, $stats.failed) -ForegroundColor Yellow
     }
 }
 finally { $conn.Dispose() }
