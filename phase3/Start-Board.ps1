@@ -229,14 +229,23 @@ function ConvertTo-CardObject {
     if ($Links -and $Links.ContainsKey($key)) { $link = $Links[$key] }
     Add-Member -InputObject $o -NotePropertyName 'open_link' -NotePropertyValue $link -Force
 
-    # 「あなたにしかできない1手」は画面で組み立てるのでオブジェクトにして渡す。
-    # 文字列のまま渡すと、クライアント側で JSON を二重に解く羽目になる。
+    Add-HumanStepObject -Row $Row -Object $o
+    return $o
+}
+
+# 「あなたにしかできない1手」は画面で組み立てるのでオブジェクトにして渡す。
+# 文字列のまま渡すと、クライアント側で JSON を二重に解く羽目になる。
+#
+# 一覧と詳細の両方で必要。カードに赤枠が出ているのに開くと消えるのでは、
+# 見落としたのかと思わせてしまう。片方だけに足すと必ずそうなるので、
+# 変換はここに1つだけ置いて両方から呼ぶ。
+function Add-HumanStepObject {
+    param($Row, $Object)
     $hs = $null
-    if ($Row['human_step']) {
+    if ($Row -and $Row['human_step']) {
         try { $hs = [string] $Row['human_step'] | ConvertFrom-Json } catch { $hs = $null }
     }
-    Add-Member -InputObject $o -NotePropertyName 'human_step_obj' -NotePropertyValue $hs -Force
-    return $o
+    Add-Member -InputObject $Object -NotePropertyName 'human_step_obj' -NotePropertyValue $hs -Force
 }
 
 function Get-BoardPayload {
@@ -447,8 +456,12 @@ function Invoke-Route {
                 if (-not $u) { $u = Get-SafeOpenLink ([string] $d.event['link']) }
                 if ($u) { $openLink = [pscustomobject]@{ url = $u; label = (Get-OpenLinkLabel $u ([string] $d.event['app'])) } }
             }
+            # 一覧と同じく human_step_obj を足す。詳細だけ素の行を返すと、
+            # カードに出ていた1手が開いた瞬間に消える。
+            $taskObj = ConvertTo-PlainObject $d.task
+            Add-HumanStepObject -Row $d.task -Object $taskObj
             Write-JsonResponse $Context ([pscustomobject]@{
-                task     = (ConvertTo-PlainObject $d.task)
+                task     = $taskObj
                 comments = @($d.comments | ForEach-Object { ConvertTo-PlainObject $_ })
                 event    = (ConvertTo-PlainObject $d.event)
                 openLink = $openLink

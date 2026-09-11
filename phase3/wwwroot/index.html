@@ -150,6 +150,39 @@
     color: var(--accent); text-decoration: none;
   }
   .card .humanstep .hs-go:hover { text-decoration: underline; }
+  /* ドロワー側。カードと同じ見た目のまま、根拠を足せるだけ大きくする。
+     一覧で見えていた枠が開くと消える／別物になるのが一番戸惑う */
+  #drawer .humanstep {
+    margin: 12px 0; padding: 12px 14px; border-radius: 8px;
+    background: color-mix(in srgb, var(--high) 9%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--high) 38%, transparent);
+    border-left: 3px solid var(--high);
+  }
+  #drawer .humanstep .hs-l {
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--high);
+  }
+  #drawer .humanstep .hs-s {
+    font-size: 13.5px; line-height: 1.6; margin-top: 5px; font-weight: 600; word-break: break-word;
+  }
+  #drawer .humanstep .hs-d { font-size: 12px; color: var(--high); font-weight: 700; margin-top: 7px; }
+  #drawer .humanstep .hs-go {
+    display: inline-block; margin-top: 10px; padding: 6px 13px; border-radius: 6px;
+    font-size: 12px; font-weight: 600; text-decoration: none;
+    color: #fff; background: var(--high);
+  }
+  #drawer .humanstep .hs-go:hover { filter: brightness(1.08); }
+  #drawer .humanstep .hs-sub { font-size: 12px; color: var(--muted); margin-top: 9px; word-break: break-word; }
+  #drawer .humanstep .hs-link {
+    display: block; margin-top: 9px; padding: 0; border: none; background: none;
+    font: inherit; font-size: 12px; font-weight: 600; color: var(--accent);
+    cursor: pointer; text-align: left;
+  }
+  #drawer .humanstep .hs-link:hover { text-decoration: underline; }
+  #drawer .humanstep .hs-tried {
+    margin-top: 10px; padding-top: 9px; font-size: 11.5px; line-height: 1.55; color: var(--muted);
+    border-top: 1px solid color-mix(in srgb, var(--high) 22%, transparent);
+    word-break: break-word;
+  }
   .card .now { margin-top: 6px; font-size: 11px; color: var(--ok); font-weight: 600; }
   /* 元の会話へ戻る導線。カードでは末尾に小さく、ドロワーでは見出しの隣に置く */
   a.open {
@@ -791,6 +824,47 @@
       pad.appendChild(chips);
 
       if (t.summary) pad.appendChild(el('div', 'lead', t.summary));
+
+      // --- 「あなたにしかできない1手」 ---
+      // カードの表に出したものは、開いたときにも同じ場所に同じ強さで出す。
+      // 一覧で見えていた赤い枠が開くと消えるのでは、見落としたのかと思う。
+      // カードは省スペースのため1手だけだが、こちらは根拠まで出す。
+      if (t.human_step_obj && t.human_step_obj.step) {
+        var hs = t.human_step_obj;
+        var isCred = hs.blocker === 'credential_missing';
+        var hbox = el('div', 'humanstep');
+        hbox.appendChild(el('div', 'hs-l',
+          isCred ? '設定すれば、以後は自動で進みます' : 'あなたの操作が必要です'));
+        hbox.appendChild(el('div', 'hs-s', hs.step));
+
+        if (hs.deadline) hbox.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
+
+        if (hs.url) {
+          var ha = el('a', 'hs-go', 'ここで行う ↗');
+          ha.href = hs.url; ha.target = '_blank'; ha.rel = 'noopener noreferrer';
+          hbox.appendChild(ha);
+        }
+
+        if (isCred && hs.what_is_missing) {
+          hbox.appendChild(el('div', 'hs-sub', '足りないもの: ' + hs.what_is_missing));
+        }
+
+        // 権限不足は、このカード1枚の問題ではないことを明示する。
+        // 同じ設定を待っている他のカードごと、一度で片付く。
+        // ただし設定カード自身には出さない ―― 自分を開く導線になってしまう。
+        if (hs.setup_task_id && Number(hs.setup_task_id) !== Number(t.id)) {
+          var link = el('button', 'hs-link', '設定カード #' + hs.setup_task_id + ' を開く');
+          link.addEventListener('click', function () { openDetail(hs.setup_task_id); });
+          hbox.appendChild(link);
+        }
+
+        // なぜ人間に回ってきたのかの根拠。これが無いと「サボったのでは」と
+        // 疑うしかなく、疑いを晴らすために結局こちらが元通知を見ることになる。
+        if (hs.tried) {
+          hbox.appendChild(el('div', 'hs-tried', 'ここに至るまでに試したこと: ' + hs.tried));
+        }
+        pad.appendChild(hbox);
+      }
 
       // --- 主役1: 成果物 ---
       if (files.length > 0) {

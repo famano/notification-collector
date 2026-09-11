@@ -591,12 +591,16 @@ function New-SetupTask {
             -Reason '権限不足で止まったカードから自動生成されました。' `
             -ProposedActions $HowTo -Column 'review' -SubjectKey $key -Shape 'setup'
     if ($id) {
+        # キー名はワーカーが書くものと揃える。カンバンは step を見て
+        # 「あなたの操作が必要です」の枠を出すので、ここだけ how_to のような
+        # 別名にすると、設定カードにだけ枠が出ないことになる。
+        # 指示が一番必要なカードで指示が消えるので、必ず同じ形にする。
         [void] (Update-TaskFields -Conn $Conn -TaskId $id -Fields @{
             human_step = (@{
-                blocker = 'credential_missing'
-                what    = $What
-                how_to  = $HowTo
-                why     = $summary
+                blocker         = 'credential_missing'
+                step            = $HowTo
+                what_is_missing = $What
+                tried           = $Why
             } | ConvertTo-Json -Depth 5 -Compress)
         })
         if ($BlockedTaskId) {
