@@ -24,6 +24,7 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 | [phase3](phase3/README.md) | カンバン UI。承認・割り込み・修正・アーカイブ |
 | [phase4](phase4/README.md) | ワーカー。出自を取り直し、API で実際に操作し、自己検証する |
 | [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub |
+| [tests](tests/README.md) | テスト。追加インストールもキーも要らない |
 
 ## 動かす
 
@@ -149,6 +150,16 @@ googleapis.com にしか付かず、未知のホストには何も付かない�
 投稿先・返信先はモデルに決めさせず、カードの元通知から束縛して渡す。
 利用者がカンバンから直接送る場合も同じで、**宛先はサーバがカードから決め、
 リクエストの宛先は受け取らない。**
+
+## 手を入れるとき
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
+```
+
+外部サービスにも API にも出ないので、キー無しでそのまま走る。
+見ているのは「壊れても静かなところ」―― 承認の要否、宛先の束縛、
+通知と同期の突き合わせ、件の同一性。詳しくは [tests/README.md](tests/README.md)。
 
 ## 注意
 
