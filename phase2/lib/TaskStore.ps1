@@ -611,6 +611,75 @@ function New-SetupTask {
     return $id
 }
 
+# ---------------------------------------------------------------- 設定待ちのカード
+#
+# 権限不足で止まったカードは shape='blocked' になり、human_step に
+# 「どの設定カードを待っているか」が入る。資格情報が入ったら、そのカードたちは
+# 人手を介さずに動き出すべきである ―― 設定カードの狙いは
+# 「1枚直せば同種がまとめて通る」で、1枚ずつ手で要対応に戻すのでは半分しか叶わない。
+
+function Get-TasksWaitingForSetup {
+    <#
+      .SYNOPSIS
+        この設定 (サービス / 設定カード) を待って止まっているカード。
+      .DESCRIPTION
+        いまワーカーが書くのは setup_task_id なので、通常はそれで当たる。
+        human_step.service でも拾えるようにしてあるのは、設定カードを
+        作り直したあとでも結び付けられるようにするため。
+    #>
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [string] $Service,
+        [int] $SetupTaskId = 0
+    )
+    $rows = @($Conn.Query(
+        "SELECT * FROM tasks
+          WHERE archived_at IS NULL AND shape = 'blocked'
+            AND board_column NOT IN ('done', 'dismissed')
+            AND human_step IS NOT NULL"))
+    $out = @()
+    foreach ($r in $rows) {
+        $hs = $null
+        try { $hs = [string] $r['human_step'] | ConvertFrom-Json } catch { continue }
+        if (-not $hs) { continue }
+        $hit = $false
+        if ($Service -and $hs.service -and ([string] $hs.service -eq $Service)) { $hit = $true }
+        if ($SetupTaskId -and $hs.setup_task_id -and ([int] $hs.setup_task_id -eq $SetupTaskId)) { $hit = $true }
+        if ($hit) { $out += $r }
+    }
+    return $out
+}
+
+function Resume-Task {
+    <#
+      .SYNOPSIS
+        止まっていたカードを要対応に戻す。
+      .DESCRIPTION
+        前回の結論 (human_step) は消す。資格情報が入ったいま、
+        「あなたが設定してください」は事実ではなくなっている。
+        中止要求も解く。立ったままだとワーカーが永久に飛ばす。
+    #>
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [string] $Reason)
+    [void] (Update-TaskFields -Conn $Conn -TaskId $TaskId -Fields @{ human_step = $null; shape = $null })
+    [void] (Set-TaskCancel -Conn $Conn -TaskId $TaskId -Requested $false)
+    [void] $Conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($TaskId))
+    [void] (Set-TaskColumn -Conn $Conn -TaskId $TaskId -Column 'todo')
+    if ($Reason) { Add-TaskActivity -Conn $Conn -TaskId $TaskId -Kind 'user' -Message $Reason }
+    return $true
+}
+
+# サービスに対応する、開いている設定カード。無ければ $null。
+function Get-OpenSetupTask {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $Service)
+    $rows = @($Conn.Query(
+        "SELECT * FROM tasks
+          WHERE subject_key = ? AND archived_at IS NULL
+            AND board_column NOT IN ('done', 'dismissed')
+          ORDER BY id DESC LIMIT 1", [object[]] @(('setup:' + $Service))))
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
 function Get-Tasks {
     param([Parameter(Mandatory)] $Conn, [string] $Column, [switch] $IncludeArchived)
     $where = if ($IncludeArchived) { '1=1' } else { 'archived_at IS NULL' }

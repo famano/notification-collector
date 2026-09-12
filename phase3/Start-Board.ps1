@@ -34,6 +34,10 @@ $script:Connectors = $false
 try {
     . "$PSScriptRoot\..\phase5\lib\SlackConnector.ps1"
     . "$PSScriptRoot\..\phase5\lib\GmailConnector.ps1"
+    # 資格情報の設定をカンバンから行うための層。設定カードの出口はここ。
+    . "$PSScriptRoot\..\phase5\lib\ServiceSetup.ps1"
+    . "$PSScriptRoot\lib\SetupFlow.ps1"
+    . "$PSScriptRoot\..\phase2\lib\Dossier.ps1"
     $script:Connectors = $true
 }
 catch {
@@ -106,6 +110,51 @@ function Write-StaticFile {
     }
     $bytes = [IO.File]::ReadAllBytes($full)
     $Context.Response.ContentType = $type
+    $Context.Response.Headers.Add('Cache-Control', 'no-store')
+    $Context.Response.ContentLength64 = $bytes.Length
+    $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+}
+
+# 同意画面から戻ってきたブラウザに見せる1枚。
+# ここに来るのは「別タブ」なので、結果はこの場で読み切れる形にする。
+# タブを閉じたあとカンバンに戻ると、設定カードは既に完了に移っている。
+function Write-OAuthResultPage {
+    param($Context, $Result, [int] $Resumed = 0)
+
+    # error には Google が返した文字列がそのまま入る。第三者の文字列を
+    # HTML に差し込む形になるので、必ず逃がしてから出す。
+    $esc = {
+        param([string] $t)
+        if (-not $t) { return '' }
+        return ($t -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')
+    }
+
+    if ($Result.ok) {
+        $body = "<h1>接続できました</h1><p>{0} として接続しました。</p>" -f (& $esc ([string] $Result.account))
+        if ($Result.note) { $body += "<p class='note'>{0}</p>" -f (& $esc ([string] $Result.note)) }
+        if ($Resumed -gt 0) {
+            $body += "<p>設定を待って止まっていたカード {0} 枚を「要対応」に戻しました。</p>" -f $Resumed
+        }
+        $body += "<p class='note'>このタブは閉じてかまいません。カンバンに戻ってください。</p>"
+    }
+    else {
+        $body = "<h1>接続できませんでした</h1><p>{0}</p>" -f (& $esc ([string] $Result.error))
+        $body += "<p class='note'>カンバンの「接続」からやり直せます。</p>"
+    }
+
+    $html = @"
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>接続の結果</title>
+<style>
+  body { font: 14px/1.7 "Segoe UI","Yu Gothic UI",system-ui,sans-serif; margin: 48px auto; max-width: 34em;
+         color: #14181d; background: #f4f6f8; padding: 0 16px; }
+  h1 { font-size: 18px; }
+  .note { color: #6b7480; font-size: 13px; }
+  @media (prefers-color-scheme: dark) { body { color: #e8eaed; background: #121519; } .note { color: #9aa3ad; } }
+</style></head><body>$body</body></html>
+"@
+    $bytes = [Text.Encoding]::UTF8.GetBytes($html)
+    $Context.Response.StatusCode = 200
+    $Context.Response.ContentType = 'text/html; charset=utf-8'
     $Context.Response.Headers.Add('Cache-Control', 'no-store')
     $Context.Response.ContentLength64 = $bytes.Length
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -230,6 +279,10 @@ function ConvertTo-CardObject {
     Add-Member -InputObject $o -NotePropertyName 'open_link' -NotePropertyValue $link -Force
 
     Add-HumanStepObject -Row $Row -Object $o
+    # カンバンで設定できる設定カードか。カード側の文言を「開けば設定できる」に
+    # 差し替えるために使う (端末に戻る指示を表に出さない)。
+    Add-Member -InputObject $o -NotePropertyName 'setup_ready' `
+        -NotePropertyValue ([bool] (Get-CardSetupService $Row)) -Force
     return $o
 }
 
@@ -246,6 +299,21 @@ function Add-HumanStepObject {
         try { $hs = [string] $Row['human_step'] | ConvertFrom-Json } catch { $hs = $null }
     }
     Add-Member -InputObject $Object -NotePropertyName 'human_step_obj' -NotePropertyValue $hs -Force
+}
+
+# このカードが「設定カード」なら、そのサービスの入力欄一式を返す。
+#
+# カードの出口は画面の上にある、という原則をここにも通す。設定カードの出口は
+# 「端末でコマンドを打つ」ではなく「この欄に貼って押す」であるべきで、
+# そのためには画面がどの欄を出せばよいかを知っている必要がある。
+function Get-CardSetupService {
+    param($Row)
+    if (-not $script:Connectors -or -not $Row) { return $null }
+    $key = [string] $Row['subject_key']
+    if (-not $key -or -not $key.StartsWith('setup:')) { return $null }
+    $svc = Get-SetupService $key
+    if (-not $svc) { return $null }
+    return @(Get-SetupStatusList | Where-Object { $_.key -eq $svc.key })[0]
 }
 
 function Get-BoardPayload {
@@ -321,6 +389,93 @@ function Invoke-Route {
     $req    = $Context.Request
     $path   = $req.Url.AbsolutePath
     $method = $req.HttpMethod
+
+    # ---------------------------------------------------------------- 外部サービスの設定
+    #
+    # 設定カードの出口。トークンを貼る / 同意画面を通る、のどちらもここで完結する。
+    # 値は返さない。返すのは「設定済みか」と「どのアカウントとして繋がったか」だけ。
+
+    if ($path -eq '/api/setup' -and $method -eq 'GET') {
+        if (-not $script:Connectors) {
+            Write-JsonResponse $Context ([pscustomobject]@{ available = $false; services = @() })
+            return
+        }
+        Write-JsonResponse $Context ([pscustomobject]@{
+            available = $true
+            services  = @(Get-SetupStatusList)
+        })
+        return
+    }
+
+    # 貼るだけのサービス (GitHub / Slack)。保存して疎通を確認し、
+    # 止まっていたカードを要対応に戻すところまでを1回で行う。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svcKey = $Matches[1]
+        $svc = Get-SetupService $svcKey
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+
+        $b = Read-JsonBody $Context
+        $values = @{}
+        if ($b -and $b.values) {
+            foreach ($f in $svc.fields) { $values[$f.name] = [string] $b.values.($f.name) }
+        }
+
+        $r = Save-SetupCredential -Key $svc.key -Values $values
+        if (-not $r.ok) { Write-JsonResponse $Context @{ ok = $false; error = $r.error } 400; return }
+
+        $done = Invoke-SetupCompletion -Conn $Conn -Service $svc.key -Account $r.account
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true; account = $r.account; note = $r.note
+            resumed = $done.resumed; setupTaskId = $done.setupTaskId
+        })
+        return
+    }
+
+    # Google だけはブラウザの同意が要る。ここでは URL を組み立てて返すだけで、
+    # 待たない。カンバンは1本のループで要求を捌いているので、ここで
+    # 同意を待つと画面ごと固まる。戻り先を下の /oauth/google/callback にして、
+    # ただの1リクエストとして流す。
+    if ($path -eq '/api/setup/google/authorize' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $b = Read-JsonBody $Context
+        $cid = if ($b) { [string] $b.clientId } else { '' }
+        $sec = if ($b) { [string] $b.clientSecret } else { '' }
+        if (-not $cid.Trim() -or -not $sec.Trim()) {
+            Write-JsonResponse $Context @{ ok = $false; error = 'クライアント ID とシークレットを入力してください' } 400
+            return
+        }
+        # 戻り先は「いま開いているカンバン」。127.0.0.1 で組み立てる
+        # (Google のデスクトップ クライアントはループバックを任意のポートで許す)。
+        $redirect = "http://127.0.0.1:$script:BoardPort/oauth/google/callback"
+        $req = Get-GoogleAuthRequest -ClientId $cid -ClientSecret $sec -RedirectUri $redirect
+        Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $req.url; redirectUri = $redirect })
+        return
+    }
+
+    # 同意画面からの戻り。ブラウザが直接来るので HTML を返す。
+    if ($path -eq '/oauth/google/callback' -and $method -eq 'GET') {
+        $q = @{}
+        foreach ($pair in (([string] $req.Url.Query).TrimStart('?') -split '&')) {
+            $kv = $pair -split '=', 2
+            if ($kv.Count -eq 2) { $q[$kv[0]] = [Uri]::UnescapeDataString($kv[1]) }
+        }
+        $result = if (-not $script:Connectors) {
+            [pscustomobject]@{ ok = $false; error = '連携を読み込めていません' }
+        } elseif ($q['error']) {
+            [pscustomobject]@{ ok = $false; error = ("Google 側で中断されました: {0}" -f $q['error']) }
+        } else {
+            Complete-GoogleAuth -Code $q['code'] -State $q['state']
+        }
+
+        $resumed = 0
+        if ($result.ok) {
+            $done = Invoke-SetupCompletion -Conn $Conn -Service 'google' -Account $result.account
+            $resumed = $done.resumed
+        }
+        Write-OAuthResultPage -Context $Context -Result $result -Resumed $resumed
+        return
+    }
 
     # 承認待ち一覧と、いま効いている「まとめて許可」
     if ($path -eq '/api/approvals' -and $method -eq 'GET') {
@@ -462,6 +617,8 @@ function Invoke-Route {
             Add-HumanStepObject -Row $d.task -Object $taskObj
             Write-JsonResponse $Context ([pscustomobject]@{
                 task     = $taskObj
+                # 設定カードなら入力欄一式。画面はこれを見て設定フォームを出す。
+                setup    = (Get-CardSetupService $d.task)
                 comments = @($d.comments | ForEach-Object { ConvertTo-PlainObject $_ })
                 event    = (ConvertTo-PlainObject $d.event)
                 openLink = $openLink
@@ -641,6 +798,8 @@ function Invoke-Route {
 # ---------------------------------------------------------------- main
 
 $conn     = Open-TaskStore -Path $DbPath
+# OAuth の戻り先を組み立てるのに要る。戻り先は「いま開いているカンバン」。
+$script:BoardPort = $Port
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://127.0.0.1:$Port/")
 $listener.Prefixes.Add("http://localhost:$Port/")
