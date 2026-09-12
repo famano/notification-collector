@@ -225,6 +225,9 @@ function Invoke-WorkItem {
     # 先に取ってから渡せば「読んでいない」という状態が存在しなくなる。
     $sourceText = ''
     $sourceNote = ''
+    # 添付の一覧。fetch_attachment で名前を省かれたときに、元の名前を引くために持つ
+    # (拡張子が分からないと、テキストの添付でも中身を読まずに終わる)。
+    $sourceAttachments = @()
     if (-not $sourceUnavailable) {
         Write-Step $id 'tool' '元のやり取りを取り直しています' 'DarkCyan'
         try {
@@ -239,6 +242,7 @@ function Invoke-WorkItem {
                     $parts += "識別子 (http_request で使えます):`n" + ($idLines -join "`n")
                 }
                 if ($sc.attachments.Count -gt 0) {
+                    $sourceAttachments = @($sc.attachments)
                     $atLines = foreach ($a in $sc.attachments) {
                         "  id=$($a.id)  $($a.name)  $($a.mimeType)  $($a.size) バイト"
                     }
@@ -444,7 +448,7 @@ function Invoke-WorkItem {
                 -CommandTimeoutSec $CommandTimeoutSec `
                 -GmailThreadId $gmailThreadId -GmailInReplyTo $gmailInReplyTo `
                 -SlackChannel $slackChannel -SlackThreadTs $slackThreadTs `
-                -SourceEvent $evt -DossierText $dossierText
+                -SourceEvent $evt -SourceAttachments $sourceAttachments -DossierText $dossierText
 
         # 「実際に何を叩いて何が返ったか」を残す。require_human_step の妥当性は
         # 報告の書きぶりではなくこれで判定する。
