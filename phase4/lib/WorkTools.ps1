@@ -611,6 +611,8 @@ function Invoke-WorkTool {
         # 指定できない。指定できるようにすると、別のカードの中身を
         # 読ませる指示が通ってしまう。
         $SourceEvent,
+        # open_source が返した添付の一覧。名前を省かれたときの引き当てに使う。
+        [object[]] $SourceAttachments,
         # recall が返す、この件の台帳。
         [string] $DossierText
     )
@@ -787,8 +789,23 @@ function Invoke-WorkTool {
             }
 
             'fetch_attachment' {
+                # 名前は省略できることになっている (「省略時は元の名前」)。
+                # ところが引き当てる先が無く、既定の attachment.bin で保存していた。
+                # 拡張子が消えるので、.csv や .ics のテキスト添付でも中身を読まず
+                # 「テキストとして読める形式ではありません」で終わっていた ――
+                # 添付を読むために作ったツールが、名前を省いた瞬間に読めなくなる。
+                $name = [string] $ToolInput.name
+                $mime = ''
+                if ($SourceAttachments) {
+                    $hit = @($SourceAttachments | Where-Object {
+                        [string] $_.id -eq [string] $ToolInput.attachment_id })
+                    if ($hit.Count -gt 0) {
+                        if (-not $name) { $name = [string] $hit[0].name }
+                        $mime = [string] $hit[0].mimeType
+                    }
+                }
                 $a = Get-SourceAttachment -AttachmentId ([string] $ToolInput.attachment_id) `
-                        -Workspace $Workspace -Name ([string] $ToolInput.name)
+                        -Workspace $Workspace -Name $name -MimeType $mime
                 $text = "取り込みました: $($a.name) ($($a.bytes) バイト)"
                 if ($a.text) { $text += "`n`n--- 中身 ---`n" + $a.text }
                 else { $text += "`nテキストとして読める形式ではありません。作業フォルダに置きました。" }

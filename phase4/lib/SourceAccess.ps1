@@ -332,7 +332,9 @@ function Get-SourceAttachment {
     param(
         [Parameter(Mandatory)] [string] $AttachmentId,
         [Parameter(Mandatory)] [string] $Workspace,
-        [string] $Name
+        [string] $Name,
+        # 元の MIME 型。拡張子が無い添付でも、テキストなら中身を返せるようにする。
+        [string] $MimeType
     )
     $parts = $AttachmentId -split ':', 3
     $kind = $parts[0]
@@ -356,9 +358,12 @@ function Get-SourceAttachment {
 
     $text = ''
     $ext = [IO.Path]::GetExtension($safe).ToLower()
-    if (@('.txt', '.md', '.csv', '.json', '.xml', '.ics', '.html', '.htm', '.log') -contains $ext) {
+    # 拡張子で見て、無ければ MIME 型で見る。添付の名前は付いていないことがある。
+    $isText = (@('.txt', '.md', '.csv', '.json', '.xml', '.ics', '.html', '.htm', '.log') -contains $ext) -or
+              ($MimeType -and ($MimeType -like 'text/*' -or $MimeType -like '*json*' -or $MimeType -like '*xml*'))
+    if ($isText) {
         try { $text = [Text.Encoding]::UTF8.GetString($bytes) } catch { }
-        if ($ext -eq '.html' -or $ext -eq '.htm') {
+        if ($ext -eq '.html' -or $ext -eq '.htm' -or $MimeType -like 'text/html*') {
             if (Get-Command ConvertFrom-HtmlToText -ErrorAction SilentlyContinue) { $text = ConvertFrom-HtmlToText $text }
         }
     }
