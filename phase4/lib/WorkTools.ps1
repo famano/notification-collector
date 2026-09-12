@@ -418,6 +418,28 @@ function Test-HumanStepAllowed {
     return [pscustomobject]@{ ok = $true; reason = '' }
 }
 
+# 人間の1手を、報告の先頭に置く形にする。
+#
+# これがそのカードの結論なので、経過の下に埋めると読まれない。
+# 証跡 (何を試して何が返ったか) を必ず一緒に出すのは、「サボったのでは」という
+# 疑いを晴らすために利用者が結局元通知を見に行く、という往復を無くすため。
+function Get-HumanStepHeadline {
+    param(
+        [Parameter(Mandatory)] $HumanStep,
+        # Get-AttemptSummary の出力。無ければ省く。
+        [string] $Tried
+    )
+    $head = "【あなたの操作が必要です】`n" + [string] $HumanStep.step
+    if ($HumanStep.url)      { $head += "`n→ " + [string] $HumanStep.url }
+    if ($HumanStep.deadline) { $head += "`n期限: " + [string] $HumanStep.deadline }
+    if ($HumanStep.blocker -eq 'credential_missing' -and $HumanStep.setup_task_id) {
+        $head += ("`n※これは権限の不足です。設定カード #{0} を作りました。" -f $HumanStep.setup_task_id) +
+                 '一度設定すれば、同じ理由で止まっている他のカードもまとめて進みます。'
+    }
+    if ($Tried) { $head += "`n`nここに至るまでに試したこと:`n" + $Tried }
+    return $head
+}
+
 # 実行すると外に出て、取り消せないツール。
 # 承認の要否とは別の軸。承認が要るだけのツール (コマンド実行など) は失敗しても
 # やり直せるが、こちらは送ったあとに何をしても戻らないので、
