@@ -293,6 +293,32 @@
   #toast.ok { background: var(--ok); }
   #toast.err { background: var(--danger); }
 
+  /* ---------- 判断の方針 ---------- */
+  #policy {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #policy .box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; max-width: 640px; width: 100%; max-height: 85vh; overflow-y: auto;
+  }
+  #policy h4 { margin: 18px 0 4px; font-size: 12px; color: var(--accent); }
+  #policy .lead2 { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  #policy label { display: block; font-size: 11.5px; color: var(--muted); margin: 8px 0 3px; }
+  #policy input, #policy textarea {
+    width: 100%; font: inherit; font-size: 12.5px; padding: 6px 8px;
+    border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text);
+  }
+  #policy textarea { min-height: 62px; resize: vertical; }
+  #policy .rule {
+    display: flex; align-items: center; gap: 8px; padding: 4px 0;
+    border-bottom: 1px solid var(--line); font-size: 12px;
+  }
+  #policy .rule .p { flex: 1; word-break: break-all; font-family: Consolas, monospace; font-size: 11.5px; }
+  #policy .rule button { padding: 0 6px; border-color: transparent; color: var(--muted); }
+  #policy .rule button:hover { color: var(--danger); border-color: var(--danger); }
+  #policy .row { display: flex; gap: 7px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  #policy .empty { font-size: 12px; color: var(--faint); padding: 6px 0; }
   #help {
     position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
     display: flex; align-items: center; justify-content: center; padding: 20px;
@@ -316,6 +342,7 @@
   <span class="spacer"></span>
   <span id="status" style="font-size:11px;color:var(--faint)" title="最後にボードを読み込んだ時刻">—</span>
   <button id="yoloBtn" class="quiet" title="危険なツールの承認をどう扱うか">自動承認 OFF</button>
+  <button id="policyBtn" class="quiet" title="判断の方針（ふるい分けと背景情報）">方針</button>
   <button id="archBtn" class="quiet">アーカイブ</button>
   <button id="newBtn">+ カード</button>
   <button id="helpBtn" class="quiet" title="表示の意味">?</button>
@@ -326,6 +353,7 @@
 <div id="board"></div>
 <div id="drawer" hidden></div>
 <div id="toast" hidden></div>
+<div id="policy" hidden></div>
 <div id="help" hidden></div>
 
 <script>
@@ -339,6 +367,7 @@
   var workerEl = document.getElementById('worker');
   var helpEl = document.getElementById('help');
   var warnEl = document.getElementById('warn');
+  var policyEl = document.getElementById('policy');
   var toastTimer = null;
 
   var permEl = document.getElementById('perm');
@@ -1083,6 +1112,25 @@
               return refresh(true);
             });
         }));
+        // 「この通知は今後要らない」と思うのはカードを見た瞬間なので、
+        // ふるいに足す操作をその場に置く。条件はサーバがカードの元通知から取る
+        // (画面から任意の条件を送れる作りにはしない)。
+        if (ev && ev.app_id) {
+          mng.appendChild(actionButton('このアプリは今後不要', null, '設定中…', function () {
+            if (!confirm('今後 ' + (ev.app || ev.app_id) + ' の通知はカードにしません。\n\n'
+              + '条件: ' + ev.app_id + '\n'
+              + 'このカードは「対応不要」に移ります。あとで「方針」から取り消せます。')) return;
+            return api('/api/tasks/' + t.id + '/ignore', 'POST', {}).then(function (r2) {
+              if (r2.status !== 200 || r2.body.ok === false) {
+                toast('設定できませんでした: ' + (r2.body.error || r2.status), 'err');
+                return;
+              }
+              toast('以後このアプリの通知はカードにしません', 'ok');
+              closeDrawer(true);
+              return refresh(true);
+            });
+          }));
+        }
         mng.appendChild(actionButton('削除', 'danger', '削除中…', function () {
           if (!confirm('カード #' + t.id + '「' + t.title + '」を完全に削除します。\n作業ログとやりとりも消え、元に戻せません。')) return;
           return api('/api/tasks/' + t.id, 'DELETE').then(function (r) {
@@ -1102,6 +1150,126 @@
 
       drawer.hidden = false;
       drawer.scrollTop = scroll;
+    });
+  }
+
+  // ---------------------------------------------------------------- 判断の方針
+  //
+  // policy.json には2種類のことが書いてある。
+  //   ふるい分け … LLM に渡さず捨てる通知。前段でコストを落とす
+  //   背景情報   … 名前・役割・優先事項。判定の精度そのもの
+  // どちらも使っているうちに育つ。「この通知は要らなかった」と分かるのは
+  // カードを見た瞬間で、そのとき開いているのはカンバンである。
+  // 直せる場所がテキストエディタだと、たいてい直されないまま同じ通知が流れ続ける。
+
+  function openPolicy() {
+    policyEl.innerHTML = '';
+    var box = el('div', 'box');
+    var head = el('div', 'row');
+    head.appendChild(el('h3', null, '判断の方針'));
+    var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
+    var c = el('button', 'quiet', '閉じる');
+    c.onclick = function () { policyEl.hidden = true; };
+    head.appendChild(c);
+    box.appendChild(head);
+    policyEl.appendChild(box);
+    policyEl.hidden = false;
+
+    api('/api/policy').then(function (r) {
+      if (r.status !== 200) {
+        box.appendChild(el('div', 'empty', '方針を読めませんでした: ' + (r.body.error || r.status)));
+        return;
+      }
+      var pol = r.body;
+
+      // --- 背景情報 ---
+      box.appendChild(el('h4', null, 'あなたについて'));
+      box.appendChild(el('div', 'lead2',
+        '判定に渡す背景。埋まっているほど「自分宛かどうか」「急ぎかどうか」が当たる。'));
+
+      var nameIn = document.createElement('input');
+      nameIn.value = pol.context.userName || '';
+      nameIn.placeholder = '名前（メールの宛名や Slack の表示名）';
+      var nl = el('label', null, '名前'); nl.appendChild(nameIn); box.appendChild(nl);
+
+      var roleIn = document.createElement('input');
+      roleIn.value = pol.context.role || '';
+      roleIn.placeholder = '例: 受託開発のエンジニア。見積と障害対応を持っている';
+      var rl = el('label', null, '役割'); rl.appendChild(roleIn); box.appendChild(rl);
+
+      var priIn = document.createElement('textarea');
+      priIn.value = (pol.context.priorities || []).join('\n');
+      priIn.placeholder = '1行に1つ。例:\n請求と支払いの期限\n本番障害\n採用の日程調整';
+      var pl = el('label', null, '優先事項（1行に1つ）'); pl.appendChild(priIn); box.appendChild(pl);
+
+      var prow = el('div', 'row');
+      prow.appendChild(actionButton('保存', 'primary', '保存中…', function () {
+        return api('/api/policy/context', 'POST', {
+          userName: nameIn.value, role: roleIn.value,
+          priorities: priIn.value.split('\n').map(function (x) { return x.trim(); })
+                                 .filter(function (x) { return x; })
+        }).then(function (r2) {
+          if (r2.status !== 200 || r2.body.ok === false) {
+            toast('保存できませんでした: ' + (r2.body.error || r2.status), 'err');
+            return;
+          }
+          toast('保存しました。次のトリアージから効きます', 'ok');
+        });
+      }));
+      box.appendChild(prow);
+
+      // --- ふるい分け ---
+      box.appendChild(el('h4', null, 'ふるい分け'));
+      box.appendChild(el('div', 'lead2',
+        'ここに一致した通知は LLM に渡さず捨てる。判定の費用と、要らないカードが減る。'));
+
+      function ruleList(kind, label, patterns) {
+        box.appendChild(el('div', 'lead2', label));
+        if (!patterns.length) { box.appendChild(el('div', 'empty', '（なし）')); return; }
+        patterns.forEach(function (pt) {
+          var row = el('div', 'rule');
+          row.appendChild(el('span', 'p', pt));
+          row.appendChild(actionButton('×', null, '…', function () {
+            return api('/api/policy/ignore', 'DELETE', { kind: kind, pattern: pt }).then(function (r2) {
+              if (r2.status !== 200 || r2.body.ok === false) {
+                toast('消せませんでした: ' + (r2.body.error || r2.status), 'err');
+                return;
+              }
+              toast('消しました', 'ok');
+              openPolicy();
+            });
+          }));
+          box.appendChild(row);
+        });
+      }
+      ruleList('appId', 'アプリで捨てる', pol.ignore.appIdPatterns || []);
+      ruleList('title', '件名で捨てる', pol.ignore.titlePatterns || []);
+
+      var addIn = document.createElement('input');
+      addIn.placeholder = '条件を足す（* が使える。例: Windows.SystemToast.*）';
+      var addLabel = el('label', null, '手で足す');
+      addLabel.appendChild(addIn);
+      box.appendChild(addLabel);
+      var arow = el('div', 'row');
+      function addRule(kind, label) {
+        arow.appendChild(actionButton(label, null, '追加中…', function () {
+          var v = addIn.value.trim();
+          if (!v) { toast('条件が空です', 'err'); return; }
+          return api('/api/policy/ignore', 'POST', { kind: kind, pattern: v }).then(function (r2) {
+            if (r2.status !== 200 || r2.body.ok === false) {
+              toast('追加できませんでした: ' + (r2.body.error || r2.status), 'err');
+              return;
+            }
+            toast('追加しました', 'ok');
+            openPolicy();
+          });
+        }));
+      }
+      addRule('appId', 'アプリとして追加');
+      addRule('title', '件名として追加');
+      box.appendChild(arow);
+      box.appendChild(el('div', 'hintline',
+        '効くのは次のトリアージから。すでに立っているカードは残る。'));
     });
   }
 
@@ -1151,6 +1319,14 @@
       ['版', '更新のたびに増える番号。同時編集の衝突検出に使う']
     ]));
 
+    box.appendChild(el('h4', null, '方針'));
+    box.appendChild(rows([
+      ['ふるい分け', 'ここに一致した通知は LLM に渡さず捨てる。判定の費用と要らないカードが減る'],
+      ['このアプリは今後不要', 'カードの「片付け」に出る。そのアプリを以後ふるいで落とす'],
+      ['あなたについて', '名前・役割・優先事項。判定に渡る背景で、埋まっているほど当たる'],
+      ['効き始め', '次のトリアージから。すでに立っているカードは残る']
+    ]));
+
     box.appendChild(el('h4', null, 'ワーカー'));
     box.appendChild(rows([
       ['承認なしで実行', 'カードの作業フォルダ内でのファイル作成・読み取り、メール下書き(.eml)の作成'],
@@ -1198,8 +1374,10 @@
 
   document.getElementById('helpBtn').onclick = openHelp;
   helpEl.onclick = function (e) { if (e.target === helpEl) helpEl.hidden = true; };
+  policyEl.onclick = function (e) { if (e.target === policyEl) policyEl.hidden = true; };
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
+    if (!policyEl.hidden) { policyEl.hidden = true; return; }
     if (!helpEl.hidden) { helpEl.hidden = true; return; }
     closeDrawer();
   });
@@ -1207,11 +1385,13 @@
   // パネルの外をクリックしたら閉じる。
   // カードは openDetail が拾って別のカードに切り替えるので、ここでは閉じない。
   document.addEventListener('mousedown', function (e) {
-    if (drawer.hidden || !helpEl.hidden) return;
+    if (drawer.hidden || !helpEl.hidden || !policyEl.hidden) return;
     if (drawer.contains(e.target)) return;
     if (e.target.closest && e.target.closest('.card')) return;
     closeDrawer();
   });
+
+  document.getElementById('policyBtn').onclick = openPolicy;
 
   document.getElementById('archBtn').onclick = function () {
     showArchived = !showArchived;
