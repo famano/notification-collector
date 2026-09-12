@@ -22,11 +22,16 @@
 param(
     [int]    $Port = 8787,
     [string] $DbPath,
+    # トリアージ方針。既定は phase2\config\policy.json (Invoke-Triage と同じもの)。
+    [string] $PolicyPath,
     [switch] $NoBrowser
 )
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
+# トリアージ方針。カンバンから直せるようにする (気付いた場所で直せないと直されない)。
+. "$PSScriptRoot\..\phase2\lib\Policy.ps1"
+$script:PolicyPath = $PolicyPath
 
 # 送信経路。カンバンだけで仕事を終わらせるには、最後の一手 (送る) もここに要る。
 # Phase 5 が無い・未設定でもボード自体は動くように、読み込みは任意扱いにする。
@@ -375,6 +380,50 @@ function Invoke-Route {
         return
     }
 
+    # ---------------------------------------------------------------- トリアージ方針
+    #
+    # 「この通知は今後要らない」と分かるのはカードを見た瞬間で、
+    # そのとき開いているのはカンバンである。直せる場所が別のアプリだと直されない。
+
+    if ($path -eq '/api/policy' -and $method -eq 'GET') {
+        try { Write-JsonResponse $Context (Get-PolicyView (Read-Policy -Path $script:PolicyPath)) }
+        catch { Write-JsonResponse $Context @{ error = $_.Exception.Message } 500 }
+        return
+    }
+
+    if ($path -eq '/api/policy/ignore' -and ($method -eq 'POST' -or $method -eq 'DELETE')) {
+        $b = Read-JsonBody $Context
+        $kind = if ($b -and $b.kind -eq 'title') { 'title' } else { 'appId' }
+        $pattern = if ($b) { [string] $b.pattern } else { '' }
+        try {
+            $policy = Read-Policy -Path $script:PolicyPath
+            $r = if ($method -eq 'POST') {
+                Add-IgnorePattern -Policy $policy -Kind $kind -Pattern $pattern
+            } else {
+                Remove-IgnorePattern -Policy $policy -Kind $kind -Pattern $pattern
+            }
+            if (-not $r.ok) { Write-JsonResponse $Context @{ ok = $false; error = $r.error } 400; return }
+            Save-Policy -Policy $policy -Path $script:PolicyPath
+            Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; policy = (Get-PolicyView $policy) })
+        }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500 }
+        return
+    }
+
+    if ($path -eq '/api/policy/context' -and $method -eq 'POST') {
+        $b = Read-JsonBody $Context
+        if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
+        try {
+            $policy = Read-Policy -Path $script:PolicyPath
+            Set-PolicyContext -Policy $policy -UserName ([string] $b.userName) -Role ([string] $b.role) `
+                -Priorities (@($b.priorities | ForEach-Object { [string] $_ }))
+            Save-Policy -Policy $policy -Path $script:PolicyPath
+            Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; policy = (Get-PolicyView $policy) })
+        }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500 }
+        return
+    }
+
     if ($path -eq '/api/rev' -and $method -eq 'GET') {
         # ワーカーの死活もここで返す。版はハートビートで変わらないので、
         # これが無いと「止まったこと」が画面に伝わらない。
@@ -534,6 +583,38 @@ function Invoke-Route {
                 if (-not $b -or -not $b.body) { Write-JsonResponse $Context @{ error = 'body is required' } 400; return }
                 [void] (Add-TaskComment -Conn $Conn -TaskId $taskId -Author 'user' -Body $b.body)
                 Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # このカードの出どころを、以後ふるいで落とす。
+            #
+            # 条件はモデルにも画面にも決めさせず、サーバがカードの元イベントから取る。
+            # 画面から任意の文字列を受け取れる作りにすると、ボードに載った
+            # 第三者の文面から「全部無視」に近い条件を仕込む道ができる。
+            'ignore' {
+                $d = Get-TaskDetail -Conn $Conn -TaskId $taskId
+                if (-not $d -or -not $d.event) {
+                    Write-JsonResponse $Context @{ ok = $false; error = 'このカードには元の通知がありません' } 400
+                    return
+                }
+                $appId = [string] $d.event['app_id']
+                if (-not $appId) {
+                    Write-JsonResponse $Context @{ ok = $false; error = 'このカードにはアプリの識別子がありません' } 400
+                    return
+                }
+                try {
+                    $policy = Read-Policy -Path $script:PolicyPath
+                    $r = Add-IgnorePattern -Policy $policy -Kind 'appId' -Pattern $appId
+                    if ($r.ok) { Save-Policy -Policy $policy -Path $script:PolicyPath }
+                    elseif ($r.error -ne 'すでに入っています。') {
+                        Write-JsonResponse $Context @{ ok = $false; error = $r.error } 400; return
+                    }
+                }
+                catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500; return }
+
+                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'dismissed')
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' `
+                    -Message ("以後 {0} の通知はカードにしません (ふるいに追加)" -f $appId)
+                Write-JsonResponse $Context @{ ok = $true; pattern = $appId }
                 return
             }
             'cancel' {
