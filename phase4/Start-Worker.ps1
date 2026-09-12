@@ -211,8 +211,22 @@ function Invoke-WorkItem {
         $sourceUnavailable = -not ($src -eq 'gmail' -or ([string] $evt['link']) -like 'slack://*' -or $ap -like 'Claude*')
     }
 
-    # 人間送りの出口が妥当かを、報告の言葉づかいではなく証跡で判定するために控える。
-    $humanStep = $null
+    # 人間送りの結論は DB の human_step 列から読む。
+    #
+    # 以前はここで $humanStep という変数を持ち、ツール実行のクロージャから
+    # 代入していた。**代入は外に伝わらない。** PowerShell のスクリプトブロック内の
+    # 代入はそのブロックのローカル変数を作るだけで、GetNewClosure() は変数を
+    # 複製するのでなおさら届かない。結果として $humanStep は最後まで $null のままで、
+    #   - 報告の先頭に出るはずの「【あなたの操作が必要です】」が一度も出ない
+    #   - 自己検証に human_step が渡らず、人間送りの妥当性を見られない
+    # という状態になっていた (カード自体には出るので、気付きにくい)。
+    #
+    # クロージャは human_step を DB に書いている。ならばそれを読めばよい。
+    # 変数で持ち回るのをやめ、DB を唯一の出どころにする。
+    #
+    # 再実行のたびに前回の結論を消すのは、それが「前回の」結論だから。
+    # 残したままだと、今回うまく閉じられたカードにも古い赤枠が出続ける。
+    [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ human_step = $null })
 
     # --- 出自の取り直しは、モデルに頼まず先にワーカーがやる ---
     #
@@ -391,7 +405,9 @@ function Invoke-WorkItem {
                 }
             }
 
-            $humanStep = [pscustomobject]@{
+            # ここで作るのはクロージャの中だけの値。外の関数には渡らないので、
+            # 呼び出し側は DB に書いたものを読み直す (Get-TaskHumanStep)。
+            $hs = [pscustomobject]@{
                 blocker  = $blocker
                 step     = [string] $toolInput.step
                 url      = [string] $toolInput.url
@@ -405,10 +421,10 @@ function Invoke-WorkItem {
             # ワーカーの取得対象から外れて (設定カードは拾わない仕様のため)、
             # 資格情報を入れたあとも二度と再開されなくなる。
             [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{
-                human_step = ($humanStep | ConvertTo-Json -Depth 5 -Compress)
+                human_step = ($hs | ConvertTo-Json -Depth 5 -Compress)
                 shape = $(if ($blocker -eq 'credential_missing') { 'blocked' } else { 'human' })
             })
-            Write-Step $id 'file' ('本人の操作が要ります: ' + $humanStep.step) 'Yellow'
+            Write-Step $id 'file' ('本人の操作が要ります: ' + $hs.step) 'Yellow'
             return [pscustomobject]@{
                 text = 'カードに「あなたにしかできない1手」として載せました。報告にも同じことを短く書いてください。'
                 artifact = $null; isError = $false
@@ -497,6 +513,7 @@ function Invoke-WorkItem {
             try { $c = [IO.File]::ReadAllText([string] $a['path'], [Text.Encoding]::UTF8) } catch { $c = '(読み取れませんでした)' }
             $arts += [pscustomobject]@{ name = $a['name']; content = $c }
         }
+        $humanStep = Get-TaskHumanStep -Conn $conn -TaskId $id
         $humanStepJson = ''
         if ($humanStep) { $humanStepJson = ($humanStep | ConvertTo-Json -Depth 5) }
         $v = (Invoke-ClaudeVerify -Task $Task -Policy $policy -Artifacts $arts -Report $res.text `
@@ -535,17 +552,10 @@ function Invoke-WorkItem {
 
     # 本人の1手は報告の先頭に置く。これがこのカードの結論なので、
     # 経過の下に埋めると読まれない。
+    $humanStep = Get-TaskHumanStep -Conn $conn -TaskId $id
     if ($humanStep) {
-        $head = "【あなたの操作が必要です】`n" + $humanStep.step
-        if ($humanStep.url)      { $head += "`n→ " + $humanStep.url }
-        if ($humanStep.deadline) { $head += "`n期限: " + $humanStep.deadline }
-        if ($humanStep.blocker -eq 'credential_missing' -and $humanStep.setup_task_id) {
-            $head += ("`n※これは権限の不足です。設定カード #{0} を作りました。" -f $humanStep.setup_task_id) +
-                     '一度設定すれば、同じ理由で止まっている他のカードもまとめて進みます。'
-        }
-        $tried = Get-AttemptSummary -Conn $conn -TaskId $id
-        if ($tried) { $head += "`n`nここに至るまでに試したこと:`n" + $tried }
-        $summary = $head + "`n`n---`n`n" + $summary
+        $summary = (Get-HumanStepHeadline -HumanStep $humanStep `
+                        -Tried (Get-AttemptSummary -Conn $conn -TaskId $id)) + "`n`n---`n`n" + $summary
     }
 
     if ($files.Count -gt 0) {
