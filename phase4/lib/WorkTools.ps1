@@ -64,9 +64,17 @@ function Resolve-TargetPath {
     return [IO.Path]::GetFullPath((Join-Path $Workspace $Relative))
 }
 
+# 作業フォルダの「中」か。単なる前方一致では見分けられない。
+#   C:\...\output\task-0001      作業フォルダ
+#   C:\...\output\task-0001-x\a.md  前方一致は通るが、別のフォルダ
+# 承認の要否がこの判定で決まるので、区切り文字まで見て隣を弾く。
 function Test-InWorkspace {
     param([string] $Workspace, [string] $FullPath)
-    return $FullPath.StartsWith($Workspace, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $Workspace -or -not $FullPath) { return $false }
+    $sep  = [IO.Path]::DirectorySeparatorChar
+    $root = $Workspace.TrimEnd($sep, [IO.Path]::AltDirectorySeparatorChar)
+    if ([string]::Equals($FullPath, $root, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $FullPath.StartsWith($root + $sep, [StringComparison]::OrdinalIgnoreCase)
 }
 
 # 非 ASCII のヘッダは RFC2047 で符号化しないとメールクライアントが化ける

@@ -182,7 +182,11 @@ function Get-SourceContext {
         attachments: @{ id; name; mimeType; size } — fetch_attachment の id になる
         identifiers: モデルが http_request で叩くときに使う主キー類
     #>
-    param([Parameter(Mandatory)] $Evt)
+    # AllowNull が無いと、すぐ下の「元の通知がありません」の枝に到達できない。
+    # Mandatory だけでは $null が束縛エラーになるためで、書いてあるのに効かない
+    # ガードになっていた。いまは呼び出し側が全部 $null を弾いているので表には
+    # 出ていないが、その前提が崩れたときに例外で止まるのは割に合わない。
+    param([Parameter(Mandatory)] [AllowNull()] $Evt)
 
     $empty = [pscustomobject]@{
         ok = $false; kind = 'none'; text = ''; attachments = @(); identifiers = @{}; links = @(); note = ''
