@@ -25,12 +25,19 @@ function Unprotect-Text { param([string] $Base64) return [Text.Encoding]::UTF8.G
 $script:FakeConnection = [pscustomobject]@{ ok = $true; account = 'octocat'; note = '' }
 function Test-SetupConnection { param([string] $Key) return $script:FakeConnection }
 
+# 配布設定は見に行かせない (開発機に置いてあると結果が変わる)。
+$script:SavedSetupCfgEnv = $env:NOTIFICATION_COLLECTOR_CONFIG
+$env:NOTIFICATION_COLLECTOR_CONFIG = Join-Path (New-TestTempDir) 'no-app-config.json'
+$script:SavedSetupKeyEnv = $env:ANTHROPIC_API_KEY
+$env:ANTHROPIC_API_KEY = $null
+
 Describe 'サービスの名寄せ' {
 
     It 'キーで引ける' {
         Assert-Equal 'github' (Get-SetupService 'github').key
         Assert-Equal 'slack'  (Get-SetupService 'slack').key
         Assert-Equal 'google' (Get-SetupService 'google').key
+        Assert-Equal 'anthropic' (Get-SetupService 'anthropic').key
     }
 
     It '設定カードの subject_key をそのまま渡しても引ける' {
@@ -63,6 +70,16 @@ Describe '画面に返す一覧' {
     It '未設定のサービスは未設定と分かる' {
         $sl = @(Get-SetupStatusList | Where-Object { $_.key -eq 'slack' })[0]
         Assert-False $sl.configured
+    }
+
+    It 'Claude は「無いと動かない」として出る (他の連携と同じ重みで並べない)' {
+        $an = @(Get-SetupStatusList | Where-Object { $_.key -eq 'anthropic' })[0]
+        Assert-NotNull $an 'Claude が一覧にありません'
+        Assert-True $an.required
+        foreach ($k in @('github', 'slack', 'google')) {
+            Assert-False (@(Get-SetupStatusList | Where-Object { $_.key -eq $k })[0].required) `
+                ("{0} まで必須になっています" -f $k)
+        }
     }
 
     It '取り方の案内と入口の URL を持っている (画面から出さずに済ませるため)' {
@@ -110,6 +127,73 @@ Describe '保存' {
         Assert-False $r.ok
         Assert-Match '同意' $r.error
     }
+}
+
+Describe 'Claude の API キー' {
+
+    It '画面から保存でき、疎通できたときだけ設定済みになる' {
+        $script:FakeConnection = [pscustomobject]@{ ok = $true; account = ''; note = '' }
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good' }
+        Assert-True $r.ok
+        Assert-Equal 'sk-ant-good' (Get-Secret -Name 'anthropic.apiKey')
+        Assert-True (Test-SetupConfigured -Key 'anthropic')
+    }
+
+    It '貼り間違いは元に戻す (「設定済みなのに全部失敗」を作らない)' {
+        $script:FakeConnection = [pscustomobject]@{ ok = $false; error = 'キーが受け付けられませんでした' }
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-bad' }
+        Assert-False $r.ok
+        Assert-Equal 'sk-ant-good' (Get-Secret -Name 'anthropic.apiKey')
+    }
+
+    It '値は画面に返らない' {
+        $json = @(Get-SetupStatusList) | ConvertTo-Json -Depth 6
+        Assert-True ($json -notmatch 'sk-ant-good') 'API キーが一覧に含まれています'
+    }
+
+    [void] (Remove-Secret -Name 'anthropic.apiKey')
+}
+
+Describe '配る人が用意済みのもの' {
+
+    It '何も無ければ「用意済み」とは言わない' {
+        Assert-False (Test-SetupPreset -Key 'anthropic')
+        Assert-False (Test-SetupPreset -Key 'google')
+        Assert-Equal '' (Get-SetupManagedNote -Key 'google')
+    }
+
+    It 'Google のクライアントが入っていれば、利用者に貼らせない' {
+        Set-Secret -Name 'gmail.clientId'     -Value 'cid.apps.googleusercontent.com'
+        Set-Secret -Name 'gmail.clientSecret' -Value 'sec'
+        Assert-True (Test-SetupPreset -Key 'google')
+        Assert-Match '許可' (Get-SetupManagedNote -Key 'google')
+        # 同意はまだなので「接続済み」にはしない
+        Assert-False (Test-SetupConfigured -Key 'google')
+    }
+
+    It '同意画面のクライアントは、入力が空でも保管庫から補う' {
+        $c = Get-GoogleClientCredential -ClientId '' -ClientSecret ''
+        Assert-Equal 'cid.apps.googleusercontent.com' $c.clientId
+        Assert-Equal 'sec' $c.clientSecret
+    }
+
+    It '入力があればそちらを使う (自分のクライアントに差し替えられる)' {
+        $c = Get-GoogleClientCredential -ClientId 'mine' -ClientSecret 'mysec'
+        Assert-Equal 'mine' $c.clientId
+        Assert-Equal 'mysec' $c.clientSecret
+    }
+
+    It '環境変数にキーがあれば、Claude の入力欄は要らない' {
+        $env:ANTHROPIC_API_KEY = 'sk-ant-env'
+        try {
+            Assert-True (Test-SetupPreset -Key 'anthropic')
+            Assert-Match '環境変数' (Get-SetupManagedNote -Key 'anthropic')
+        }
+        finally { $env:ANTHROPIC_API_KEY = $null }
+    }
+
+    [void] (Remove-Secret -Name 'gmail.clientId')
+    [void] (Remove-Secret -Name 'gmail.clientSecret')
 }
 
 Describe '同意画面の URL' {
@@ -209,3 +293,7 @@ Describe '設定が入ったあとの後始末' {
 
     Close-TestStore $conn
 }
+
+# 環境変数の差し替えを戻す
+$env:NOTIFICATION_COLLECTOR_CONFIG = $script:SavedSetupCfgEnv
+$env:ANTHROPIC_API_KEY = $script:SavedSetupKeyEnv

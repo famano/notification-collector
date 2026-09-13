@@ -6,7 +6,8 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase4\Start-Worker.ps1
 ```
 
-`-Once` で1周だけ実行。`ANTHROPIC_API_KEY` が必要。
+`-Once` で1周だけ実行。Claude の API キーが要る（環境変数 `ANTHROPIC_API_KEY`、
+カンバンの「接続」から入れたもの、配布設定のいずれか。`lib\ApiKey.ps1` が順に見る）。
 
 ## 何をきっかけに動くのか
 

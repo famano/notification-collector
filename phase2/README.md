@@ -29,13 +29,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1 -
 実際に判定してタスク化する:
 
 ```powershell
-$env:ANTHROPIC_API_KEY = 'sk-ant-...'
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Show-Board.ps1
 ```
 
-APIキーはファイルに置かず環境変数から読む。恒久化するなら
-`[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY','sk-ant-...','User')`。
+APIキーの取得元は `lib\ApiKey.ps1` が決める。環境変数 `ANTHROPIC_API_KEY` →
+資格情報ストア（カンバンの「接続」から入れたもの・DPAPI）→ 配布設定
+`config\app-config.json` の順。**平文でリポジトリに置く場所は無い。**
+配った先の利用者は環境変数を触らず、カンバンの「接続」から入れる。
 
 突き合わせを入れる前に立った重複カードを畳む（一度だけ・APIキー不要）:
 
@@ -146,12 +147,12 @@ Slack のメンションはトーストと `conversations.history` の両方に�
 - 日本語・引用符・山括弧がパラメータバインドで正しく往復する（SQL インジェクション耐性）
 - 楽観ロックが古い version の更新を拒否する
 
-**未検証: Claude API の実呼び出し。** `ANTHROPIC_API_KEY` が未設定のため
+**未検証: Claude API の実呼び出し。** API キーが未設定のため
 `Invoke-ClaudeTriage` は動作確認できていない。
 
 ## 次のステップ（Phase 3 に向けて）
 
-1. `ANTHROPIC_API_KEY` を設定して判定層を実データで確認する
+1. API キーを設定して判定層を実データで確認する
 2. Slack Socket Mode を繋ぎ、`thread_ts` からスレッド全文を取得して `events.body` を差し替える
    （通知本文だけでは判断材料が足りないという Phase 1 の結論への対応）
 3. Gmail API / Microsoft Graph でメールを直接取得する

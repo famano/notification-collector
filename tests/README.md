@@ -24,6 +24,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `GoogleToken.Tests.ps1` | 再認可した新しいトークンを、別プロセス (ワーカー・収集) が期限を待たずに使うこと |
 | `SourceAccess.Tests.ps1` | 本文からのリンク抽出と切り詰め |
 | `BoardApi.Tests.ps1` | **実際にボードを起動して** HTTP API を外から叩く |
+| `AppConfig.Tests.ps1` | 配布設定の読み込みと、API キーの取得元の優先順位 |
+| `Launcher.Tests.ps1` | ダブルクリックの入口 (`.cmd` の改行・文字・実行ポリシー) と初回セットアップ |
+| `Setup.Tests.ps1` | 画面からの資格情報の設定。値が漏れないこと、用意済みなら入力を求めないこと |
 
 選び方の基準は「壊れても静かなところ」。承認の要否や宛先の束縛は、
 壊れていても画面上は普通に動いて見えるのに、外に出るものが変わる。

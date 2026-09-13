@@ -25,19 +25,35 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 | [phase4](phase4/README.md) | ワーカー。出自を取り直し、API で実際に操作し、自己検証する |
 | [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub |
 | [tests](tests/README.md) | テスト。追加インストールもキーも要らない |
+| [docs/配布手順.md](docs/配布手順.md) | 配る側と使う側の手順。`Install.cmd` と `config\app-config.json` |
 
 ## 動かす
 
+**`Start.cmd` をダブルクリックする。** 初回だけ `Install.cmd` を先に実行すると、
+デスクトップにショートカットができ、サインイン時の自動起動も選べる。
+
+端末から動かす場合:
+
 ```powershell
-# 起動する (これだけ)
-$env:ANTHROPIC_API_KEY = 'sk-ant-...'
-.\Start.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1
 ```
 
-外部サービス (Slack / Gmail / GitHub) は**カンバンのヘッダの「接続」から繋ぐ。**
-端末から設定したい場合は `.\phase5\Connect-Service.ps1 -Service slack` など。
+**API キーも外部サービスも、カンバンのヘッダの「接続」から入れる。**
+キーが無くても起動する ―― 取り込みとカンバンだけ先に立ち上がり、
+入力した瞬間に判定とワーカーが動き始める (起動し直さなくてよい)。
+環境変数 `ANTHROPIC_API_KEY` があればそちらが優先される (開発機向け)。
 
-`powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1` で実行する。
+キーの取得元は3つ。上から順に見る。
+
+| | 誰が入れるか | 用途 |
+|---|---|---|
+| 環境変数 `ANTHROPIC_API_KEY` | 開発者 | 開発機 |
+| 資格情報ストア (DPAPI) | 利用者 | カンバンの「接続」から |
+| `config\app-config.json` | 配る人 | 配布時に同梱する ([配布手順](docs/配布手順.md)) |
+
+利用者の権限では取れないもの (Google の OAuth クライアント、Slack アプリ、API キー) は
+**配る人が `config\app-config.json` に入れておける。**入っていれば画面に入力欄は出ず、
+ボタンを押すだけで繋がる。詳しくは [docs/配布手順.md](docs/配布手順.md)。
 
 `Start.ps1` が**収集・ワーカー・カンバンの3つを起動して面倒を見る。**
 3つとも常駐が要るのに別々に起動する形だったので、片方だけ起動する事故が起きた ――
@@ -52,9 +68,9 @@ $env:ANTHROPIC_API_KEY = 'sk-ant-...'
 
 ```powershell
 .\Start.ps1 -Port 9000      # カンバンのポートを変える
-.\Start.ps1 -NoTriage       # キー無しで取り込みだけ試す (ワーカーも起動しない)
+.\Start.ps1 -NoTriage       # キーを使わず取り込みだけ試す (ワーカーも起動しない)
 .\Start.ps1 -Follow         # 要約ではなく3つの出力をそのまま流す
-.\Start.ps1 -Stop           # 別のシェルから止める / 強制終了後の後始末
+.\Start.ps1 -Stop           # 別のシェルから止める / 強制終了後の後始末 (= Stop.cmd)
 ```
 
 各段を個別に動かしたい場合 (`Start-Collector.ps1` / `phase4\Start-Worker.ps1` /
@@ -143,6 +159,18 @@ googleapis.com にしか付かず、未知のホストには何も付かない�
 対話プロンプトで、常駐しているシェルとは別に窓を開く必要がある。
 **止まっているカードが8枚あるときに、一番やりたくない形をしている。**
 
+**配った先には、端末も開発者も居ない。**
+起動は `Start.cmd` のダブルクリックで、設定はカンバンの「接続」で終わる。
+以前はどちらもシェルの上にあった ―― 環境変数にキーを入れ、フルパスで
+`Start.ps1` を叩く。開発機ではこれでよいが、配った先では**行き止まりになる。**
+キーが無ければ起動そのものを拒んでいたので、画面が出ず、
+「どこで何を入れればよいか」を出す場所が存在しなかった。
+いまはキーが無くても取り込みとカンバンを先に立ち上げ、**画面から受け取り、
+入った瞬間に判定とワーカーを足す** (起動し直させない)。
+そして**利用者の権限では取れない資格情報は、配る人が同梱できる** ――
+Google の OAuth クライアントも API キーも、取りに行けない人に空欄を見せても
+永久に埋まらない。用意されていれば入力欄は出さず、押すだけの形にする。
+
 **権限不足は投げ返さず、設定カードにする。**
 完了カードを洗うと、29枚中8枚が「権限が無くて進めない」で止まっていた。
 これは1枚ずつ人間に投げ返す問題ではなく、一度設定すれば同種がまとめて通る。
@@ -180,5 +208,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 
 - `.ps1` は **UTF-8 BOM 付き**で保存すること。PowerShell 5.1 は BOM 無し UTF-8 を
   ANSI と誤読し、日本語コメントが構文エラーになる。
+- `.cmd` は **CRLF・ASCII のみ**。LF だと cmd が行を読み違え、日本語はコードページ次第で
+  文字化けする。案内の文言は PowerShell 側に置く (`.gitattributes` で固定済み)。
 - 取得した通知の実データ、成果物、資格情報は `.gitignore` 済み。
   業務上のメッセージ本文が入るのでコミットしない。

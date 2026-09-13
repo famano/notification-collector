@@ -1,0 +1,7 @@
+# バッチファイルは CRLF でないと Windows の cmd が読み違える
+# (LF だとラベルや行末の引数がずれて「予期しない」エラーになる)。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# PowerShell は BOM 付き UTF-8 / LF で揃える。改行の正規化に任せない。
+*.ps1 -text

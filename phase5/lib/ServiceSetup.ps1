@@ -23,6 +23,8 @@
 #   トークンそのものは決して返さない。
 
 . "$PSScriptRoot\SecretStore.ps1"
+# API キーの取得元 (環境変数 / 保管庫 / 配布設定) の判定はここに集約してある。
+. "$PSScriptRoot\..\..\lib\ApiKey.ps1"
 
 # サービスの定義。画面はこれを読んで入力欄を組み立てる。
 #
@@ -31,6 +33,31 @@
 #   fields   … 画面に出す入力欄。secret=$true は伏せ字で受け取り、値は返さない。
 #   flow     … 'token' は貼るだけ。'oauth' はブラウザの同意画面を通る。
 $script:SetupServices = @(
+    @{
+        key   = 'anthropic'
+        label = 'Claude'
+        flow  = 'token'
+        # これだけは「あると便利」ではない。無ければカードが1枚も作られない。
+        # 以前は起動時に環境変数が無いと起動そのものを拒んでいたが、それだと
+        # 配った先では画面すら出ず、直し方を出す場所が無かった。ここに入口を作る。
+        required = $true
+        why   = '通知の判定とワーカーの作業に使います。これが無いとカードは作られません。'
+        docUrl = 'https://console.anthropic.com/settings/keys'
+        help  = @'
+console.anthropic.com にサインインし、Settings → API keys で
+「Create Key」を押すと sk-ant- で始まる文字列が出ます。これを貼ってください。
+キーは一度しか表示されません。控えを無くしたら作り直せます。
+
+このアプリは支払いの設定された組織のキーを使います。
+会社で配られている場合は、配った人に聞いてください
+(配る人が config\app-config.json に入れておけば、この欄は空のままで繋がります)。
+'@
+        secrets = @('anthropic.apiKey')
+        fields  = @(
+            @{ name = 'apiKey'; label = 'API キー'; secret = $true; required = $true
+               placeholder = 'sk-ant-...' }
+        )
+    },
     @{
         key   = 'github'
         label = 'GitHub'
@@ -113,6 +140,8 @@ function Get-SetupService {
 function Test-SetupConfigured {
     param([Parameter(Mandatory)] [string] $Key)
     switch ((Get-SetupService $Key).key) {
+        # キーは保管庫以外 (環境変数・配布設定) にも居られるので、置き場所ごと判定する。
+        'anthropic' { return [bool] (Test-AnthropicConfigured) }
         'github' { return [bool] (Get-Secret -Name 'github.token') }
         'slack'  { return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken')) }
         'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken') -and (Get-Secret -Name 'gmail.clientId')) }
@@ -133,6 +162,12 @@ function Get-SetupStatusList {
             docUrl     = $s.docUrl
             configured = (Test-SetupConfigured -Key $s.key)
             account    = (Get-SetupAccount -Key $s.key)
+            # これが無いとアプリが成立しないもの。画面はこれを先頭に出す。
+            required   = [bool] $s.required
+            # 配る人が用意済みで、利用者は押すだけでよいもの。
+            # 入力欄を出すと「自分で取ってこい」に見えるので、画面から隠す判断に使う。
+            preset     = (Test-SetupPreset -Key $s.key)
+            managed    = (Get-SetupManagedNote -Key $s.key)
             fields     = @($s.fields | ForEach-Object {
                 [pscustomobject]@{
                     name = $_.name; label = $_.label; secret = [bool] $_.secret
@@ -143,6 +178,45 @@ function Get-SetupStatusList {
         }
     }
     return $out
+}
+
+# 配る人が用意した値が既にあるか。
+#
+# Google の OAuth クライアントも Slack のアプリも、**利用者の権限では作れない**ことが多い。
+# それを空欄として画面に出すと、そこは永久に埋まらないまま「未接続」が残る。
+# 用意済みなら入力欄を出さず、押すだけの形にする。
+function Test-SetupPreset {
+    param([Parameter(Mandatory)] [string] $Key)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { return $false }
+    switch ($svc.key) {
+        'anthropic' {
+            # 環境変数と配布設定は利用者が触れない場所。そこに既にあるなら入力は要らない。
+            if ($env:ANTHROPIC_API_KEY) { return $true }
+            return [bool] (Get-AppConfigValue -Path 'anthropic.apiKey')
+        }
+        'google' {
+            # 同意そのものは本人が押す。ここで言う「用意済み」はクライアントの ID と秘密。
+            if ((Get-Secret -Name 'gmail.clientId') -and (Get-Secret -Name 'gmail.clientSecret')) { return $true }
+            return [bool] ((Get-AppConfigValue -Path 'google.clientId') -and (Get-AppConfigValue -Path 'google.clientSecret'))
+        }
+    }
+    return $false
+}
+
+# 用意済みのときに画面へ出す一言。「入力欄が無い」理由が分からないと不安になる。
+function Get-SetupManagedNote {
+    param([Parameter(Mandatory)] [string] $Key)
+    if (-not (Test-SetupPreset -Key $Key)) { return '' }
+    $svc = Get-SetupService $Key
+    switch ($svc.key) {
+        'anthropic' {
+            if ($env:ANTHROPIC_API_KEY) { return 'この PC の環境変数に設定されています。' }
+            return '配布時に設定されています。入力は要りません。'
+        }
+        'google' { return '接続に使う情報は配布時に設定されています。ボタンを押して Google の画面で許可してください。' }
+    }
+    return ''
 }
 
 # 「どのアカウントとして繋がっているか」。ネットワークには出ない
@@ -190,6 +264,7 @@ function Save-SetupCredential {
 
     try {
         switch ($svc.key) {
+            'anthropic' { Set-Secret -Name 'anthropic.apiKey' -Value ([string] $Values['apiKey']).Trim() }
             'github' { Set-Secret -Name 'github.token' -Value ([string] $Values['token']).Trim() }
             'slack'  {
                 foreach ($pair in @(@('botToken', 'slack.botToken'), @('userToken', 'slack.userToken'))) {
@@ -221,6 +296,22 @@ function Test-SetupConnection {
 
     try {
         switch ($svc.key) {
+            'anthropic' {
+                # 一番安いエンドポイントで1回だけ叩く。貼り間違いをここで捕まえないと、
+                # 次に気付くのは「取り込みは動いているのにカードが増えない」という形になる。
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $key = Get-AnthropicApiKey
+                if (-not $key) { return [pscustomobject]@{ ok = $false; error = '未設定です。' } }
+                try {
+                    [void] (Invoke-RestMethod -Uri 'https://api.anthropic.com/v1/models?limit=1' -TimeoutSec 20 `
+                        -Headers @{ 'x-api-key' = $key; 'anthropic-version' = '2023-06-01' })
+                }
+                catch {
+                    return [pscustomobject]@{ ok = $false; error = (Get-AnthropicErrorMessage $_) }
+                }
+                # アカウント名は API から取れない。キーそのものは決して画面に返さない。
+                return [pscustomobject]@{ ok = $true; account = ''; note = '' }
+            }
             'github' {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 $tok = Get-Secret -Name 'github.token'
@@ -260,6 +351,40 @@ function Test-SetupConnection {
     return [pscustomobject]@{ ok = $false; error = '確認できませんでした。' }
 }
 
+# キーの確認に失敗したときの文言。
+#
+# 例外の文言は「(401) 権限がありません」だけで、理由は応答の本文にしかない。
+# 配った先で一番多いのは「貼り損ね」と「残高切れ」で、どちらも直し方が違う。
+# 「失敗しました」だけ出しても、受け取った人には次の一手が無い。
+function Get-AnthropicErrorMessage {
+    param($ErrorRecord)
+    $status = $null
+    if ($ErrorRecord.Exception.Response) {
+        try { $status = [int] $ErrorRecord.Exception.Response.StatusCode } catch { }
+    }
+    $detail = ''
+    $raw = ''
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $raw = [string] $ErrorRecord.ErrorDetails.Message }
+    if (-not $raw -and $ErrorRecord.Exception.Response) {
+        try {
+            $sr = New-Object IO.StreamReader($ErrorRecord.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+            try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        } catch { }
+    }
+    if ($raw) {
+        try { $detail = [string] ($raw | ConvertFrom-Json).error.message } catch { $detail = '' }
+    }
+
+    switch ($status) {
+        401 { return ('キーが受け付けられませんでした。貼り間違いか、無効にされたキーです。' + $(if ($detail) { " ($detail)" } else { '' })) }
+        403 { return ('このキーでは使えませんでした。' + $(if ($detail) { " ($detail)" } else { '' })) }
+        429 { return '短時間に送りすぎています。少し待ってからもう一度試してください。' }
+    }
+    if ($detail -match 'credit|balance') { return ('残高が足りないようです。' + $detail) }
+    if ($detail) { return $detail }
+    return $ErrorRecord.Exception.Message
+}
+
 # ---------------------------------------------------------------- OAuth (Google)
 #
 # 同意画面からの戻り先は**カンバン自身**にする。
@@ -271,6 +396,24 @@ function Test-SetupConnection {
 # 任意のポートで許すので、カンバンのポートがそのまま使える。
 
 $script:PendingGoogleAuth = $null
+
+function Get-GoogleClientCredential {
+    <#
+      .SYNOPSIS
+        同意画面に使うクライアントを決める。画面の入力 → 保管庫 → 配布設定 の順。
+      .DESCRIPTION
+        Google Cloud でプロジェクトを作れる人は限られている。配る人が用意してあるなら、
+        利用者に ID と秘密を貼らせる理由は無い ―― 押すだけで同意画面まで行けるようにする。
+    #>
+    param([string] $ClientId, [string] $ClientSecret)
+    $cid = ([string] $ClientId).Trim()
+    $sec = ([string] $ClientSecret).Trim()
+    if (-not $cid) { $cid = [string] (Get-Secret -Name 'gmail.clientId') }
+    if (-not $sec) { $sec = [string] (Get-Secret -Name 'gmail.clientSecret') }
+    if (-not $cid) { $cid = [string] (Get-AppConfigValue -Path 'google.clientId') }
+    if (-not $sec) { $sec = [string] (Get-AppConfigValue -Path 'google.clientSecret') }
+    return [pscustomobject]@{ clientId = $cid; clientSecret = $sec }
+}
 
 function Get-GoogleAuthRequest {
     <#

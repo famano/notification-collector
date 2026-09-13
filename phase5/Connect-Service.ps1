@@ -13,7 +13,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('slack', 'gmail', 'github')] [string] $Service,
+    [ValidateSet('slack', 'gmail', 'github', 'anthropic')] [string] $Service,
     [switch] $Status,
     [switch] $Test
 )
@@ -22,10 +22,16 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\SecretStore.ps1"
 . "$PSScriptRoot\lib\SlackConnector.ps1"
 . "$PSScriptRoot\lib\GmailConnector.ps1"
+# 画面と同じ保存・確認の経路を使う (端末と画面で挙動が割れると原因が読めなくなる)
+. "$PSScriptRoot\lib\ServiceSetup.ps1"
 
 function Show-Status {
     Write-Host ''
     Write-Host '設定状況' -ForegroundColor Cyan
+    $src = Get-AnthropicKeySource
+    Write-Host ("  Claude: {0}{1}" -f `
+        $(if (Test-AnthropicConfigured) { '設定済み' } else { '未設定' }),
+        $(if ($src) { " ($src)" } else { '' }))
     Write-Host ("  Slack : {0}" -f $(if (Test-SlackConfigured) { '設定済み' } else { '未設定' }))
     Write-Host ("  Gmail : {0}" -f $(if (Test-GmailConfigured) { '設定済み' } else { '未設定' }))
     Write-Host ("  GitHub: {0}" -f $(if (Get-Secret -Name 'github.token') { '設定済み' } else { '未設定' }))
@@ -237,12 +243,42 @@ function Connect-GitHub {
     }
 }
 
+function Connect-Anthropic {
+    Write-Host ''
+    Write-Host 'Claude (API キー) の設定' -ForegroundColor Cyan
+    Write-Host @'
+  https://console.anthropic.com/settings/keys で「Create Key」を押すと
+  sk-ant- で始まる文字列が出ます。これを貼ってください。
+
+  通常はこの端末に来る必要はありません。カンバンのヘッダの「接続」からも
+  同じことができます (配る側が config\app-config.json に入れておけば、
+  利用者はどちらも開かずに済みます)。
+
+'@ -ForegroundColor DarkGray
+
+    $sec = Read-Host '  API キー (sk-ant-... / 空欄で中止)' -AsSecureString
+    $key = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    if (-not $key) { Write-Host '  中止しました。' -ForegroundColor Yellow; return }
+
+    Write-Host '  保存して確認します…' -ForegroundColor DarkGray
+    $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = $key }
+    if ($r.ok) { Write-Host '  OK: キーは有効です' -ForegroundColor Green }
+    else       { Write-Host ("  NG: {0}" -f $r.error) -ForegroundColor Red }
+}
+
 function Test-GitHubConfigured {
     return [bool] (Get-Secret -Name 'github.token')
 }
 
 function Test-Connections {
     Write-Host ''
+    if (Test-AnthropicConfigured) {
+        $r = Test-SetupConnection -Key 'anthropic'
+        if ($r.ok) { Write-Host 'Claude OK: キーは有効です' -ForegroundColor Green }
+        else       { Write-Host ("Claude NG: {0}" -f $r.error) -ForegroundColor Red }
+    } else { Write-Host 'Claude: 未設定' -ForegroundColor DarkGray }
+
     if (Test-GitHubConfigured) {
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -269,15 +305,19 @@ if ($Status) { Show-Status; return }
 if ($Test)   { Test-Connections; return }
 
 switch ($Service) {
-    'slack'  { Connect-Slack }
-    'gmail'  { Connect-Gmail }
-    'github' { Connect-GitHub }
+    'slack'     { Connect-Slack }
+    'gmail'     { Connect-Gmail }
+    'github'    { Connect-GitHub }
+    'anthropic' { Connect-Anthropic }
     default {
         Show-Status
         Write-Host '使い方:' -ForegroundColor Cyan
+        Write-Host '  .\Connect-Service.ps1 -Service anthropic'
         Write-Host '  .\Connect-Service.ps1 -Service slack'
         Write-Host '  .\Connect-Service.ps1 -Service gmail'
         Write-Host '  .\Connect-Service.ps1 -Test     接続確認'
+        Write-Host ''
+        Write-Host '  同じことはカンバンのヘッダの「接続」からもできます。' -ForegroundColor DarkGray
         Write-Host ''
     }
 }

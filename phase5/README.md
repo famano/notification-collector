@@ -13,7 +13,8 @@
 | `lib/SecretStore.ps1` | 資格情報を DPAPI で暗号化して保存 |
 | `lib/SlackConnector.ps1` | 掃き寄せ、スレッド全文の取得、スレッドへの投稿 |
 | `lib/GmailConnector.ps1` | OAuth、本文取得、本物の下書き作成、送信 |
-| `Connect-Service.ps1` | 設定ウィザード |
+| `lib/ServiceSetup.ps1` | 画面と端末の共通の設定経路 (保存・疎通確認・用意済みの判定) |
+| `Connect-Service.ps1` | 設定ウィザード (端末から。画面の「接続」と同じことをする) |
 | `Sync-Sources.ps1` | Slack の掃き寄せ・補完と Gmail の取り込み |
 | `Reset-SlackContext.ps1` | 補完に失敗した印を消して再試行させる |
 
@@ -46,12 +47,15 @@
 **カンバンのヘッダの「接続」から設定できる。** 権限不足でカードが止まっているときは、
 その設定カードを開けばその場で入力できる（保存・疎通確認・止まっていたカードの再開まで）。
 仕組みは `lib/ServiceSetup.ps1` にあり、画面と端末の両方がここを呼ぶ。
+Claude の API キーも同じ経路に載っている（無いとカードが1枚も作られないので、
+画面では先頭に出て、未設定のうちはボードの上部に警告が出る）。
 
 端末から設定したい場合は従来どおり:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service slack
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service gmail
+powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service anthropic
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Test
 ```
 
@@ -155,6 +159,15 @@ DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する
 
 疎通確認に失敗したときは**保存前の値に戻す**。貼り間違えたトークンが残ると
 「設定済みなのに全部 401」という一番分かりにくい状態になるため。
+
+### 配る人が用意した分の取り込み
+
+利用者の権限では取れないもの ―― Google の OAuth クライアント、Slack アプリのトークン、
+Claude の API キー ―― は、配る人が `config\app-config.json` に入れておける。
+起動時に `Import-AppConfigSecrets` が保管庫へ取り込み、**すでにある項目は上書きしない**
+(画面から入れ直した値が次の起動で配布時の値に戻らないようにするため)。
+取り込まれていれば画面に入力欄は出ず、Google は「接続する」を押すだけになる。
+詳しくは [docs/配布手順.md](../docs/配布手順.md)。
 
 ## 他のサービスについての見立て
 
