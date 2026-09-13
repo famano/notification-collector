@@ -743,7 +743,9 @@ function Invoke-Route {
             'comment' {
                 if (-not $b -or -not $b.body) { Write-JsonResponse $Context @{ error = 'body is required' } 400; return }
                 [void] (Add-TaskComment -Conn $Conn -TaskId $taskId -Author 'user' -Body $b.body)
-                Write-JsonResponse $Context @{ ok = $true }
+                # 指示を書く = やり直してほしい。要対応に戻してワーカーに拾わせる。
+                $col = Request-TaskRework -Conn $Conn -TaskId $taskId
+                Write-JsonResponse $Context @{ ok = $true; column = $col }
                 return
             }
             # このカードの出どころを、以後ふるいで落とす。

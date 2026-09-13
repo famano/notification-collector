@@ -139,6 +139,8 @@ $seed = Open-TaskStore -Path $dbPath
 $todoId    = [int] (New-Task -Conn $seed -Title '要対応のカード' -Column 'todo')
 $reviewId  = [int] (New-Task -Conn $seed -Title 'レビュー待ちのカード' -Column 'review')
 $doneId    = [int] (New-Task -Conn $seed -Title '完了のカード' -Column 'done')
+$reworkId  = [int] (New-Task -Conn $seed -Title '指示でやり直すカード' -Column 'review')
+$doingId   = [int] (New-Task -Conn $seed -Title '実行中のカード' -Column 'doing')
 $seed.Dispose()
 
 $board = Start-TestBoard -DbPath $dbPath
@@ -274,6 +276,22 @@ Describe '編集' {
 
     It '空のコメントは受け付けない' {
         Assert-Equal 400 (Invoke-Board $board ("/api/tasks/$todoId/comment") 'POST' @{ body = '' }).status
+    }
+
+    It '指示を送るとレビュー待ちのカードは要対応に戻る (やり直してほしい、の意思表示)' {
+        $r = Invoke-Board $board ("/api/tasks/$reworkId/comment") 'POST' @{ body = '宛名を直してやり直して' }
+        Assert-Equal 200 $r.status
+        Assert-Equal 'todo' $r.body.column
+        Assert-Equal 'todo' (Invoke-Board $board ("/api/tasks/$reworkId")).body.task.board_column
+    }
+
+    It '実行中のカードに指示を送っても列は動かさない (終わってからワーカーが戻す)' {
+        $r = Invoke-Board $board ("/api/tasks/$doingId/comment") 'POST' @{ body = '途中で追加の指示' }
+        Assert-Equal 200 $r.status
+        Assert-Equal 'doing' $r.body.column
+        $t = (Invoke-Board $board ("/api/tasks/$doingId")).body.task
+        Assert-Equal 'doing' $t.board_column
+        Assert-Equal 0 ([int] $t.cancel_requested)
     }
 
     It 'カードを手で起票できる' {

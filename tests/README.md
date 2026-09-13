@@ -21,6 +21,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `TaskStore.Tests.ps1` | 通知と同期の突き合わせ、楽観ロック、ワーカーへの受け渡し、削除、承認 |
 | `WorkTools.Tests.ps1` | 危険度の判定 (承認の要否) と人間送りのゲート |
 | `HttpAction.Tests.ps1` | 資格情報をホストから決めること、送信の口を汎用ツールから塞ぐこと |
+| `GoogleToken.Tests.ps1` | 再認可した新しいトークンを、別プロセス (ワーカー・収集) が期限を待たずに使うこと |
 | `SourceAccess.Tests.ps1` | 本文からのリンク抽出と切り詰め |
 | `BoardApi.Tests.ps1` | **実際にボードを起動して** HTTP API を外から叩く |
 

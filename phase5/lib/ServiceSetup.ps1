@@ -345,7 +345,9 @@ function Complete-GoogleAuth {
     Set-Secret -Name 'gmail.refreshToken' -Value ([string] $resp.refresh_token)
     $script:PendingGoogleAuth = $null
 
-    # 取り直したので、前のアクセストークンの残りは捨てる
+    # 取り直したので、前のアクセストークンの残りは捨てる。
+    # これが効くのはこのプロセス (カンバン) だけ。ワーカーや収集は別プロセスなので、
+    # Get-GmailAccessToken が保存済みのリフレッシュトークンの変化を見て取り直す。
     $script:GmailToken = $null
     $script:GmailTokenExpiry = [DateTime]::MinValue
     if ($resp.scope) { $script:GoogleGrantedScopes = @(([string] $resp.scope) -split '\s+') }
