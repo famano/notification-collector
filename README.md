@@ -28,15 +28,13 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 ## 動かす
 
 ```powershell
-# 0. 一度だけ: 外部サービスをつなぐ
-.\phase5\Connect-Service.ps1 -Service slack
-.\phase5\Connect-Service.ps1 -Service gmail
-.\phase5\Connect-Service.ps1 -Service github   # 招待の承諾・非公開リポの調査に使う
-
-# 1. 起動する (これだけ)
+# 起動する (これだけ)
 $env:ANTHROPIC_API_KEY = 'sk-ant-...'
 .\Start.ps1
 ```
+
+外部サービス (Slack / Gmail / GitHub) は**カンバンのヘッダの「接続」から繋ぐ。**
+端末から設定したい場合は `.\phase5\Connect-Service.ps1 -Service slack` など。
 
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1` で実行する。
 
@@ -126,6 +124,14 @@ googleapis.com にしか付かず、未知のホストには何も付かない�
 「権限が無い」「手段が無い」は**実際に叩いて断られた記録が無ければ差し戻す**。
 何を試して何が返ったかは `task_attempts` に残り、カードの「試したこと」に出る。
 自己検証もこの記録と突き合わせて、調べずに諦めていないかを見る。
+
+**設定もカンバンの上で終わる。**
+資格情報が足りなくて止まったカードには設定カードが立つ。そのカードを開くと
+入力欄が出て、保存・疎通確認・**止まっていたカードの再開**までがその場で終わる。
+以前ここに書いてあったのは「端末で `Connect-Service.ps1` を実行してください」で、
+カードの中から画面の外へ出す唯一の指示だった。しかも戻された先で待っているのは
+対話プロンプトで、常駐しているシェルとは別に窓を開く必要がある。
+**止まっているカードが8枚あるときに、一番やりたくない形をしている。**
 
 **権限不足は投げ返さず、設定カードにする。**
 完了カードを洗うと、29枚中8枚が「権限が無くて進めない」で止まっていた。

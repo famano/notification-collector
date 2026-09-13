@@ -305,6 +305,40 @@
   #help table { border-collapse: collapse; width: 100%; font-size: 12px; }
   #help td { padding: 3px 10px 3px 0; vertical-align: top; }
   #help td:first-child { white-space: nowrap; color: var(--muted); width: 10em; }
+  /* ---------- 外部サービスの設定 ---------- */
+  /* 設定カードの出口。端末に戻らせず、ここで入力して閉じられるようにする */
+  .setup {
+    border: 1px solid var(--accent); border-left-width: 3px; border-radius: 8px;
+    background: var(--panel); padding: 12px 14px; margin: 12px 0;
+  }
+  .setup .cap { font-size: 12.5px; font-weight: 650; color: var(--accent); }
+  .setup .why { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .setup .state { font-size: 12px; margin-top: 6px; }
+  .setup .state.on { color: var(--ok); font-weight: 600; }
+  .setup label { display: block; font-size: 11.5px; color: var(--muted); margin: 9px 0 3px; }
+  .setup input {
+    width: 100%; font: inherit; font-size: 12.5px; padding: 6px 8px;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: var(--bg); color: var(--text);
+  }
+  .setup input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .setup .hint { font-size: 11px; color: var(--faint); margin-top: 3px; }
+  .setup .row { display: flex; gap: 7px; align-items: center; margin-top: 11px; flex-wrap: wrap; }
+  .setup details { margin-top: 9px; }
+  .setup summary { cursor: pointer; font-size: 11.5px; color: var(--muted); }
+  .setup pre {
+    margin: 6px 0 0; font-size: 11.5px; background: var(--soft); padding: 8px;
+    border-radius: 5px; white-space: pre-wrap; word-break: break-word;
+  }
+  .setup .doc { font-size: 11.5px; color: var(--accent); text-decoration: none; }
+  .setup .doc:hover { text-decoration: underline; }
+  #conn .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; max-width: 640px; width: 100%; max-height: 85vh; overflow-y: auto; }
+  #conn {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  #connBtn.warn { border-color: var(--high); color: var(--high); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -318,6 +352,7 @@
   <button id="yoloBtn" class="quiet" title="危険なツールの承認をどう扱うか">自動承認 OFF</button>
   <button id="archBtn" class="quiet">アーカイブ</button>
   <button id="newBtn">+ カード</button>
+  <button id="connBtn" class="quiet" title="外部サービスとの接続">接続</button>
   <button id="helpBtn" class="quiet" title="表示の意味">?</button>
 </header>
 
@@ -327,6 +362,7 @@
 <div id="drawer" hidden></div>
 <div id="toast" hidden></div>
 <div id="help" hidden></div>
+<div id="conn" hidden></div>
 
 <script>
 (function () {
@@ -338,6 +374,7 @@
   var toastEl = document.getElementById('toast');
   var workerEl = document.getElementById('worker');
   var helpEl = document.getElementById('help');
+  var connEl = document.getElementById('conn');
   var warnEl = document.getElementById('warn');
   var toastTimer = null;
 
@@ -658,7 +695,8 @@
       var box = el('div', 'humanstep');
       box.appendChild(el('div', 'hs-l', hs.blocker === 'credential_missing'
         ? '設定すれば自動で進みます' : 'あなたの操作が必要です'));
-      box.appendChild(el('div', 'hs-s', hs.step));
+      // カンバンで入力できるサービスなら、端末に戻る指示より先にそれを出す。
+      box.appendChild(el('div', 'hs-s', t.setup_ready ? 'このカードを開くと、ここで設定できます' : hs.step));
       if (hs.deadline) box.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
       if (hs.url) {
         var a = el('a', 'hs-go', 'ここで行う ↗');
@@ -825,11 +863,26 @@
 
       if (t.summary) pad.appendChild(el('div', 'lead', t.summary));
 
+      // --- 設定カードの出口 ---
+      // 「端末でコマンドを打ってください」はこのアプリで唯一、カードの中から
+      // 画面の外へ出す指示だった。ここに入力欄を出して、保存・疎通確認・
+      // 止まっていたカードの再開までを画面の上で終わらせる。
+      if (r.body.setup) {
+        pad.appendChild(setupForm(r.body.setup, function () {
+          closeDrawer(true);
+          refreshConnBadge();
+          refresh(true);
+        }, (t.human_step_obj ? t.human_step_obj.step : '')));
+      }
+
       // --- 「あなたにしかできない1手」 ---
       // カードの表に出したものは、開いたときにも同じ場所に同じ強さで出す。
       // 一覧で見えていた赤い枠が開くと消えるのでは、見落としたのかと思う。
       // カードは省スペースのため1手だけだが、こちらは根拠まで出す。
-      if (t.human_step_obj && t.human_step_obj.step) {
+      // 設定フォームを出したカードでは、赤枠は出さない。
+      // 「あなたの操作が必要です」と言いながら、その操作の入口が
+      // すぐ上にあるので、同じことを2度違う言い方で並べることになる。
+      if (t.human_step_obj && t.human_step_obj.step && !r.body.setup) {
         var hs = t.human_step_obj;
         var isCred = hs.blocker === 'credential_missing';
         var hbox = el('div', 'humanstep');
@@ -1105,6 +1158,155 @@
     });
   }
 
+  // ---------------------------------------------------------------- 外部サービスの設定
+  //
+  // 設定カードの出口。これまでは「端末で Connect-Service.ps1 を実行してください」で、
+  // カードの中から画面の外へ出す唯一の指示だった。ここに入力欄を出して、
+  // 保存・疎通確認・止まっていたカードの再開までを画面の上で終わらせる。
+  //
+  // 同じ組み立てをドロワー (設定カードを開いたとき) とヘッダの「接続」で使う。
+  // カードが無くても繋げられるようにしておかないと、最初の1回に行き場が無い。
+
+  function setupForm(svc, onDone, note) {
+    var box = el('div', 'setup');
+    box.appendChild(el('div', 'cap', svc.label + ' との接続'));
+    if (svc.why) box.appendChild(el('div', 'why', svc.why));
+    var state = el('div', 'state' + (svc.configured ? ' on' : ''),
+      svc.configured
+        ? ('接続済み' + (svc.account ? '（' + svc.account + '）' : ''))
+        : '未接続。止まっているカードはここで設定すれば進みます。');
+    box.appendChild(state);
+    // ワーカーが書いた指示は捨てずに残す。ただし主役はこの入力欄なので、
+    // 「端末で実行してください」を上に置かない。
+    if (note) box.appendChild(el('div', 'hint', 'ワーカーからの申し送り: ' + note));
+
+    var inputs = {};
+    (svc.fields || []).forEach(function (f) {
+      var lb = el('label', null, f.label + (f.required ? '' : '（任意）'));
+      box.appendChild(lb);
+      var inp = document.createElement('input');
+      // 伏せ字で受け取り、保存後も値は画面に戻さない
+      inp.type = f.secret ? 'password' : 'text';
+      inp.placeholder = f.placeholder || '';
+      inp.autocomplete = 'off';
+      inp.spellcheck = false;
+      lb.appendChild(inp);
+      inputs[f.name] = inp;
+      if (f.hint) box.appendChild(el('div', 'hint', f.hint));
+    });
+
+    function values() {
+      var v = {};
+      Object.keys(inputs).forEach(function (k) { v[k] = inputs[k].value; });
+      return v;
+    }
+    function anyValue() {
+      return Object.keys(inputs).some(function (k) { return inputs[k].value.trim(); });
+    }
+    function clearInputs() {
+      Object.keys(inputs).forEach(function (k) { inputs[k].value = ''; });
+    }
+
+    var row = el('div', 'row');
+    if (svc.flow === 'oauth') {
+      row.appendChild(actionButton('保存して同意画面へ', 'primary', '準備中…', function () {
+        if (!anyValue()) { toast('入力が空です', 'err'); return; }
+        var v = values();
+        return api('/api/setup/' + svc.key + '/authorize', 'POST',
+            { clientId: v.clientId, clientSecret: v.clientSecret })
+          .then(function (r) {
+            if (r.status !== 200 || !r.body.ok) {
+              toast('開けませんでした: ' + (r.body.error || r.status), 'err');
+              return;
+            }
+            clearInputs();
+            // 同意は別タブ。戻り先はこのカンバン自身なので、
+            // 同意し終えた時点でカードは自動で完了に移る。
+            window.open(r.body.url, '_blank', 'noopener');
+            toast('別タブで同意してください。終わるとこの画面に反映されます', 'ok');
+            if (onDone) onDone();
+          });
+      }));
+    }
+    else {
+      row.appendChild(actionButton('保存して接続を確認', 'primary', '確認中…', function () {
+        if (!anyValue()) { toast('入力が空です', 'err'); return; }
+        return api('/api/setup/' + svc.key, 'POST', { values: values() }).then(function (r) {
+          if (r.status !== 200 || !r.body.ok) {
+            toast('接続できませんでした: ' + (r.body.error || r.status), 'err');
+            return;
+          }
+          clearInputs();
+          var msg = svc.label + ' に接続しました' + (r.body.account ? '（' + r.body.account + '）' : '');
+          if (r.body.resumed > 0) msg += '。止まっていた ' + r.body.resumed + ' 枚を要対応に戻しました';
+          toast(msg, 'ok');
+          if (r.body.note) setTimeout(function () { toast(r.body.note, 'err'); }, 3400);
+          if (onDone) onDone();
+        });
+      }));
+    }
+    if (svc.docUrl) {
+      var a = el('a', 'doc', 'トークンの取り方 ↗');
+      a.href = svc.docUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      row.appendChild(a);
+    }
+    box.appendChild(row);
+
+    if (svc.help) {
+      var d = document.createElement('details');
+      var sm = document.createElement('summary');
+      sm.textContent = '必要な権限と取り方';
+      d.appendChild(sm);
+      d.appendChild(pre(svc.help));
+      box.appendChild(d);
+    }
+    return box;
+  }
+
+  function openConnections() {
+    connEl.innerHTML = '';
+    var box = el('div', 'box');
+    var head = el('div', 'row');
+    head.appendChild(el('h3', null, '外部サービスとの接続'));
+    var sp = el('span'); sp.style.flex = '1'; head.appendChild(sp);
+    var c = el('button', 'quiet', '閉じる');
+    c.onclick = function () { connEl.hidden = true; };
+    head.appendChild(c);
+    box.appendChild(head);
+    box.appendChild(el('div', 'hintline',
+      '入力したものは DPAPI で暗号化して保存され、画面には戻りません。'));
+    connEl.appendChild(box);
+    connEl.hidden = false;
+
+    api('/api/setup').then(function (r) {
+      if (r.status !== 200 || !r.body.available) {
+        box.appendChild(el('div', 'why', '連携ライブラリを読み込めていないため、ここからは設定できません。'));
+        return;
+      }
+      (r.body.services || []).forEach(function (svc) {
+        box.appendChild(setupForm(svc, function () {
+          openConnections();
+          refresh(true);
+        }));
+      });
+    });
+  }
+
+  // 未接続があればヘッダのボタンで気付けるようにする。
+  // 「設定さえすれば進むカード」が溜まっているのに気付かない、が一番もったいない。
+  function refreshConnBadge() {
+    api('/api/setup').then(function (r) {
+      if (r.status !== 200 || !r.body.available) return;
+      var off = (r.body.services || []).filter(function (s) { return !s.configured; });
+      var btn = document.getElementById('connBtn');
+      btn.className = off.length ? 'quiet warn' : 'quiet';
+      btn.textContent = off.length ? ('接続 ' + off.length) : '接続';
+      btn.title = off.length
+        ? (off.map(function (s) { return s.label; }).join(' / ') + ' が未接続です')
+        : '外部サービスとの接続';
+    }).catch(function () { });
+  }
+
   // ---------------------------------------------------------------- ヘルプ
 
   function rows(pairs) {
@@ -1149,6 +1351,14 @@
       ['対応の記録', '返信先が無いカードで出る。「これで完了にする」で保存して完了に移る。空でもよい'],
       ['着手対象外', '中止要求が残っており、ワーカーが飛ばす'],
       ['版', '更新のたびに増える番号。同時編集の衝突検出に使う']
+    ]));
+
+    box.appendChild(el('h4', null, '接続'));
+    box.appendChild(rows([
+      ['接続', '外部サービスの資格情報をこの画面で入れる。未接続の数がボタンに出る'],
+      ['設定カード', '権限不足で止まったカード。開くと入力欄が出て、その場で設定できる'],
+      ['設定したあと', '保存 → 疎通確認 → 待っていたカードを「要対応」に戻す、までが自動で走る'],
+      ['値の扱い', 'DPAPI で暗号化して保存する。画面には戻らない']
     ]));
 
     box.appendChild(el('h4', null, 'ワーカー'));
@@ -1197,9 +1407,12 @@
   };
 
   document.getElementById('helpBtn').onclick = openHelp;
+  document.getElementById('connBtn').onclick = openConnections;
   helpEl.onclick = function (e) { if (e.target === helpEl) helpEl.hidden = true; };
+  connEl.onclick = function (e) { if (e.target === connEl) connEl.hidden = true; };
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
+    if (!connEl.hidden) { connEl.hidden = true; return; }
     if (!helpEl.hidden) { helpEl.hidden = true; return; }
     closeDrawer();
   });
@@ -1207,7 +1420,7 @@
   // パネルの外をクリックしたら閉じる。
   // カードは openDetail が拾って別のカードに切り替えるので、ここでは閉じない。
   document.addEventListener('mousedown', function (e) {
-    if (drawer.hidden || !helpEl.hidden) return;
+    if (drawer.hidden || !helpEl.hidden || !connEl.hidden) return;
     if (drawer.contains(e.target)) return;
     if (e.target.closest && e.target.closest('.card')) return;
     closeDrawer();
@@ -1229,7 +1442,11 @@
   };
 
   refresh(true);
+  refreshConnBadge();
   setInterval(poll, 1500);
+  // 接続状態は滅多に変わらないので、ボードと同じ頻度では見に行かない。
+  // 別タブで同意を終えた Google はこれで拾う。
+  setInterval(refreshConnBadge, 15000);
 })();
 </script>
 </body>

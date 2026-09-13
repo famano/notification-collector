@@ -43,6 +43,12 @@
 
 ## 使い方
 
+**カンバンのヘッダの「接続」から設定できる。** 権限不足でカードが止まっているときは、
+その設定カードを開けばその場で入力できる（保存・疎通確認・止まっていたカードの再開まで）。
+仕組みは `lib/ServiceSetup.ps1` にあり、画面と端末の両方がここを呼ぶ。
+
+端末から設定したい場合は従来どおり:
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service slack
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service gmail
@@ -144,7 +150,11 @@ OAuth 2.0 のループバック方式。`HttpListener` で受け口を立て、�
 DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する。
 同じ Windows ユーザーでログオンしていないと復号できず、ファイルを別マシンに
 コピーしても使えない。`.gitignore` 済み。画面に値を出す経路は用意していない
-(`-Status` は項目名だけ表示する)。
+(`-Status` は項目名だけ表示する。カンバンの `/api/setup` も「設定済みか」と
+「どのアカウントとして繋がったか」しか返さない)。
+
+疎通確認に失敗したときは**保存前の値に戻す**。貼り間違えたトークンが残ると
+「設定済みなのに全部 401」という一番分かりにくい状態になるため。
 
 ## 他のサービスについての見立て
 
