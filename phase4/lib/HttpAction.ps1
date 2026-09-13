@@ -31,7 +31,7 @@ $script:CredentialHosts = @(
         label    = 'GitHub トークン'
         secret   = 'github.token'
         scheme   = 'Bearer'
-        setupHint = '.\phase5\Connect-Service.ps1 -Service github'
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service github)'
     },
     @{
         service  = 'google'
@@ -39,7 +39,7 @@ $script:CredentialHosts = @(
         label    = 'Google トークン'
         dynamic  = 'Get-GmailAccessToken'
         scheme   = 'Bearer'
-        setupHint = '.\phase5\Connect-Service.ps1 -Service gmail'
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service gmail)'
     },
     @{
         service  = 'slack'
@@ -47,7 +47,7 @@ $script:CredentialHosts = @(
         label    = 'Slack トークン'
         dynamic  = 'Get-SlackReadToken'
         scheme   = 'Bearer'
-        setupHint = '.\phase5\Connect-Service.ps1 -Service slack'
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service slack)'
     }
 )
 
