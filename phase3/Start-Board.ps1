@@ -90,8 +90,12 @@ function Write-StaticFile {
     $RelPath = $RelPath.TrimStart('/')
 
     $full = [IO.Path]::GetFullPath((Join-Path $WebRoot $RelPath))
-    # ディレクトリトラバーサル防止
-    if (-not $full.StartsWith([IO.Path]::GetFullPath($WebRoot), [StringComparison]::OrdinalIgnoreCase)) {
+    # ディレクトリトラバーサル防止。
+    # 単なる前方一致だと wwwroot の隣にある wwwroot2 のようなフォルダが通ってしまう。
+    # いまは隣に何も無いので実害は無いが、置いた瞬間に穴になる種類の判定なので、
+    # 区切り文字まで見る。
+    $webRootFull = [IO.Path]::GetFullPath($WebRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (-not $full.StartsWith($webRootFull + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
         $Context.Response.StatusCode = 403; return
     }
     if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {

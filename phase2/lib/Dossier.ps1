@@ -108,8 +108,13 @@ function Add-DossierNote {
     #>
     param(
         [Parameter(Mandatory)] $Conn,
-        [Parameter(Mandatory)] [string] $SubjectKey,
-        [Parameter(Mandatory)] [string] $Note,
+        # 件のキーは付かないことがある (Slack のリンクが解けない、件名が無い等)。
+        # AllowEmptyString が無いと、下の「キーが無ければ書かない」に到達する前に
+        # 束縛エラーで落ちる。いまは呼び出し側が全部 if で弾いているので表には
+        # 出ていないが、弾き忘れた1箇所でワーカーが例外で止まることになる。
+        # 「空なら何もしない」をここで1回守るほうが漏れない。
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $SubjectKey,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Note,
         [int] $TaskId = 0,
         [string] $Kind = 'finding'
     )
@@ -123,7 +128,7 @@ function Add-DossierNote {
 function Get-DossierNotes {
     param(
         [Parameter(Mandatory)] $Conn,
-        [Parameter(Mandatory)] [string] $SubjectKey,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $SubjectKey,
         [int] $Limit = 20
     )
     if (-not $SubjectKey) { return @() }
@@ -137,7 +142,7 @@ function Get-DossierText {
       .SYNOPSIS
         台帳をワーカーに渡せる形の文章にする。
     #>
-    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $SubjectKey)
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [AllowEmptyString()] [string] $SubjectKey)
     $notes = @(Get-DossierNotes -Conn $Conn -SubjectKey $SubjectKey)
     if ($notes.Count -eq 0) { return '' }
     $lines = @()
@@ -177,7 +182,7 @@ function Get-OpenTaskBySubject {
         done / dismissed / アーカイブ済みは対象外。終わった件が再発したなら、
         それは新しいカードとして立てるのが正しい (ただし台帳は引き継ぐ)。
     #>
-    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $SubjectKey)
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [AllowEmptyString()] [string] $SubjectKey)
     if (-not $SubjectKey) { return $null }
     $rows = @($Conn.Query(
         "SELECT * FROM tasks
