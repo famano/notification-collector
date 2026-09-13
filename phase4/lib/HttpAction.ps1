@@ -38,6 +38,7 @@ $script:CredentialHosts = @(
         match    = @('googleapis.com', 'www.googleapis.com', 'gmail.googleapis.com')
         label    = 'Google トークン'
         dynamic  = 'Get-GmailAccessToken'
+        configured = 'Test-GmailConfigured'
         scheme   = 'Bearer'
         setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service gmail)'
     },
@@ -46,6 +47,7 @@ $script:CredentialHosts = @(
         match    = @('slack.com', 'api.slack.com', 'files.slack.com')
         label    = 'Slack トークン'
         dynamic  = 'Get-SlackReadToken'
+        configured = 'Test-SlackConfigured'
         scheme   = 'Bearer'
         setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service slack)'
     }
@@ -114,31 +116,63 @@ function Get-HostCredentialSpec {
     return $null
 }
 
-function Get-RequestCredential {
+function Get-CredentialStatus {
     <#
       .SYNOPSIS
-        この URL に付ける資格情報。無ければ $null。
+        この URL に付ける資格情報の状態。
+      .DESCRIPTION
+        「未設定」と「設定済みだが取得に失敗」を分ける。利用者のやることが違う。
+        以前は取得の失敗を握り潰して「無い」扱いにしていたため、認証なしで
+        リクエストが飛んで 401 になり、ワーカーには「トークンが設定されていません」と
+        伝わっていた。実際は Google 側で許可が取り消されていた、という類の失敗が
+        名指しされないまま、設定済みの画面と食い違う報告が出ていた。
       .OUTPUTS
-        @{ value; label } — value は実際のヘッダ値、label は画面に出す名前
+        state      … none (資格情報を付けないホスト) / unconfigured / ok / failed
+        credential … state=ok のときだけ @{ value; label; setupHint }
+        error      … state=failed のときの理由
     #>
     param([Parameter(Mandatory)] [string] $Url)
     $spec = Get-HostCredentialSpec -Url $Url
-    if (-not $spec) { return $null }
+    $out = [pscustomobject]@{ state = 'none'; credential = $null; error = ''; spec = $spec }
+    if (-not $spec) { return $out }
+    $out.state = 'unconfigured'
 
     $token = ''
     if ($spec.dynamic) {
-        if (-not (Get-Command $spec.dynamic -ErrorAction SilentlyContinue)) { return $null }
-        try { $token = & $spec.dynamic } catch { return $null }
+        if (-not (Get-Command $spec.dynamic -ErrorAction SilentlyContinue)) { return $out }
+        # 未設定なら取りに行かない。ここで弾かないと「未設定です」の例外が失敗扱いになる。
+        if ($spec.configured -and (Get-Command $spec.configured -ErrorAction SilentlyContinue) -and
+            -not (& $spec.configured)) { return $out }
+        try { $token = & $spec.dynamic }
+        catch {
+            $out.state = 'failed'
+            $out.error = $_.Exception.Message
+            return $out
+        }
     }
     else {
         $token = Get-Secret -Name $spec.secret
     }
-    if (-not $token) { return $null }
-    return [pscustomobject]@{
+    if (-not $token) { return $out }
+    $out.state = 'ok'
+    $out.credential = [pscustomobject]@{
         value = ("{0} {1}" -f $spec.scheme, $token)
         label = $spec.label
         setupHint = $spec.setupHint
     }
+    return $out
+}
+
+function Get-RequestCredential {
+    <#
+      .SYNOPSIS
+        この URL に付ける資格情報。無ければ (取得に失敗した場合も) $null。
+        失敗の理由が要るときは Get-CredentialStatus を使う。
+      .OUTPUTS
+        @{ value; label } — value は実際のヘッダ値、label は画面に出す名前
+    #>
+    param([Parameter(Mandatory)] [string] $Url)
+    return (Get-CredentialStatus -Url $Url).credential
 }
 
 function Get-MissingCredentialHint {
@@ -150,7 +184,7 @@ function Get-MissingCredentialHint {
     param([Parameter(Mandatory)] [string] $Url)
     $spec = Get-HostCredentialSpec -Url $Url
     if (-not $spec) { return $null }
-    if (Get-RequestCredential -Url $Url) { return $null }
+    if ((Get-CredentialStatus -Url $Url).state -ne 'unconfigured') { return $null }
     return [pscustomobject]@{ label = $spec.label; setupHint = $spec.setupHint; host = (Get-UrlHost $Url) }
 }
 
@@ -222,7 +256,17 @@ function Invoke-HttpAction {
             $send[$k] = [string] $Headers.$k
         }
     }
-    $cred = Get-RequestCredential -Url $Url
+    $credStatus = Get-CredentialStatus -Url $Url
+    if ($credStatus.state -eq 'failed') {
+        # 認証なしで送ると 401 が返り、「未設定」に見えてしまう。送らずに本当の理由を返す。
+        return [pscustomobject]@{
+            isError = $true
+            text = ("{0}を取得できなかったため、送信せずに中止しました。`n理由: {1}`n`n{2}" -f `
+                        $credStatus.spec.label, $credStatus.error, $credStatus.spec.setupHint) +
+                   "`n資格情報の問題なので、推測で調べ続けずに require_human_step を blocker='credential_missing' で呼んでください。"
+        }
+    }
+    $cred = $credStatus.credential
     if ($cred) { $send['Authorization'] = $cred.value }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -262,6 +306,13 @@ function Invoke-HttpAction {
             } catch { }
         }
         if ($detail.Length -gt 4000) { $detail = $detail.Substring(0, 4000) + '…' }
+
+        # Google の 401 は、手元のアクセストークンが効いていない印。
+        # 捨てておけば次の呼び出しで保存済みのリフレッシュトークンから取り直す。
+        if ($status -eq 401 -and (Get-HostCredentialSpec -Url $Url).service -eq 'google' -and
+            (Get-Command Clear-GmailAccessToken -ErrorAction SilentlyContinue)) {
+            Clear-GmailAccessToken
+        }
 
         $hint = ''
         if ($status -eq 401 -or $status -eq 403 -or $status -eq 404) {

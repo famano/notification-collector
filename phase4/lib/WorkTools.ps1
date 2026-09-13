@@ -520,11 +520,18 @@ function Get-ToolRisk {
             #     → 常に承認。相手側の状態が変わり、取り消せないことが多い。
             $method = if ($ToolInput.method) { ([string] $ToolInput.method).ToUpper() } else { 'GET' }
             $url    = [string] $ToolInput.url
-            $cred   = Get-RequestCredential -Url $url
+            $credStatus = Get-CredentialStatus -Url $url
+            $cred   = $credStatus.credential
             $credLabel = if ($cred) { $cred.label } else { '(認証なし)' }
             $isWrite = Test-WriteMethod -Method $method
 
             if (-not $isWrite -and $cred) {
+                return [pscustomobject]@{ risky = $false; summary = ''; detail = '' }
+            }
+            # 資格情報を取れなかった読み取りは、承認に回さない。実行側が送らずに
+            # 理由を返すので、利用者に「認証なし」の GET を承認させても何も起きない。
+            # 書き込みは回す。承認を待つ間にトークンが取れるようになれば、そのまま送られるため。
+            if (-not $isWrite -and $credStatus.state -eq 'failed') {
                 return [pscustomobject]@{ risky = $false; summary = ''; detail = '' }
             }
 

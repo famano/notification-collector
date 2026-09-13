@@ -121,20 +121,49 @@ function Start-GmailAuth {
 
 $script:GmailToken = $null
 $script:GmailTokenExpiry = [DateTime]::MinValue
+# いまのアクセストークンを、どのリフレッシュトークンから引き換えたか。
+$script:GmailTokenSource = $null
+
+# 手元のアクセストークンを捨てる。次の呼び出しで取り直す。
+function Clear-GmailAccessToken {
+    $script:GmailToken = $null
+    $script:GmailTokenExpiry = [DateTime]::MinValue
+    $script:GmailTokenSource = $null
+}
 
 function Get-GmailAccessToken {
-    if ($script:GmailToken -and (Get-Date) -lt $script:GmailTokenExpiry) { return $script:GmailToken }
+    # キャッシュは「保存されているリフレッシュトークンが、引き換えたときと同じ」
+    # 間だけ使う。期限だけで判断してはいけない。
+    #
+    # 再認可はカンバンのプロセスで行われ、ワーカーや収集は別プロセスで動いている。
+    # 期限だけを見ていた頃は、カンバンで Calendar を足して取り直しても、ワーカーは
+    # 最大 1 時間、古いアクセストークンを使い続けていた。その間の Calendar は
+    # 403 (スコープ不足)、Google 側で許可を取り消していれば 401 になり、
+    # 「設定したのに直らない」ように見えていた。保存先は共有なので、そこを見て気付く。
+    $ref = Get-Secret -Name 'gmail.refreshToken'
+    if (-not $ref) {
+        Clear-GmailAccessToken
+        throw 'Gmail が未設定です。Connect-Service.ps1 -Service gmail を実行してください。'
+    }
+    if ($script:GmailToken -and $script:GmailTokenSource -eq $ref -and (Get-Date) -lt $script:GmailTokenExpiry) {
+        return $script:GmailToken
+    }
 
     $cid = Get-Secret -Name 'gmail.clientId'
     $sec = Get-Secret -Name 'gmail.clientSecret'
-    $ref = Get-Secret -Name 'gmail.refreshToken'
-    if (-not $ref) { throw 'Gmail が未設定です。Connect-Service.ps1 -Service gmail を実行してください。' }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $resp = Invoke-RestMethod -Uri $script:GoogleToken -Method Post -TimeoutSec 30 -Body @{
-        client_id = $cid; client_secret = $sec; refresh_token = $ref; grant_type = 'refresh_token'
+    try {
+        $resp = Invoke-RestMethod -Uri $script:GoogleToken -Method Post -TimeoutSec 30 -Body @{
+            client_id = $cid; client_secret = $sec; refresh_token = $ref; grant_type = 'refresh_token'
+        }
+    }
+    catch {
+        Clear-GmailAccessToken
+        throw (Get-GoogleTokenErrorMessage $_)
     }
     $script:GmailToken = $resp.access_token
+    $script:GmailTokenSource = $ref
     # 期限ぎりぎりで使わないよう少し早めに切る
     $script:GmailTokenExpiry = (Get-Date).AddSeconds([int] $resp.expires_in - 60)
     # 実際に付与されたスコープを控える。要求したスコープと一致するとは限らない。
@@ -145,6 +174,46 @@ function Get-GmailAccessToken {
 }
 
 $script:GoogleGrantedScopes = @()
+
+# トークンの引き換えに失敗したときの、利用者とワーカーに渡す文言。
+#
+# 例外の文言は「(400) 不正な要求」だけで、理由 (invalid_grant など) は応答の本文にしか無い。
+# ここで失敗するのは、たいてい資格情報そのものが効かなくなったとき
+# (Google 側で許可を取り消した、クライアントを作り直した) なので、
+# 理由を名指ししないと「設定済みなのに動かない」から抜け出せない。
+function Get-GoogleTokenErrorMessage {
+    param($ErrorRecord)
+    $raw = ''
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $raw = [string] $ErrorRecord.ErrorDetails.Message }
+    $r = $ErrorRecord.Exception.Response
+    if (-not $raw -and $r) {
+        try {
+            $sr = New-Object IO.StreamReader($r.GetResponseStream())
+            try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        } catch { }
+    }
+
+    $code = ''; $desc = ''
+    try {
+        $j = $raw | ConvertFrom-Json
+        $code = [string] $j.error
+        $desc = [string] $j.error_description
+    } catch { }
+
+    $why = if ($code -and $desc) { "{0} ({1})" -f $code, $desc }
+           elseif ($code) { $code }
+           elseif ($raw) { $raw }
+           else { $ErrorRecord.Exception.Message }
+    $advice = switch ($code) {
+        'invalid_grant'       { 'Google 側で許可が取り消されたか、リフレッシュトークンが失効しています。' }
+        'invalid_client'      { 'クライアント ID またはシークレットが正しくありません (クライアントを作り直した場合など)。' }
+        'unauthorized_client' { 'このクライアントではトークンを更新できません。' }
+        default               { '' }
+    }
+    $msg = "Google のアクセストークンを取得できませんでした: $why"
+    if ($advice) { $msg += "`n$advice カンバンの「接続」から Google を接続し直してください。" }
+    return $msg
+}
 
 function Test-GoogleScope {
     <#
@@ -157,9 +226,9 @@ function Test-GoogleScope {
     #>
     param([Parameter(Mandatory)] [string] $Scope)
     if (-not (Test-GmailConfigured)) { return $false }
-    if ($script:GoogleGrantedScopes.Count -eq 0) {
-        try { [void] (Get-GmailAccessToken) } catch { return $false }
-    }
+    # 毎回通す。キャッシュが生きていれば外には出ず、取り直されていれば
+    # 付与スコープもそのとき更新される (前のトークンのスコープで答えない)。
+    try { [void] (Get-GmailAccessToken) } catch { return $false }
     return ($script:GoogleGrantedScopes -contains $Scope)
 }
 
@@ -188,6 +257,9 @@ function Invoke-GmailApi {
         # Slack 側で ok:false を握り潰さないのと同じ理由で、ここでも本文まで出す。
         $detail = ''
         $r = $_.Exception.Response
+        # 401 は手元のトークンがもう効いていない (許可の取り消しなど)。
+        # 持ったままだと期限まで同じ 401 を返し続けるので、ここで捨てる。
+        if ($r -and [int] $r.StatusCode -eq 401) { Clear-GmailAccessToken }
         if ($r) {
             $sr = New-Object IO.StreamReader($r.GetResponseStream())
             try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose() }
