@@ -126,10 +126,16 @@ function Get-AppConfigBool {
 
 # 配布設定の「資格情報」欄 → 保管庫の名前。
 # ここに無いものは取り込まない (設定ファイルの書き間違いで変な名前が保管庫に増えない)。
+# slack.redirectUrl はここに入れない。秘密ではないうえ、Slack アプリ側に
+# 登録済みの URL と一字一句合っている必要があるので、配布設定だけを見る
+# (保管庫に写して古い値が残ると、合わなくなった理由が分からなくなる)。
 $script:AppConfigSecretMap = [ordered]@{
     'anthropic.apiKey'    = 'anthropic.apiKey'
     'google.clientId'     = 'gmail.clientId'
     'google.clientSecret' = 'gmail.clientSecret'
+    'slack.clientId'      = 'slack.clientId'
+    'slack.clientSecret'  = 'slack.clientSecret'
+    # 貼る方式で配っていた頃の名残。Bot 名義で投稿したい構成では今も使える。
     'slack.botToken'      = 'slack.botToken'
     'slack.userToken'     = 'slack.userToken'
     'github.token'        = 'github.token'

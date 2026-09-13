@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<!-- 認可コードが URL に載るので、外部へのリファラを一切出さない -->
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slack との接続</title>
+<!--
+  Slack から戻ってくるための中継ページ。配る人が1枚だけ公開する。
+
+  なぜ要るか:
+    Slack は OAuth の戻り先に HTTPS を要求する。Google の「デスクトップ アプリは
+    ループバックを任意のポートで許す」に相当する例外が無いため、
+    http://127.0.0.1:8787/... を戻り先として登録できない。
+    一方このアプリは Windows の通知を読む以上、手元の PC で動かすしかない。
+    その食い違いを埋めるのがこの1枚で、やることは転送だけである。
+
+  ここが持たないもの (持たせてはいけないもの):
+    - client secret     … 交換は手元のカンバンが行う。ここには置かない
+    - トークン          … ここを通るのは単回・短命の認可コードだけ
+    - 利用者のデータ    … 何も読まないし、何も保存しない
+    - 外部リソース      … フォントも含めて一切読まない (コードが載った URL を
+                           第三者に渡さないため。リファラも no-referrer で止める)
+
+  転送先は 127.0.0.1 に固定する。**クエリで受け取った URL へは決して飛ばさない。**
+  受け取れるのはポート番号だけで、それも state に埋めたものを検証して使う
+  (ここを緩めると、この公開ページが任意の宛先への踏み台になる)。
+-->
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, system-ui, sans-serif;
+    background: #f6f7f9; color: #1f2328;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #16181d; color: #e6e8eb; } }
+  main { max-width: 30rem; padding: 1.5rem; text-align: center; }
+  h1 { font-size: 1.1rem; margin: 0 0 .75rem; }
+  p { font-size: .9rem; line-height: 1.7; margin: .5rem 0; }
+  .sub { color: #6b7280; font-size: .8rem; }
+  a { color: #2563eb; }
+  code { font-size: .8rem; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Slack との接続</h1>
+  <p id="msg">お使いの PC のカンバンに戻しています…</p>
+  <p id="manual" hidden><a id="link" href="#">戻らない場合はこちらを押してください</a></p>
+  <p class="sub">このページは転送するだけで、何も保存しません。</p>
+  <noscript><p>JavaScript が無効になっているため戻れません。有効にしてやり直してください。</p></noscript>
+</main>
+<script>
+(function () {
+  'use strict';
+  var msg = document.getElementById('msg');
+  var manual = document.getElementById('manual');
+  var link = document.getElementById('link');
+
+  function fail(text) {
+    msg.textContent = text;
+    msg.style.color = '#b42318';
+  }
+
+  var q = {};
+  String(location.search || '').replace(/^\?/, '').split('&').forEach(function (pair) {
+    if (!pair) { return; }
+    var kv = pair.split('=');
+    var k = decodeURIComponent(kv[0] || '');
+    var v = decodeURIComponent((kv[1] || '').replace(/\+/g, ' '));
+    if (k) { q[k] = v; }
+  });
+
+  var state = q.state || '';
+  // state は "<ポート>.<乱数>"。カンバンが組み立て、戻ってきたときに自分で照合する。
+  // ここではポートを取り出すためだけに使い、形が合わなければ何もしない。
+  var m = /^([0-9]{1,5})\.[A-Za-z0-9]{8,64}$/.exec(state);
+  if (!m) {
+    fail('戻り先が分かりませんでした。カンバンからもう一度やり直してください。');
+    return;
+  }
+  var port = parseInt(m[1], 10);
+  if (!(port >= 1 && port <= 65535)) {
+    fail('戻り先が分かりませんでした。カンバンからもう一度やり直してください。');
+    return;
+  }
+
+  // 宛先はここで組み立てる。クエリから受け取った文字列を宛先に使わない。
+  var target = 'http://127.0.0.1:' + port + '/oauth/slack/callback'
+    + '?state=' + encodeURIComponent(state);
+  if (q.code)  { target += '&code='  + encodeURIComponent(q.code); }
+  // 利用者が同意画面で断った場合。理由もそのまま渡して、カンバン側で出す。
+  if (q.error) { target += '&error=' + encodeURIComponent(q.error); }
+
+  link.href = target;
+  manual.hidden = false;
+  location.replace(target);
+})();
+</script>
+</body>
+</html>

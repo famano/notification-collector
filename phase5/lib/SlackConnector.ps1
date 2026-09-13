@@ -16,7 +16,28 @@
 
 . "$PSScriptRoot\SecretStore.ps1"
 
-$script:SlackApi = 'https://slack.com/api'
+$script:SlackApi   = 'https://slack.com/api'
+$script:SlackAuth  = 'https://slack.com/oauth/v2/authorize'
+$script:SlackToken = 'https://slack.com/api/oauth.v2.access'
+
+# 同意画面で求めるユーザー権限。
+#
+# **Bot トークンは求めない。** このアプリが要るのは「本人に届いたもの」で、
+# それは本人のトークンでしか見えない ―― Bot は招待されたチャンネルしか読めず、
+# DM に至っては Bot 自身宛のものしか見えない。夜のあいだに来た DM を拾えるか
+# どうかがここで決まる。
+#
+# Bot を使わないことで運用も1つ消える: **チャンネルへの招待が要らなくなる。**
+# 返信も本人名義になる (Bot 名義のままにしたい場合だけ、端末から Bot トークンを
+# 足す。その場合は投稿だけがそちらを使う)。
+#
+# 足すときは「何が読めるようになるか」を考えること。ここは「その人に見えるもの
+# 全部」への鍵になるので、要るものだけに絞る。
+$script:SlackUserScopes = @(
+    'channels:history', 'groups:history', 'im:history', 'mpim:history',
+    'channels:read',    'groups:read',    'im:read',    'mpim:read',
+    'users:read', 'files:read', 'chat:write'
+)
 
 function Test-SlackConfigured {
     return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken'))
@@ -65,7 +86,7 @@ function ConvertFrom-SlackLink {
 function Invoke-SlackApi {
     param([Parameter(Mandatory)] [string] $Method, [hashtable] $Query)
     $token = Get-SlackReadToken
-    if (-not $token) { throw 'Slack のトークンが設定されていません。Connect-Service.ps1 -Service slack を実行してください。' }
+    if (-not $token) { throw 'Slack が未設定です。カンバンのヘッダの「接続」から繋いでください。' }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $url = "$script:SlackApi/$Method"
@@ -87,7 +108,7 @@ function Invoke-SlackApi {
 function Invoke-SlackApiPost {
     param([Parameter(Mandatory)] [string] $Method, [Parameter(Mandatory)] [hashtable] $Body)
     $token = Get-SlackWriteToken
-    if (-not $token) { throw 'Slack のトークンが設定されていません。Connect-Service.ps1 -Service slack を実行してください。' }
+    if (-not $token) { throw 'Slack が未設定です。カンバンのヘッダの「接続」から繋いでください。' }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $json = $Body | ConvertTo-Json -Depth 10 -Compress

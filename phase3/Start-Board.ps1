@@ -469,6 +469,60 @@ function Invoke-Route {
         return
     }
 
+    # Slack も同意が要るが、Google と違って**戻り先に HTTPS を要求する。**
+    # 127.0.0.1 を直接登録できないので、戻り先は転送しかしない中継ページにして、
+    # そこから下の /oauth/slack/callback に戻してもらう。
+    # ポート番号は中継ページが知らないので state に埋めて渡す。
+    if ($path -eq '/api/setup/slack/authorize' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $b = Read-JsonBody $Context
+        $given = Get-SlackClientCredential -ClientId $(if ($b) { [string] $b.clientId } else { '' }) `
+                                           -ClientSecret $(if ($b) { [string] $b.clientSecret } else { '' })
+        if (-not ([string] $given.clientId).Trim() -or -not ([string] $given.clientSecret).Trim()) {
+            Write-JsonResponse $Context @{ ok = $false; error = 'クライアント ID とシークレットを入力してください' } 400
+            return
+        }
+        if (-not ([string] $given.redirectUri).Trim()) {
+            # ここが無いと同意画面まで行けない。配る人の作業なので、そう言う。
+            Write-JsonResponse $Context @{
+                ok = $false
+                error = '中継ページの URL が設定されていません (config\app-config.json の slack.redirectUrl)。配布元に確認してください。'
+            } 400
+            return
+        }
+        try {
+            $r = Get-SlackAuthRequest -ClientId $given.clientId -ClientSecret $given.clientSecret `
+                    -RedirectUri $given.redirectUri -BoardPort $script:BoardPort
+        }
+        catch {
+            Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400
+            return
+        }
+        Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $r.url; redirectUri = $r.redirectUri })
+        return
+    }
+
+    if ($path -eq '/oauth/slack/callback' -and $method -eq 'GET') {
+        $q = @{}
+        foreach ($pair in (([string] $req.Url.Query).TrimStart('?') -split '&')) {
+            $kv = $pair -split '=', 2
+            if ($kv.Count -eq 2) { $q[$kv[0]] = [Uri]::UnescapeDataString($kv[1]) }
+        }
+        $result = if (-not $script:Connectors) {
+            [pscustomobject]@{ ok = $false; error = '連携を読み込めていません' }
+        } else {
+            Complete-SlackAuth -Code $q['code'] -State $q['state'] -OAuthError $q['error']
+        }
+
+        $resumed = 0
+        if ($result.ok) {
+            $done = Invoke-SetupCompletion -Conn $Conn -Service 'slack' -Account $result.account
+            $resumed = $done.resumed
+        }
+        Write-OAuthResultPage -Context $Context -Result $result -Resumed $resumed
+        return
+    }
+
     # 同意画面からの戻り。ブラウザが直接来るので HTML を返す。
     if ($path -eq '/oauth/google/callback' -and $method -eq 'GET') {
         $q = @{}

@@ -85,12 +85,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 | `mention` | 自分が名指しされたもの (`<@自分>`) |
 | `thread` | **すでにカードがあるスレッドへの新しい返信** ＝ 会話の続き |
 
-`mention` の判定には自分のユーザーIDが要る。`Connect-Service.ps1 -Service slack` が
-メールアドレスか表示名から引いて保存する。User Token を入れた場合は `auth.test` で
-自動的に分かるので聞かない。
+`mention` の判定には自分のユーザーIDが要る。同意画面を通ると `authed_user.id` が
+そのまま本人なので、繋いだ時点で確定する（Bot Token だけの構成では `auth.test` が
+Bot を返すため、`Connect-Service.ps1 -Service slack` がメールアドレスや表示名から引く）。
 
 掃き寄せたメッセージは通知から来たものと同じ形の `slack://` リンクを持たせてある。
 そのため次の補完段がそのまま動き、スレッド全文も permalink も同じ経路で埋まる。
+
+### 接続のしかた（ユーザートークン / 同意画面）
+
+**カンバンの「接続」から Slack に繋ぐと、同意画面を通って自分のユーザートークンが入る。**
+以前は `xoxb-` / `xoxp-` を手で貼る方式だったが、**その画面に入れるのはアプリを
+作れる人だけ**で、配った先では永久に埋まらない空欄になっていた。
+
+Slack は OAuth の戻り先に **HTTPS を要求する**（Google の「デスクトップ アプリは
+ループバックを任意のポートで許す」に相当する例外が無い）。そのため
+`http://127.0.0.1:<port>/...` を直接登録できず、**転送しかしない中継ページ**を
+1枚挟む。ページは `docs/slack-oauth-redirect.html`、URL は配布設定の
+`slack.redirectUrl`。ポート番号は中継ページが知らないので `state` に埋めて渡し、
+戻ってきた `state` はカンバン側で照合する。
+
+中継ページを通るのは単回・短命の認可コードだけで、**トークンへの引き換えは
+client secret を持つ手元のカンバンでしか行えない。**
+
+求めるのは User Token Scopes だけで、`scope`（Bot 用）は空で投げる。
+ワークスペースに Bot を増やさないためで、結果として**チャンネルへの招待も要らない。**
 
 ### Bot Token と User Token
 
@@ -102,7 +121,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 | DM | Bot 自身宛のものだけ | **自分の DM が読める** |
 
 つまり Bot Token だけの構成では、**夜のあいだに来た DM は取りこぼしたままになる。**
-そこを埋めたい場合は User Token を入れる。投稿は Bot Token がある限り Bot 名義のまま。
+このアプリが要るのは「本人に届いたもの」なので、**既定は User Token だけ**にしてある。
+
+Bot Token は任意。入れると投稿だけが Bot 名義になる（読み取りは User Token を優先）。
+端末から足す: `.\phase5\Connect-Service.ps1 -Service slack`
 
 ### 補完
 

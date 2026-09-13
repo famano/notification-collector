@@ -54,9 +54,13 @@ function Show-Status {
 
 function Connect-Slack {
     Write-Host ''
-    Write-Host 'Slack の設定' -ForegroundColor Cyan
+    Write-Host 'Slack の設定 (Bot トークン / 任意)' -ForegroundColor Cyan
     Write-Host @'
-  事前に Slack アプリを作り、Bot Token を取得してください。
+  通常はここではなく、カンバンのヘッダの「接続」から繋いでください。
+  同意画面を通って自分のユーザートークンが入り、招待も貼り付けも要りません。
+
+  ここで入れるのは「投稿を Bot 名義にしたい」場合の Bot トークンです。
+  読み取りはユーザートークンが優先されます。
 
   1. https://api.slack.com/apps で「Create New App」→「From scratch」
   2. OAuth & Permissions → Bot Token Scopes に以下を追加

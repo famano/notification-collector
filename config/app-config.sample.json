@@ -13,9 +13,11 @@
   },
 
   "slack": {
-    "_comment": "ワークスペースにアプリを導入できる人が用意する。利用者ごとに違う値を配る場合は、この欄を空にして画面から入れてもらう。",
-    "botToken": "",
-    "userToken": ""
+    "_comment": "Slack アプリ (User Token Scopes のみ) を作れる人が用意する。利用者はカンバンの「接続」から同意画面を通り、自分のトークンを自分で取る。redirectUrl は Slack が HTTPS の戻り先しか受け付けないための中継ページで、docs/slack-oauth-redirect.html をそのまま公開したもの (GitHub Pages で可)。Slack アプリの Redirect URLs にも同じ URL を登録すること。botToken は Bot 名義で投稿したい場合だけの任意項目。",
+    "clientId": "",
+    "clientSecret": "",
+    "redirectUrl": "",
+    "botToken": ""
   },
 
   "github": {
