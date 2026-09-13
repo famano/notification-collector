@@ -330,6 +330,14 @@ Describe '外から叩かれたとき' {
         Assert-Equal 403 $r.status
     }
 
+    It '同じ PC の別のローカルサーバからの POST も弾く' {
+        # 「localhost なら通す」にすると、開発サーバや他のアプリのローカル UI が
+        # 出したページから、この画面の操作を起こせてしまう。
+        $r = Invoke-Board $board ("/api/tasks/$todoId/comment") 'POST' @{ body = '隣のポートから' } `
+                @{ Origin = ('http://localhost:' + ($board.port + 1)) }
+        Assert-Equal 403 $r.status
+    }
+
     It '自分自身からの POST は通る' {
         $r = Invoke-Board $board ("/api/tasks/$todoId/comment") 'POST' @{ body = '画面から' } `
                 @{ Origin = $board.base }

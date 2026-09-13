@@ -26,6 +26,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `BoardApi.Tests.ps1` | **実際にボードを起動して** HTTP API を外から叩く |
 | `AppConfig.Tests.ps1` | 配布設定の読み込みと、API キーの取得元の優先順位 |
 | `Launcher.Tests.ps1` | ダブルクリックの入口 (`.cmd` の改行・文字・実行ポリシー) と初回セットアップ |
+| `RequestGuard.Tests.ps1` | 誰の要求を通すか (Host / Origin)。**何を弾けないか**も固定する |
 | `Setup.Tests.ps1` | 画面からの資格情報の設定。値が漏れないこと、用意済みなら入力を求めないこと |
 
 選び方の基準は「壊れても静かなところ」。承認の要否や宛先の束縛は、

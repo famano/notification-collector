@@ -29,6 +29,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
+# 要求を通すかどうかの判定 (Host / Origin)。壊れても画面には何も出ない場所なので、
+# ボードを起動せずに確かめられる形にしてある。
+. "$PSScriptRoot\lib\RequestGuard.ps1"
 # トリアージ方針。カンバンから直せるようにする (気付いた場所で直せないと直されない)。
 . "$PSScriptRoot\..\phase2\lib\Policy.ps1"
 $script:PolicyPath = $PolicyPath
@@ -935,19 +938,13 @@ try {
     while ($listener.IsListening) {
         $ctx = $listener.GetContext()
         try {
-            # DNS リバインディング対策。127.0.0.1 バインドでも Host は検証しておく。
-            $hostHeader = $ctx.Request.Headers['Host']
-            # 状態を変える要求は Origin も見る。ブラウザは別サイトからの POST に
-            # 必ず Origin を付けるので、外のページが localhost を叩いて
-            # 削除や送信を起こす経路をここで塞ぐ。同一オリジンからは付かないか、
-            # 自分自身の Origin が付く。
-            $origin = $ctx.Request.Headers['Origin']
-            $badOrigin = ($ctx.Request.HttpMethod -ne 'GET' -and $origin -and
-                          $origin -notmatch "^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
-            if ($hostHeader -and $hostHeader -notmatch '^(localhost|127\.0\.0\.1)(:\d+)?$') {
+            # 通すかどうかの判定は lib\RequestGuard.ps1 にある
+            # (ボードを起動しないと確かめられない場所に置くと、確かめられない)。
+            if (-not (Test-AllowedHost -HostHeader $ctx.Request.Headers['Host'])) {
                 $ctx.Response.StatusCode = 400
             }
-            elseif ($badOrigin) {
+            elseif (-not (Test-AllowedOrigin -Method $ctx.Request.HttpMethod `
+                            -Origin $ctx.Request.Headers['Origin'] -Port $Port)) {
                 $ctx.Response.StatusCode = 403
             }
             else {
