@@ -410,7 +410,7 @@
   var permEl = document.getElementById('perm');
   var lastRev = null, lastPending = 0, dragging = false, openTaskId = null, dirty = false;
   var showArchived = false, workerTaskId = null, workerAlive = false;
-  var workerWarn = '', collectorWarn = '';
+  var workerWarn = '', collectorWarn = '', setupWarn = '';
   // 折りたたみの開閉はカードを開き直しても保つ
   var openSections = {};
 
@@ -541,7 +541,7 @@
 
     workerWarn = workerAlive ? ''
       : 'ワーカーが動いていないため、「要対応」のカードには誰も着手しません。'
-        + ' phase4\\Start-Worker.ps1 を起動してください。';
+        + 'いったん終了して、デスクトップの「通知コレクター」から起動し直してください。';
     renderWarnings();
   }
 
@@ -557,11 +557,13 @@
 
     if (state === 'never') {
       collectorWarn = 'メールと通知の取り込みが一度も動いていません。'
-        + ' Start-Collector.ps1 を起動してください（これが無いとカードは作られません）。';
+        + 'いったん終了して、デスクトップの「通知コレクター」から起動し直してください'
+        + '（これが無いとカードは作られません）。';
     } else if (state === 'stopped' || stale) {
       collectorWarn = '取り込みが止まっています'
         + (stale && c.staleSeconds != null ? '（最終 ' + Math.floor(c.staleSeconds / 60) + '分前）' : '')
-        + '。新しいメールや通知はカードになりません。Start-Collector.ps1 を起動してください。';
+        + '。新しいメールや通知はカードになりません。自動で起動し直しますが、'
+        + '直らない場合はいったん終了して、デスクトップの「通知コレクター」から起動し直してください。';
     } else if (state === 'error') {
       // 動いてはいるが取り込めていない。放っておくと静かに漏れ続ける。
       collectorWarn = '取り込みが失敗しています： ' + (c.message || '原因不明')
@@ -576,7 +578,19 @@
     var msgs = [collectorWarn, workerWarn].filter(Boolean);
     warnEl.innerHTML = '';
     msgs.forEach(function (m) { warnEl.appendChild(el('div', '', m)); });
-    warnEl.hidden = msgs.length === 0;
+
+    // 必須の接続が無いと、取り込みは動いているのにカードが1枚も増えない。
+    // これは画面上では「静かな日」と見分けが付かないので、原因とその場での
+    // 直し方を一番上に出す。押すとそのまま入力欄が開く。
+    if (setupWarn) {
+      var d = el('div', '', setupWarn + ' ');
+      var b = el('button', 'quiet', 'ここで設定する');
+      b.style.marginLeft = '6px';
+      b.addEventListener('click', function () { openConnections(); });
+      d.appendChild(b);
+      warnEl.appendChild(d);
+    }
+    warnEl.hidden = (msgs.length === 0 && !setupWarn);
   }
 
   // ---------------------------------------------------------------- 承認
@@ -1234,10 +1248,20 @@
     // 「端末で実行してください」を上に置かない。
     if (note) box.appendChild(el('div', 'hint', 'ワーカーからの申し送り: ' + note));
 
+    // 配る人が用意済みのものは、入力欄を前面に出さない。
+    //
+    // Google の OAuth クライアントも API キーも、利用者の権限では作れないことが多い。
+    // それを空欄として出すと「自分で取ってこい」に見えるのに、取りに行っても
+    // 権限が無くて辿り着けない ―― 一番いけない形の行き止まりになる。
+    // 用意済みなら押すだけにして、入力欄は「別の値を使う」の中に畳んでおく。
+    var preset = !!svc.preset;
+    if (preset && svc.managed) box.appendChild(el('div', 'hint', svc.managed));
+
+    var fieldBox = preset ? el('div') : box;
     var inputs = {};
     (svc.fields || []).forEach(function (f) {
       var lb = el('label', null, f.label + (f.required ? '' : '（任意）'));
-      box.appendChild(lb);
+      fieldBox.appendChild(lb);
       var inp = document.createElement('input');
       // 伏せ字で受け取り、保存後も値は画面に戻さない
       inp.type = f.secret ? 'password' : 'text';
@@ -1246,7 +1270,7 @@
       inp.spellcheck = false;
       lb.appendChild(inp);
       inputs[f.name] = inp;
-      if (f.hint) box.appendChild(el('div', 'hint', f.hint));
+      if (f.hint) fieldBox.appendChild(el('div', 'hint', f.hint));
     });
 
     function values() {
@@ -1263,8 +1287,10 @@
 
     var row = el('div', 'row');
     if (svc.flow === 'oauth') {
-      row.appendChild(actionButton('保存して同意画面へ', 'primary', '準備中…', function () {
-        if (!anyValue()) { toast('入力が空です', 'err'); return; }
+      row.appendChild(actionButton(preset ? (svc.label + ' に接続する') : '保存して同意画面へ',
+          'primary', '準備中…', function () {
+        // 用意済みなら空のまま押せる。サーバが配布時のクライアントを使う。
+        if (!preset && !anyValue()) { toast('入力が空です', 'err'); return; }
         var v = values();
         return api('/api/setup/' + svc.key + '/authorize', 'POST',
             { clientId: v.clientId, clientSecret: v.clientSecret })
@@ -1299,12 +1325,33 @@
         });
       }));
     }
-    if (svc.docUrl) {
+    if (svc.docUrl && !preset) {
       var a = el('a', 'doc', 'トークンの取り方 ↗');
       a.href = svc.docUrl; a.target = '_blank'; a.rel = 'noopener noreferrer';
       row.appendChild(a);
     }
-    box.appendChild(row);
+
+    if (preset) {
+      // 用意済みのときは、入力欄を「別の値を使う」の中に畳む。
+      // 自分のキーやクライアントに差し替えたい人だけが開けばよい。
+      // 同意が要るサービス (Google) はボタンだけが表に出る ―― 押すだけで終わる。
+      if (svc.flow === 'oauth') box.appendChild(row);
+      var dd = document.createElement('details');
+      var ds = document.createElement('summary');
+      ds.textContent = '別の値を使う';
+      dd.appendChild(ds);
+      dd.appendChild(fieldBox);
+      if (svc.flow !== 'oauth') dd.appendChild(row);
+      if (svc.docUrl) {
+        var da = el('a', 'doc', '取り方 ↗');
+        da.href = svc.docUrl; da.target = '_blank'; da.rel = 'noopener noreferrer';
+        dd.appendChild(da);
+      }
+      box.appendChild(dd);
+    }
+    else {
+      box.appendChild(row);
+    }
 
     if (svc.help) {
       var d = document.createElement('details');
@@ -1337,7 +1384,11 @@
         box.appendChild(el('div', 'why', '連携ライブラリを読み込めていないため、ここからは設定できません。'));
         return;
       }
-      (r.body.services || []).forEach(function (svc) {
+      // 無いと動かないものを先頭に。設定の順番は「まずこれ」が分かる形にする。
+      var list = (r.body.services || []).slice().sort(function (a, b) {
+        return (b.required ? 1 : 0) - (a.required ? 1 : 0);
+      });
+      list.forEach(function (svc) {
         box.appendChild(setupForm(svc, function () {
           openConnections();
           refresh(true);
@@ -1358,6 +1409,14 @@
       btn.title = off.length
         ? (off.map(function (s) { return s.label; }).join(' / ') + ' が未接続です')
         : '外部サービスとの接続';
+
+      // 「無いと動かない」ものだけは、ボタンの数字ではなく本文で言う。
+      var must = off.filter(function (s) { return s.required; });
+      setupWarn = must.length
+        ? (must.map(function (s) { return s.label; }).join(' / ')
+           + ' が未設定のため、通知は取り込まれてもカードになりません。')
+        : '';
+      renderWarnings();
     }).catch(function () { });
   }
 
@@ -1528,7 +1587,8 @@
 
     box.appendChild(el('h4', null, '接続'));
     box.appendChild(rows([
-      ['接続', '外部サービスの資格情報をこの画面で入れる。未接続の数がボタンに出る'],
+      ['接続', 'Claude の API キーと外部サービスの資格情報をこの画面で入れる。未接続の数がボタンに出る'],
+      ['Claude が未設定', '通知は取り込まれるがカードにならない。上部の警告から入力でき、入れた直後に動き出す'],
       ['設定カード', '権限不足で止まったカード。開くと入力欄が出て、その場で設定できる'],
       ['設定したあと', '保存 → 疎通確認 → 待っていたカードを「要対応」に戻す、までが自動で走る'],
       ['値の扱い', 'DPAPI で暗号化して保存する。画面には戻らない']
@@ -1548,7 +1608,7 @@
       ['承認が必要', 'コマンド実行、外部への通信、作業フォルダ外への書き込み・読み取り、Gmail 下書きの作成'],
       ['取り消せない', 'メール送信と Slack への投稿。承認画面に宛先と本文が全文出る。既定は下書きまでで、送信は指示したときだけ'],
       ['作業中 / 承認待ち', 'ヘッダに対象カードと内容が出る'],
-      ['停止中 / 未起動', 'phase4\\Start-Worker.ps1 を実行すると動き出す']
+      ['停止中 / 未起動', '「通知コレクター」を起動し直すと動き出す。API キーが未設定のあいだは起動しない']
     ]));
 
     box.appendChild(el('h4', null, '承認'));

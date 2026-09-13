@@ -23,6 +23,8 @@
 #   トークンそのものは決して返さない。
 
 . "$PSScriptRoot\SecretStore.ps1"
+# API キーの取得元 (環境変数 / 保管庫 / 配布設定) の判定はここに集約してある。
+. "$PSScriptRoot\..\..\lib\ApiKey.ps1"
 
 # サービスの定義。画面はこれを読んで入力欄を組み立てる。
 #
@@ -31,6 +33,31 @@
 #   fields   … 画面に出す入力欄。secret=$true は伏せ字で受け取り、値は返さない。
 #   flow     … 'token' は貼るだけ。'oauth' はブラウザの同意画面を通る。
 $script:SetupServices = @(
+    @{
+        key   = 'anthropic'
+        label = 'Claude'
+        flow  = 'token'
+        # これだけは「あると便利」ではない。無ければカードが1枚も作られない。
+        # 以前は起動時に環境変数が無いと起動そのものを拒んでいたが、それだと
+        # 配った先では画面すら出ず、直し方を出す場所が無かった。ここに入口を作る。
+        required = $true
+        why   = '通知の判定とワーカーの作業に使います。これが無いとカードは作られません。'
+        docUrl = 'https://console.anthropic.com/settings/keys'
+        help  = @'
+console.anthropic.com にサインインし、Settings → API keys で
+「Create Key」を押すと sk-ant- で始まる文字列が出ます。これを貼ってください。
+キーは一度しか表示されません。控えを無くしたら作り直せます。
+
+このアプリは支払いの設定された組織のキーを使います。
+会社で配られている場合は、配った人に聞いてください
+(配る人が config\app-config.json に入れておけば、この欄は空のままで繋がります)。
+'@
+        secrets = @('anthropic.apiKey')
+        fields  = @(
+            @{ name = 'apiKey'; label = 'API キー'; secret = $true; required = $true
+               placeholder = 'sk-ant-...' }
+        )
+    },
     @{
         key   = 'github'
         label = 'GitHub'
@@ -53,24 +80,35 @@ classic token なら repo スコープでまとめて足ります。
     @{
         key   = 'slack'
         label = 'Slack'
-        flow  = 'token'
-        why   = 'メンションと DM の取得、元スレッドへの投稿。'
+        # Google と同じく同意画面を通す。以前は xoxb- / xoxp- を貼る方式だったが、
+        # **その画面に入れるのはアプリを作れる人だけ**で、配った先では永久に埋まらない
+        # 空欄になっていた。ここを同意画面に変えると、配る人が用意するのは
+        # アプリ (client id / secret) だけで済み、トークンは各自が自分の分を取る。
+        flow  = 'oauth'
+        why   = '自分に届いたメンションと DM の取得、元スレッドへの返信。'
         docUrl = 'https://api.slack.com/apps'
         help  = @'
-アプリを作り、OAuth & Permissions で以下を足してインストールします。
-  Bot Token Scopes : channels:history groups:history im:history mpim:history
-                     channels:read groups:read im:read mpim:read users:read
-                     chat:write (投稿する場合)
-Bot は招待されたチャンネルしか読めません。夜のあいだの DM まで拾いたい場合は、
-同じ範囲を User Token Scopes にも足して xoxp- のトークンを入れてください
-(読み取りにだけ使います。投稿は Bot 名義のままです)。
+配る人が Slack アプリを1つ作り、クライアント ID とシークレットを控えます。
+OAuth & Permissions の User Token Scopes に以下を足してください
+(Bot Token Scopes は要りません)。
+  channels:history groups:history im:history mpim:history
+  channels:read    groups:read    im:read    mpim:read
+  users:read  files:read  chat:write
+
+Redirect URLs には中継ページの URL を登録します (Slack は HTTPS しか受け付けず、
+127.0.0.1 を直接登録できないため)。ページは docs\slack-oauth-redirect.html を
+そのまま公開したもので、転送以外は何もしません。
+
+「Slack に接続する」を押すと同意画面が開き、許可すると戻ってきます。
+読み書きは自分の権限で行われ、返信も自分の名義になります。
+Bot 名義で投稿したい場合だけ、端末から Bot トークンを足せます:
+  .\phase5\Connect-Service.ps1 -Service slack
 '@
-        secrets = @('slack.botToken', 'slack.userToken', 'slack.selfUserId')
+        secrets = @('slack.clientId', 'slack.clientSecret', 'slack.userToken', 'slack.selfUserId')
         fields  = @(
-            @{ name = 'botToken';  label = 'Bot User OAuth Token'; secret = $true; required = $false
-               placeholder = 'xoxb-...' },
-            @{ name = 'userToken'; label = 'User OAuth Token'; secret = $true; required = $false
-               placeholder = 'xoxp-...'; hint = '入れると、Bot が居ないチャンネルや DM も読めます' }
+            @{ name = 'clientId';     label = 'クライアント ID'; secret = $false; required = $true
+               placeholder = '1234567890.1234567890123' },
+            @{ name = 'clientSecret'; label = 'クライアント シークレット'; secret = $true; required = $true }
         )
     },
     @{
@@ -113,6 +151,8 @@ function Get-SetupService {
 function Test-SetupConfigured {
     param([Parameter(Mandatory)] [string] $Key)
     switch ((Get-SetupService $Key).key) {
+        # キーは保管庫以外 (環境変数・配布設定) にも居られるので、置き場所ごと判定する。
+        'anthropic' { return [bool] (Test-AnthropicConfigured) }
         'github' { return [bool] (Get-Secret -Name 'github.token') }
         'slack'  { return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken')) }
         'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken') -and (Get-Secret -Name 'gmail.clientId')) }
@@ -133,6 +173,12 @@ function Get-SetupStatusList {
             docUrl     = $s.docUrl
             configured = (Test-SetupConfigured -Key $s.key)
             account    = (Get-SetupAccount -Key $s.key)
+            # これが無いとアプリが成立しないもの。画面はこれを先頭に出す。
+            required   = [bool] $s.required
+            # 配る人が用意済みで、利用者は押すだけでよいもの。
+            # 入力欄を出すと「自分で取ってこい」に見えるので、画面から隠す判断に使う。
+            preset     = (Test-SetupPreset -Key $s.key)
+            managed    = (Get-SetupManagedNote -Key $s.key)
             fields     = @($s.fields | ForEach-Object {
                 [pscustomobject]@{
                     name = $_.name; label = $_.label; secret = [bool] $_.secret
@@ -143,6 +189,51 @@ function Get-SetupStatusList {
         }
     }
     return $out
+}
+
+# 配る人が用意した値が既にあるか。
+#
+# Google の OAuth クライアントも Slack のアプリも、**利用者の権限では作れない**ことが多い。
+# それを空欄として画面に出すと、そこは永久に埋まらないまま「未接続」が残る。
+# 用意済みなら入力欄を出さず、押すだけの形にする。
+function Test-SetupPreset {
+    param([Parameter(Mandatory)] [string] $Key)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { return $false }
+    switch ($svc.key) {
+        'anthropic' {
+            # 環境変数と配布設定は利用者が触れない場所。そこに既にあるなら入力は要らない。
+            if ($env:ANTHROPIC_API_KEY) { return $true }
+            return [bool] (Get-AppConfigValue -Path 'anthropic.apiKey')
+        }
+        'google' {
+            # 同意そのものは本人が押す。ここで言う「用意済み」はクライアントの ID と秘密。
+            if ((Get-Secret -Name 'gmail.clientId') -and (Get-Secret -Name 'gmail.clientSecret')) { return $true }
+            return [bool] ((Get-AppConfigValue -Path 'google.clientId') -and (Get-AppConfigValue -Path 'google.clientSecret'))
+        }
+        'slack' {
+            # Slack は中継ページも要る。3つ揃って初めて「押すだけ」になる。
+            $c = Get-SlackClientCredential
+            return [bool] ($c.clientId -and $c.clientSecret -and $c.redirectUri)
+        }
+    }
+    return $false
+}
+
+# 用意済みのときに画面へ出す一言。「入力欄が無い」理由が分からないと不安になる。
+function Get-SetupManagedNote {
+    param([Parameter(Mandatory)] [string] $Key)
+    if (-not (Test-SetupPreset -Key $Key)) { return '' }
+    $svc = Get-SetupService $Key
+    switch ($svc.key) {
+        'anthropic' {
+            if ($env:ANTHROPIC_API_KEY) { return 'この PC の環境変数に設定されています。' }
+            return '配布時に設定されています。入力は要りません。'
+        }
+        'google' { return '接続に使う情報は配布時に設定されています。ボタンを押して Google の画面で許可してください。' }
+        'slack'  { return '接続に使う情報は配布時に設定されています。ボタンを押して Slack の画面で許可してください。' }
+    }
+    return ''
 }
 
 # 「どのアカウントとして繋がっているか」。ネットワークには出ない
@@ -190,6 +281,7 @@ function Save-SetupCredential {
 
     try {
         switch ($svc.key) {
+            'anthropic' { Set-Secret -Name 'anthropic.apiKey' -Value ([string] $Values['apiKey']).Trim() }
             'github' { Set-Secret -Name 'github.token' -Value ([string] $Values['token']).Trim() }
             'slack'  {
                 foreach ($pair in @(@('botToken', 'slack.botToken'), @('userToken', 'slack.userToken'))) {
@@ -221,6 +313,22 @@ function Test-SetupConnection {
 
     try {
         switch ($svc.key) {
+            'anthropic' {
+                # 一番安いエンドポイントで1回だけ叩く。貼り間違いをここで捕まえないと、
+                # 次に気付くのは「取り込みは動いているのにカードが増えない」という形になる。
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $key = Get-AnthropicApiKey
+                if (-not $key) { return [pscustomobject]@{ ok = $false; error = '未設定です。' } }
+                try {
+                    [void] (Invoke-RestMethod -Uri 'https://api.anthropic.com/v1/models?limit=1' -TimeoutSec 20 `
+                        -Headers @{ 'x-api-key' = $key; 'anthropic-version' = '2023-06-01' })
+                }
+                catch {
+                    return [pscustomobject]@{ ok = $false; error = (Get-AnthropicErrorMessage $_) }
+                }
+                # アカウント名は API から取れない。キーそのものは決して画面に返さない。
+                return [pscustomobject]@{ ok = $true; account = ''; note = '' }
+            }
             'github' {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
                 $tok = Get-Secret -Name 'github.token'
@@ -240,8 +348,8 @@ function Test-SetupConnection {
                     Set-Secret -Name 'slack.selfUserId' -Value ([string] $r.user_id)
                 }
                 elseif (-not (Get-Secret -Name 'slack.selfUserId')) {
-                    $note = 'メンションを拾うには自分のユーザーIDが要ります。User Token を入れるか、' +
-                            '.\phase5\Connect-Service.ps1 -Service slack で設定してください。'
+                    $note = 'メンションを拾うには自分のユーザーIDが要ります。「Slack に接続する」から' +
+                            '同意画面を通すと自動で入ります。'
                 }
                 return [pscustomobject]@{ ok = $true; account = ("{0} / {1}" -f $r.team, $r.user); note = $note }
             }
@@ -260,6 +368,40 @@ function Test-SetupConnection {
     return [pscustomobject]@{ ok = $false; error = '確認できませんでした。' }
 }
 
+# キーの確認に失敗したときの文言。
+#
+# 例外の文言は「(401) 権限がありません」だけで、理由は応答の本文にしかない。
+# 配った先で一番多いのは「貼り損ね」と「残高切れ」で、どちらも直し方が違う。
+# 「失敗しました」だけ出しても、受け取った人には次の一手が無い。
+function Get-AnthropicErrorMessage {
+    param($ErrorRecord)
+    $status = $null
+    if ($ErrorRecord.Exception.Response) {
+        try { $status = [int] $ErrorRecord.Exception.Response.StatusCode } catch { }
+    }
+    $detail = ''
+    $raw = ''
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) { $raw = [string] $ErrorRecord.ErrorDetails.Message }
+    if (-not $raw -and $ErrorRecord.Exception.Response) {
+        try {
+            $sr = New-Object IO.StreamReader($ErrorRecord.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+            try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose() }
+        } catch { }
+    }
+    if ($raw) {
+        try { $detail = [string] ($raw | ConvertFrom-Json).error.message } catch { $detail = '' }
+    }
+
+    switch ($status) {
+        401 { return ('キーが受け付けられませんでした。貼り間違いか、無効にされたキーです。' + $(if ($detail) { " ($detail)" } else { '' })) }
+        403 { return ('このキーでは使えませんでした。' + $(if ($detail) { " ($detail)" } else { '' })) }
+        429 { return '短時間に送りすぎています。少し待ってからもう一度試してください。' }
+    }
+    if ($detail -match 'credit|balance') { return ('残高が足りないようです。' + $detail) }
+    if ($detail) { return $detail }
+    return $ErrorRecord.Exception.Message
+}
+
 # ---------------------------------------------------------------- OAuth (Google)
 #
 # 同意画面からの戻り先は**カンバン自身**にする。
@@ -271,6 +413,24 @@ function Test-SetupConnection {
 # 任意のポートで許すので、カンバンのポートがそのまま使える。
 
 $script:PendingGoogleAuth = $null
+
+function Get-GoogleClientCredential {
+    <#
+      .SYNOPSIS
+        同意画面に使うクライアントを決める。画面の入力 → 保管庫 → 配布設定 の順。
+      .DESCRIPTION
+        Google Cloud でプロジェクトを作れる人は限られている。配る人が用意してあるなら、
+        利用者に ID と秘密を貼らせる理由は無い ―― 押すだけで同意画面まで行けるようにする。
+    #>
+    param([string] $ClientId, [string] $ClientSecret)
+    $cid = ([string] $ClientId).Trim()
+    $sec = ([string] $ClientSecret).Trim()
+    if (-not $cid) { $cid = [string] (Get-Secret -Name 'gmail.clientId') }
+    if (-not $sec) { $sec = [string] (Get-Secret -Name 'gmail.clientSecret') }
+    if (-not $cid) { $cid = [string] (Get-AppConfigValue -Path 'google.clientId') }
+    if (-not $sec) { $sec = [string] (Get-AppConfigValue -Path 'google.clientSecret') }
+    return [pscustomobject]@{ clientId = $cid; clientSecret = $sec }
+}
 
 function Get-GoogleAuthRequest {
     <#
@@ -300,6 +460,143 @@ function Get-GoogleAuthRequest {
         "&scope=$([Uri]::EscapeDataString($scopes))" +
         "&access_type=offline&prompt=consent&state=$state"
     return [pscustomobject]@{ url = $url; state = $state }
+}
+
+function Get-SlackClientCredential {
+    <#
+      .SYNOPSIS
+        Slack の同意画面に使うアプリと戻り先を決める。画面の入力 → 保管庫 → 配布設定 の順。
+      .DESCRIPTION
+        戻り先 (中継ページ) だけは配布設定にしか置かない。**利用者が決める値ではない**
+        ―― Slack アプリ側に登録済みの URL と一字一句合っている必要があり、
+        画面から変えられるようにすると合わなくなるだけである。
+      .OUTPUTS
+        [pscustomobject] clientId / clientSecret / redirectUri
+    #>
+    param([string] $ClientId, [string] $ClientSecret)
+    $cid = ([string] $ClientId).Trim()
+    $sec = ([string] $ClientSecret).Trim()
+    if (-not $cid) { $cid = [string] (Get-Secret -Name 'slack.clientId') }
+    if (-not $sec) { $sec = [string] (Get-Secret -Name 'slack.clientSecret') }
+    if (-not $cid) { $cid = [string] (Get-AppConfigValue -Path 'slack.clientId') }
+    if (-not $sec) { $sec = [string] (Get-AppConfigValue -Path 'slack.clientSecret') }
+    $redirect = [string] (Get-AppConfigValue -Path 'slack.redirectUrl')
+    return [pscustomobject]@{ clientId = $cid; clientSecret = $sec; redirectUri = $redirect }
+}
+
+$script:PendingSlackAuth = $null
+
+function Get-SlackAuthRequest {
+    <#
+      .SYNOPSIS
+        Slack の同意画面の URL を組み立て、戻ってきたときに照合する state を控える。
+      .DESCRIPTION
+        Slack は戻り先に HTTPS を要求するので、Google のように 127.0.0.1 を
+        直接登録できない。そこで戻り先は**転送しかしない静的な中継ページ**にして、
+        そこから http://127.0.0.1:<ポート>/oauth/slack/callback に戻してもらう。
+
+        中継ページはポート番号を知らないので、**state に埋めて渡す。**
+        形は "<ポート>.<乱数>"。乱数の側は戻ってきたときの照合に使う (CSRF 対策)
+        ので、ポートを載せたぶんだけ弱くならないよう乱数はそのまま持たせる。
+
+        **認可コードは中継ページを通るが、それだけでは何もできない。**
+        引き換えには client secret が要り、それは手元にしか無い。
+      .OUTPUTS
+        [pscustomobject] url / state / redirectUri
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $ClientId,
+        [Parameter(Mandatory)] [string] $ClientSecret,
+        [Parameter(Mandatory)] [string] $RedirectUri,
+        [Parameter(Mandatory)] [int] $BoardPort
+    )
+    if ($RedirectUri -notmatch '^https://') {
+        throw 'Slack の戻り先は https:// でなければなりません (中継ページの URL を設定してください)。'
+    }
+    if ($BoardPort -le 0 -or $BoardPort -gt 65535) { throw 'ポート番号が不正です。' }
+
+    $scopes = if ($script:SlackUserScopes) { $script:SlackUserScopes -join ',' } else {
+        'channels:history,groups:history,im:history,mpim:history,channels:read,groups:read,im:read,mpim:read,users:read,files:read,chat:write'
+    }
+    $authUrl = if ($script:SlackAuth) { $script:SlackAuth } else { 'https://slack.com/oauth/v2/authorize' }
+
+    $nonce = [guid]::NewGuid().ToString('N')
+    $state = "{0}.{1}" -f $BoardPort, $nonce
+    # シークレットはここでは保存しない。同意が返ってくるまでメモリに置く。
+    $script:PendingSlackAuth = @{
+        state = $state; clientId = $ClientId.Trim(); clientSecret = $ClientSecret.Trim()
+        redirectUri = $RedirectUri; createdAt = (Get-Date)
+    }
+    # user_scope だけを求める。scope (Bot 用) は空のままにする ――
+    # 空にしておけば、ワークスペースに Bot が増えない。
+    $url = "$authUrl" +
+        "?client_id=$([Uri]::EscapeDataString($ClientId.Trim()))" +
+        "&user_scope=$([Uri]::EscapeDataString($scopes))" +
+        "&redirect_uri=$([Uri]::EscapeDataString($RedirectUri))" +
+        "&state=$state"
+    return [pscustomobject]@{ url = $url; state = $state; redirectUri = $RedirectUri }
+}
+
+function Complete-SlackAuth {
+    <#
+      .SYNOPSIS
+        中継ページ経由で戻ってきた認可コードを引き換えて保存する。
+      .OUTPUTS
+        [pscustomobject] ok / account / error
+    #>
+    param([string] $Code, [string] $State, [string] $OAuthError)
+
+    $p = $script:PendingSlackAuth
+    if (-not $p) { return [pscustomobject]@{ ok = $false; error = '設定の途中経過が見つかりません。もう一度やり直してください。' } }
+    if (((Get-Date) - $p.createdAt).TotalMinutes -gt 10) {
+        $script:PendingSlackAuth = $null
+        return [pscustomobject]@{ ok = $false; error = '時間切れです。もう一度やり直してください。' }
+    }
+    if (-not $State -or $State -ne $p.state) {
+        return [pscustomobject]@{ ok = $false; error = 'state が一致しません。中断しました。' }
+    }
+    if ($OAuthError) {
+        $script:PendingSlackAuth = $null
+        return [pscustomobject]@{ ok = $false; error = ("Slack 側で中断されました: {0}" -f $OAuthError) }
+    }
+    if (-not $Code) { return [pscustomobject]@{ ok = $false; error = '認可コードを受け取れませんでした。' } }
+
+    $tokenUrl = if ($script:SlackToken) { $script:SlackToken } else { 'https://slack.com/api/oauth.v2.access' }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $resp = Invoke-RestMethod -Uri $tokenUrl -Method Post -TimeoutSec 30 -Body @{
+            code = $Code; client_id = $p.clientId; client_secret = $p.clientSecret
+            redirect_uri = $p.redirectUri
+        }
+    }
+    catch {
+        return [pscustomobject]@{ ok = $false; error = ("トークンの取得に失敗しました: {0}" -f $_.Exception.Message) }
+    }
+    # Slack は HTTP 200 で ok:false を返す。握り潰すと「繋がったのに何も取れない」になる。
+    if (-not $resp.ok) {
+        return [pscustomobject]@{ ok = $false; error = ("Slack が受け付けませんでした: {0}" -f $resp.error) }
+    }
+    $userToken = [string] $resp.authed_user.access_token
+    if (-not $userToken) {
+        return [pscustomobject]@{
+            ok = $false
+            error = 'ユーザートークンが返りませんでした。アプリの User Token Scopes が空になっていないか確認してください。'
+        }
+    }
+
+    Set-Secret -Name 'slack.clientId'     -Value $p.clientId
+    Set-Secret -Name 'slack.clientSecret' -Value $p.clientSecret
+    Set-Secret -Name 'slack.userToken'    -Value $userToken
+    # 掃き寄せのメンション判定に使う「自分」。同意した本人なので、ここで確定する
+    # (Bot トークンの頃は auth.test が Bot を返すため、別途聞く必要があった)。
+    if ($resp.authed_user.id) { Set-Secret -Name 'slack.selfUserId' -Value ([string] $resp.authed_user.id) }
+    $script:PendingSlackAuth = $null
+    $script:SlackSelfId = $null
+
+    $check = Test-SetupConnection -Key 'slack'
+    if (-not $check.ok) { return [pscustomobject]@{ ok = $false; error = $check.error } }
+    Set-SetupAccount -Key 'slack' -Account $check.account
+    return [pscustomobject]@{ ok = $true; account = $check.account; note = $check.note }
 }
 
 function Complete-GoogleAuth {

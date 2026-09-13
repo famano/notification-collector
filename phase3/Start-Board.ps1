@@ -29,6 +29,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
+# 要求を通すかどうかの判定 (Host / Origin)。壊れても画面には何も出ない場所なので、
+# ボードを起動せずに確かめられる形にしてある。
+. "$PSScriptRoot\lib\RequestGuard.ps1"
 # トリアージ方針。カンバンから直せるようにする (気付いた場所で直せないと直されない)。
 . "$PSScriptRoot\..\phase2\lib\Policy.ps1"
 $script:PolicyPath = $PolicyPath
@@ -448,8 +451,12 @@ function Invoke-Route {
     if ($path -eq '/api/setup/google/authorize' -and $method -eq 'POST') {
         if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
         $b = Read-JsonBody $Context
-        $cid = if ($b) { [string] $b.clientId } else { '' }
-        $sec = if ($b) { [string] $b.clientSecret } else { '' }
+        # 入力が空でも、配る人が用意したクライアントがあればそれで進む。
+        # 「Google Cloud でプロジェクトを作ってください」は、配った先では行き止まりになる。
+        $given = Get-GoogleClientCredential -ClientId $(if ($b) { [string] $b.clientId } else { '' }) `
+                                            -ClientSecret $(if ($b) { [string] $b.clientSecret } else { '' })
+        $cid = [string] $given.clientId
+        $sec = [string] $given.clientSecret
         if (-not $cid.Trim() -or -not $sec.Trim()) {
             Write-JsonResponse $Context @{ ok = $false; error = 'クライアント ID とシークレットを入力してください' } 400
             return
@@ -459,6 +466,60 @@ function Invoke-Route {
         $redirect = "http://127.0.0.1:$script:BoardPort/oauth/google/callback"
         $req = Get-GoogleAuthRequest -ClientId $cid -ClientSecret $sec -RedirectUri $redirect
         Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $req.url; redirectUri = $redirect })
+        return
+    }
+
+    # Slack も同意が要るが、Google と違って**戻り先に HTTPS を要求する。**
+    # 127.0.0.1 を直接登録できないので、戻り先は転送しかしない中継ページにして、
+    # そこから下の /oauth/slack/callback に戻してもらう。
+    # ポート番号は中継ページが知らないので state に埋めて渡す。
+    if ($path -eq '/api/setup/slack/authorize' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $b = Read-JsonBody $Context
+        $given = Get-SlackClientCredential -ClientId $(if ($b) { [string] $b.clientId } else { '' }) `
+                                           -ClientSecret $(if ($b) { [string] $b.clientSecret } else { '' })
+        if (-not ([string] $given.clientId).Trim() -or -not ([string] $given.clientSecret).Trim()) {
+            Write-JsonResponse $Context @{ ok = $false; error = 'クライアント ID とシークレットを入力してください' } 400
+            return
+        }
+        if (-not ([string] $given.redirectUri).Trim()) {
+            # ここが無いと同意画面まで行けない。配る人の作業なので、そう言う。
+            Write-JsonResponse $Context @{
+                ok = $false
+                error = '中継ページの URL が設定されていません (config\app-config.json の slack.redirectUrl)。配布元に確認してください。'
+            } 400
+            return
+        }
+        try {
+            $r = Get-SlackAuthRequest -ClientId $given.clientId -ClientSecret $given.clientSecret `
+                    -RedirectUri $given.redirectUri -BoardPort $script:BoardPort
+        }
+        catch {
+            Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400
+            return
+        }
+        Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $r.url; redirectUri = $r.redirectUri })
+        return
+    }
+
+    if ($path -eq '/oauth/slack/callback' -and $method -eq 'GET') {
+        $q = @{}
+        foreach ($pair in (([string] $req.Url.Query).TrimStart('?') -split '&')) {
+            $kv = $pair -split '=', 2
+            if ($kv.Count -eq 2) { $q[$kv[0]] = [Uri]::UnescapeDataString($kv[1]) }
+        }
+        $result = if (-not $script:Connectors) {
+            [pscustomobject]@{ ok = $false; error = '連携を読み込めていません' }
+        } else {
+            Complete-SlackAuth -Code $q['code'] -State $q['state'] -OAuthError $q['error']
+        }
+
+        $resumed = 0
+        if ($result.ok) {
+            $done = Invoke-SetupCompletion -Conn $Conn -Service 'slack' -Account $result.account
+            $resumed = $done.resumed
+        }
+        Write-OAuthResultPage -Context $Context -Result $result -Resumed $resumed
         return
     }
 
@@ -885,22 +946,44 @@ function Invoke-Route {
 # ---------------------------------------------------------------- main
 
 $conn     = Open-TaskStore -Path $DbPath
-# OAuth の戻り先を組み立てるのに要る。戻り先は「いま開いているカンバン」。
-$script:BoardPort = $Port
-$listener = New-Object System.Net.HttpListener
-$listener.Prefixes.Add("http://127.0.0.1:$Port/")
-$listener.Prefixes.Add("http://localhost:$Port/")
 
-try {
-    $listener.Start()
+# ポートが埋まっていたら、隣を試す。
+#
+# 既定の 8787 が別のアプリに使われている PC は珍しくない。そこで諦めると、
+# 監視役が延々と起動し直すだけになり、画面は最後まで開かない ――
+# 配った先では「アイコンを押しても何も起きない」としか見えず、直しようがない。
+# 戻り先 (OAuth) は実際に開いたポートで組み立てるので、ずれても同意は通る。
+$listener = $null
+foreach ($p in $Port..($Port + 9)) {
+    $l = New-Object System.Net.HttpListener
+    $l.Prefixes.Add("http://127.0.0.1:$p/")
+    $l.Prefixes.Add("http://localhost:$p/")
+    try {
+        $l.Start()
+        if ($p -ne $Port) {
+            Write-Host ("ポート {0} は使われていたので {1} で開きました" -f $Port, $p) -ForegroundColor Yellow
+        }
+        $Port = $p
+        $listener = $l
+        break
+    }
+    catch { try { $l.Close() } catch { } }
 }
-catch {
-    Write-Host "ポート $Port を開けませんでした: $($_.Exception.Message)" -ForegroundColor Red
+if (-not $listener) {
+    Write-Host ("ポート {0} から {1} まで、どれも開けませんでした。" -f $Port, ($Port + 9)) -ForegroundColor Red
+    Write-Host '  config\app-config.json の startup.port を空いている番号に変えてください。' -ForegroundColor DarkGray
     $conn.Dispose()
     return
 }
 
+# OAuth の戻り先を組み立てるのに要る。戻り先は「いま開いているカンバン」。
+$script:BoardPort = $Port
+
 $url = "http://localhost:$Port/"
+# 実際に開いたポートを残す。監視役 (Start.ps1) はこれを読んで、
+# ずれていれば本当の URL を出す ―― 案内した番号が違うと、
+# 「開かない」と言われたときに見に行く先まで間違える。
+try { Set-Setting -Conn $conn -Key 'board.url' -Value $url } catch { }
 Write-Host "カンバンボード: $url" -ForegroundColor Green
 Write-Host "停止するには Ctrl+C" -ForegroundColor DarkGray
 if (-not $NoBrowser) { Start-Process $url }
@@ -909,19 +992,13 @@ try {
     while ($listener.IsListening) {
         $ctx = $listener.GetContext()
         try {
-            # DNS リバインディング対策。127.0.0.1 バインドでも Host は検証しておく。
-            $hostHeader = $ctx.Request.Headers['Host']
-            # 状態を変える要求は Origin も見る。ブラウザは別サイトからの POST に
-            # 必ず Origin を付けるので、外のページが localhost を叩いて
-            # 削除や送信を起こす経路をここで塞ぐ。同一オリジンからは付かないか、
-            # 自分自身の Origin が付く。
-            $origin = $ctx.Request.Headers['Origin']
-            $badOrigin = ($ctx.Request.HttpMethod -ne 'GET' -and $origin -and
-                          $origin -notmatch "^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
-            if ($hostHeader -and $hostHeader -notmatch '^(localhost|127\.0\.0\.1)(:\d+)?$') {
+            # 通すかどうかの判定は lib\RequestGuard.ps1 にある
+            # (ボードを起動しないと確かめられない場所に置くと、確かめられない)。
+            if (-not (Test-AllowedHost -HostHeader $ctx.Request.Headers['Host'])) {
                 $ctx.Response.StatusCode = 400
             }
-            elseif ($badOrigin) {
+            elseif (-not (Test-AllowedOrigin -Method $ctx.Request.HttpMethod `
+                            -Origin $ctx.Request.Headers['Origin'] -Port $Port)) {
                 $ctx.Response.StatusCode = 403
             }
             else {

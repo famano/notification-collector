@@ -29,3 +29,7 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# 配布設定。配る人が用意した資格情報 (Google の OAuth クライアント、API キー) が
+# 平文で入るのでコミットしない。見本は config/app-config.sample.json。
+config/app-config.json
