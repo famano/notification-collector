@@ -468,9 +468,13 @@ function Get-GraphSelfId {
 }
 
 # Graph の $filter に入れる日時。UTC の ISO8601 で、引用符は付けない。
+#
+# 書式指定の ':' は「その文化圏の時刻区切り」に置き換わる。既定の文化圏に任せると、
+# 区切りが ':' でない環境で $filter が壊れる (症状は「なぜか新着が 0 件」)。
+# 通信に載せる文字列なので固定の文化圏で組む。
 function ConvertTo-GraphTime {
     param([Parameter(Mandatory)] [DateTime] $Value)
-    return $Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    return $Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
 }
 
 # ---------------------------------------------------------------- Outlook (メール)
