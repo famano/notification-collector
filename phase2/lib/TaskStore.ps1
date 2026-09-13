@@ -955,6 +955,18 @@ function Get-NextWorkItem {
     catch { $Conn.Rollback(); throw }
 }
 
+# カードに載っている「あなたにしかできない1手」。無ければ $null。
+#
+# ワーカーはこれを変数で持ち回らない。ツール実行はクロージャの中で起きていて、
+# そこでの代入は外に伝わらないため (実際それで、報告の先頭に出るはずの1手が
+# 一度も出ていなかった)。DB に書いたものを読み直すのが唯一確かな経路になる。
+function Get-TaskHumanStep {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $r = @($Conn.Query('SELECT human_step FROM tasks WHERE id = ?', [object[]] @($TaskId)))
+    if ($r.Count -eq 0 -or -not $r[0]['human_step']) { return $null }
+    try { return ([string] $r[0]['human_step'] | ConvertFrom-Json) } catch { return $null }
+}
+
 function Get-TaskDetail {
     param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
     $rows = @($Conn.Query('SELECT * FROM tasks WHERE id = ?', [object[]] @($TaskId)))
