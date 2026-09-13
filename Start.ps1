@@ -159,6 +159,14 @@ try {
     if ($imported.Count -gt 0) {
         Write-Host ("配布設定から資格情報を取り込みました ({0} 件)" -f $imported.Count) -ForegroundColor DarkGray
     }
+    [void] (Protect-AppConfigFile)
+    # 取り込みが済んでも、平文のキーはファイルに残り続ける。フォルダごとコピーすれば
+    # 一緒に運ばれ、バックアップにも同期フォルダにも残る。もう消してよいことは、
+    # 言わないと伝わらない (そして、たいてい消されないまま配り直される)。
+    if (Test-AppConfigHasPlainSecrets) {
+        Write-Host '  config\app-config.json に資格情報が平文で残っています。' -ForegroundColor DarkYellow
+        Write-Host '  保管庫に入っているので、該当の欄は空にしてかまいません。' -ForegroundColor DarkGray
+    }
 }
 catch {
     Write-Host ("配布設定を取り込めませんでした: {0}" -f $_.Exception.Message) -ForegroundColor Yellow

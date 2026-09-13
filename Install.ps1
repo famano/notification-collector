@@ -170,6 +170,7 @@ if ($imported.Count -gt 0) {
     Write-Step ("配布設定から {0} 件の資格情報を取り込みました" -f $imported.Count)
     Write-Note '(値は暗号化して保存しました。config\app-config.json からは消してかまいません)'
 }
+try { [void] (Protect-AppConfigFile) } catch { }
 
 $keyOk = $false
 try { $keyOk = Test-AnthropicConfigured } catch { }

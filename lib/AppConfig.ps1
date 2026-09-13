@@ -18,6 +18,15 @@
 #   このファイルは平文の JSON である。暗号化された保管庫 (SecretStore) の代わりでは
 #   なく、その入口でしかない。Import-AppConfigSecrets が起動時に DPAPI の保管庫へ
 #   取り込むので、**取り込んだあとは配布設定から資格情報を消してよい。**
+#
+# 何から守れないか (ここを誤解すると配り方を間違える):
+#   - **同じ Windows ユーザーで動くプロセスからは守れない。** 平文 JSON も DPAPI の
+#     保管庫も、そのユーザーとして動くものには等しく読める。DPAPI の境界は
+#     「ユーザーとマシン」であって「アプリケーション」ではない。
+#   - **渡した相手からは守れない。** 同梱したキーは、受け取った人が読んで
+#     他のアプリに貼れる。ここに書いてよいのは「その人達と共有してよいキー」だけで、
+#     嫌なら空のまま配り、各自に画面から入れてもらう。
+#   守れるのは、別アカウント・別 PC への持ち出しと、置き場所の事故だけ。
 
 $script:AppConfigCache     = $null
 $script:AppConfigCacheTime = [DateTime]::MinValue
@@ -157,4 +166,33 @@ function Import-AppConfigSecrets {
         }
     }
     return $imported
+}
+
+function Test-AppConfigHasPlainSecrets {
+    <#
+      .SYNOPSIS
+        配布設定に平文の資格情報がまだ残っているか。
+      .DESCRIPTION
+        取り込みが済んだあとも、このファイルには平文のキーが残り続ける。
+        フォルダごとコピーされれば一緒に運ばれ、バックアップにも同期フォルダにも残る。
+        「もう消してよい」ことは言わないと伝わらないので、起動時に一度出す。
+    #>
+    foreach ($cfgName in $script:AppConfigSecretMap.Keys) {
+        if (Get-AppConfigValue -Path $cfgName) { return $true }
+    }
+    return $false
+}
+
+function Protect-AppConfigFile {
+    <#
+      .SYNOPSIS
+        配布設定を、このユーザーだけが読める状態にする。
+      .DESCRIPTION
+        平文で置く以上、せめて他のアカウントからは見えないようにする。
+        暗号化の代わりにはならない (同じユーザーのプロセスには読める)。
+    #>
+    $p = Get-AppConfigPath
+    if (-not (Test-Path $p)) { return $false }
+    if (-not (Get-Command Set-PrivateFileAcl -ErrorAction SilentlyContinue)) { return $false }
+    return (Set-PrivateFileAcl -Path $p)
 }

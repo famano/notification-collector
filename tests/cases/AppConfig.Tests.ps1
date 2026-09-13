@@ -100,6 +100,46 @@ Describe '配布設定から保管庫への取り込み' {
     }
 }
 
+Describe '平文で残った資格情報' {
+
+    It '残っていれば気付ける (取り込み済みでも消えはしない)' {
+        [void] (Set-TestConfig '{ "anthropic": { "apiKey": "sk-ant-x" } }')
+        Assert-True (Test-AppConfigHasPlainSecrets)
+    }
+
+    It '資格情報以外しか書かれていなければ黙る' {
+        [void] (Set-TestConfig '{ "startup": { "port": 8787 } }')
+        Assert-False (Test-AppConfigHasPlainSecrets)
+    }
+
+    It 'ファイルが無ければ黙る' {
+        $env:NOTIFICATION_COLLECTOR_CONFIG = Join-Path $script:CfgDir 'gone.json'
+        Assert-False (Test-AppConfigHasPlainSecrets)
+    }
+}
+
+Describe 'ファイルの見え方' {
+
+    # 同じユーザーのプロセスからは守れない。ここで見ているのは
+    # 「同居している別アカウントに読まれない」ところまで。
+    if ($null -ne $IsWindows -and -not $IsWindows) {
+        Skip-It '保管庫は自分だけが読める権限で書かれる' 'Windows ではありません'
+    }
+    else {
+        It '保管庫は自分だけが読める権限で書かれる' {
+            $store = Join-Path (New-TestTempDir) 'secrets.dat'
+            Set-Secret -Name 'anthropic.apiKey' -Value 'sk-ant-x' -Path $store
+            $acl = Get-Acl -LiteralPath $store
+            Assert-True $acl.AreAccessRulesProtected '継承が切られていません'
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            foreach ($r in $acl.Access) {
+                Assert-Equal $me ($r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value) `
+                    '自分以外に権限が残っています'
+            }
+        }
+    }
+}
+
 Describe 'API キーの取得元' {
 
     It '環境変数が最優先 (開発機の従来どおりの動きを変えない)' {
