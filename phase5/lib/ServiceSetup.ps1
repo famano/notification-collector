@@ -76,6 +76,58 @@ Bot は招待されたチャンネルしか読めません。夜のあいだの 
         )
     },
     @{
+        key   = 'chatwork'
+        label = 'Chatwork'
+        flow  = 'token'
+        why   = 'ダイレクトチャットと自分宛メンションの取得、同じ部屋への投稿。'
+        docUrl = 'https://www.chatwork.com/service/packages/chatwork/subpackages/api/token.php'
+        help  = @'
+Chatwork の個人設定から API トークンを発行して貼るだけです。
+
+  1. 右上のアカウント名 →「サービス連携」→「API Token」
+  2. パスワードを入れて表示されたトークンを控える
+
+読むのも書くのも同じトークンです。拾うのは
+  ・ダイレクトチャットに来たもの
+  ・[To:自分] や返信で名指しされたもの
+の2つだけで、グループの流量そのものはカードにしません ([toall] も拾いません)。
+
+注意: Chatwork 側のメール通知を併用していると、同じ用件でメールのカードと
+Chatwork のカードが2枚立ちます。繋いだらメール通知は切るのが早いです。
+'@
+        secrets = @('chatwork.token', 'chatwork.selfAccountId')
+        fields  = @(
+            @{ name = 'token'; label = 'API トークン'; secret = $true; required = $true }
+        )
+    },
+    @{
+        key   = 'backlog'
+        label = 'Backlog'
+        flow  = 'token'
+        why   = '自分宛のお知らせ (担当に設定・コメント) の取得と、課題へのコメント投稿。'
+        docUrl = 'https://support-ja.backlog.com/hc/ja/articles/360035641754'
+        help  = @'
+個人設定から API キーを発行し、スペースのアドレスと一緒に入れてください。
+
+  1. 右上のアイコン →「個人設定」→「API」→「登録」で API キーを発行
+  2. スペースのアドレス (example.backlog.jp) を控える
+     https:// やその後ろのパスは付いていてもかまいません
+
+Backlog には「自分宛のお知らせ」の API があるので、掃き寄せも選別も要りません。
+**既読にはしません** ―― 同期が利用者の画面からお知らせを消すべきではないため、
+「どこまで取ったか」はこちら側で持ちます。
+
+注意: Backlog のメール通知を併用していると、同じ用件でメールのカードと
+Backlog のカードが2枚立ちます。繋いだらメール通知は切るのが早いです。
+'@
+        secrets = @('backlog.apiKey', 'backlog.space')
+        fields  = @(
+            @{ name = 'space';  label = 'スペースのアドレス'; secret = $false; required = $true
+               placeholder = 'example.backlog.jp' },
+            @{ name = 'apiKey'; label = 'API キー'; secret = $true; required = $true }
+        )
+    },
+    @{
         key   = 'microsoft'
         label = 'Microsoft 365 (Outlook / Teams)'
         flow  = 'device'
@@ -140,6 +192,8 @@ $script:SetupAliases = @{
     # Outlook も Teams も入口は同じアプリ登録なので、設定カードは1枚に束ねる。
     outlook = 'microsoft'; teams = 'microsoft'; ms = 'microsoft'
     'graph.microsoft.com' = 'microsoft'; 'login.microsoftonline.com' = 'microsoft'
+    'api.chatwork.com' = 'chatwork'; 'chatwork.com' = 'chatwork'
+    'backlog.jp' = 'backlog'; 'backlog.com' = 'backlog'; 'backlogtool.com' = 'backlog'
 }
 
 function Get-SetupService {
@@ -159,6 +213,8 @@ function Test-SetupConfigured {
         'slack'  { return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken')) }
         'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken') -and (Get-Secret -Name 'gmail.clientId')) }
         'microsoft' { return [bool] ((Get-Secret -Name 'ms.refreshToken') -and (Get-Secret -Name 'ms.clientId')) }
+        'chatwork'  { return [bool] (Get-Secret -Name 'chatwork.token') }
+        'backlog'   { return [bool] ((Get-Secret -Name 'backlog.apiKey') -and (Get-Secret -Name 'backlog.space')) }
     }
     return $false
 }
@@ -235,6 +291,18 @@ function Save-SetupCredential {
     try {
         switch ($svc.key) {
             'github' { Set-Secret -Name 'github.token' -Value ([string] $Values['token']).Trim() }
+            'chatwork' { Set-Secret -Name 'chatwork.token' -Value ([string] $Values['token']).Trim() }
+            'backlog' {
+                # スペースは https:// やパスが付いたまま貼られがち。保存の時点で均す
+                # (毎回の呼び出しで直すと、直し漏れた1箇所が 404 になる)。
+                # 均す側はコネクタが持っている。読み込まれていないなら保存しない ――
+                # 生のまま保存すると「設定済みなのに全部 404」になる。
+                if (-not (Get-Command Get-BacklogSpace -ErrorAction SilentlyContinue)) {
+                    throw 'Backlog 連携が読み込まれていません。'
+                }
+                Set-Secret -Name 'backlog.space'  -Value (Get-BacklogSpace ([string] $Values['space']))
+                Set-Secret -Name 'backlog.apiKey' -Value ([string] $Values['apiKey']).Trim()
+            }
             'slack'  {
                 foreach ($pair in @(@('botToken', 'slack.botToken'), @('userToken', 'slack.userToken'))) {
                     $v = ([string] $Values[$pair[0]]).Trim()
@@ -295,6 +363,22 @@ function Test-SetupConnection {
                 }
                 $m = Invoke-GmailApi -Path '/users/me/profile'
                 return [pscustomobject]@{ ok = $true; account = [string] $m.emailAddress; note = '' }
+            }
+            'chatwork' {
+                if (-not (Get-Command Get-ChatworkMe -ErrorAction SilentlyContinue)) {
+                    return [pscustomobject]@{ ok = $false; error = 'Chatwork 連携が読み込まれていません。' }
+                }
+                $me = Get-ChatworkMe
+                # 掃き寄せで「自分の発言」とメンションを見分けるのに要る。ここで分かるので聞かない。
+                if ($me.id) { Set-Secret -Name 'chatwork.selfAccountId' -Value $me.id }
+                return [pscustomobject]@{ ok = $true; account = $me.name; note = '' }
+            }
+            'backlog' {
+                if (-not (Get-Command Get-BacklogMe -ErrorAction SilentlyContinue)) {
+                    return [pscustomobject]@{ ok = $false; error = 'Backlog 連携が読み込まれていません。' }
+                }
+                $me = Get-BacklogMe
+                return [pscustomobject]@{ ok = $true; account = ("{0} / {1}" -f (Get-BacklogSpace), $me.name); note = '' }
             }
             'microsoft' {
                 if (-not (Get-Command Get-GraphMe -ErrorAction SilentlyContinue)) {

@@ -40,6 +40,8 @@ try {
     . "$PSScriptRoot\..\phase5\lib\SlackConnector.ps1"
     . "$PSScriptRoot\..\phase5\lib\GmailConnector.ps1"
     . "$PSScriptRoot\..\phase5\lib\GraphConnector.ps1"
+    . "$PSScriptRoot\..\phase5\lib\ChatworkConnector.ps1"
+    . "$PSScriptRoot\..\phase5\lib\BacklogConnector.ps1"
     # 資格情報の設定をカンバンから行うための層。設定カードの出口はここ。
     . "$PSScriptRoot\..\phase5\lib\ServiceSetup.ps1"
     . "$PSScriptRoot\lib\SetupFlow.ps1"
@@ -208,6 +210,8 @@ function Get-OpenLinkLabel {
     if ($Url -match '^https?://mail\.google\.com/')                          { return 'Gmail で開く' }
     if ($Url -match '^https?://outlook\.(office|office365|live)\.com/')      { return 'Outlook で開く' }
     if ($Url -match '^https?://teams\.microsoft\.com/')                      { return 'Teams で開く' }
+    if ($Url -match '^https?://(www\.)?chatwork\.com/')                      { return 'Chatwork で開く' }
+    if ($Url -match '^https?://[^/]+\.(backlog\.(jp|com)|backlogtool\.com)/') { return 'Backlog で開く' }
     if ($Url -match '^msteams:')                                             { return 'Teams で開く' }
     if ($Url -match '^mailto:')                                              { return 'メールを書く' }
     if ($App) { return "$App で開く" }
@@ -289,6 +293,38 @@ function Get-TaskOutlet {
             }
         }
         catch { }   # 投稿先を引けないだけ。カードは「実施」として扱えばよい
+    }
+
+    if (([string] $Event['source']) -eq 'chatwork' -and (Test-ChatworkConfigured)) {
+        try {
+            $tg = Get-ChatworkTarget -Link ([string] $Event['link'])
+            if ($tg) {
+                return [pscustomobject]@{
+                    kind    = 'chatwork'
+                    label   = ("{0} へ投稿" -f $tg.roomName)
+                    to      = $tg.roomName
+                    subject = ''
+                }
+            }
+        }
+        catch { }
+    }
+
+    if (([string] $Event['source']) -eq 'backlog' -and (Test-BacklogConfigured)) {
+        $key = ''
+        try { $key = [string] ([string] $Event['raw_json'] | ConvertFrom-Json).issueKey } catch { }
+        if (-not $key) {
+            $ref = ConvertFrom-BacklogLink ([string] $Event['link'])
+            if ($ref) { $key = $ref.issueKey }
+        }
+        if ($key) {
+            return [pscustomobject]@{
+                kind    = 'backlog'
+                label   = ("課題 {0} へコメント" -f $key)
+                to      = $key
+                subject = ''
+            }
+        }
     }
 
     if (([string] $Event['link']) -like 'msteams://*' -and (Test-GraphConfigured)) {
@@ -923,6 +959,20 @@ function Invoke-Route {
                                 -ReplyToMessageId ([string] $raw.id))
                         $sentTo = $outlet.to
                         $permalink = ''
+                    }
+                    elseif ($outlet.kind -eq 'chatwork') {
+                        $tg = Get-ChatworkTarget -Link ([string] $d.event['link'])
+                        $acct = ''
+                        try { $acct = [string] ([string] $d.event['raw_json'] | ConvertFrom-Json).accountId } catch { }
+                        $r = Send-ChatworkMessage -RoomId $tg.roomId -Text $text `
+                                -ReplyToAccountId $acct -ReplyToMessageId $tg.messageId
+                        $sentTo = $tg.roomName
+                        $permalink = $r.permalink
+                    }
+                    elseif ($outlet.kind -eq 'backlog') {
+                        $r = Add-BacklogComment -IssueKey $outlet.to -Content $text
+                        $sentTo = ("課題 {0}" -f $outlet.to)
+                        $permalink = $r.permalink
                     }
                     elseif ($outlet.kind -eq 'teams') {
                         $tg = Get-TeamsTarget -Link ([string] $d.event['link'])

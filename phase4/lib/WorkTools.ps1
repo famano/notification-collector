@@ -344,6 +344,30 @@ $script:TeamsSendTool = @{
     }
 }
 
+$script:ChatworkSendTool = @{
+    name        = 'send_chatwork_message'
+    description = '元の Chatwork の部屋に投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。元の発言への返信として投稿される。一度投稿すると取り消せないので、利用者が送信を求めている場合にだけ使う。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text = @{ type = 'string'; description = '投稿する本文。そのまま投稿される。' }
+        }
+        required = @('text')
+    }
+}
+
+$script:BacklogCommentTool = @{
+    name        = 'add_backlog_comment'
+    description = '元の Backlog の課題にコメントを投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。通知先は課題の既定の関係者だけで、追加の宛先は指定できない。一度投稿すると取り消せない。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text = @{ type = 'string'; description = 'コメント本文。そのまま投稿される。' }
+        }
+        required = @('text')
+    }
+}
+
 # 人間にしかできない1手でカードを閉じる。
 #
 # これは「失敗」ではなく正式な出口。ホテルの本人確認リンク、Windows Hello での
@@ -398,6 +422,8 @@ function Get-WorkTools {
     param(
         [switch] $HasSlackTarget,
         [switch] $HasTeamsTarget,
+        [switch] $HasChatworkTarget,
+        [switch] $HasBacklogTarget,
         [switch] $HasOutlet
     )
     $tools = @($script:WorkTools)
@@ -416,6 +442,12 @@ function Get-WorkTools {
         $tools += $script:OutlookSendTool
         # Teams の投稿は投稿先が要る。カードの元通知が Teams でなければ出さない。
         if ($HasTeamsTarget) { $tools += $script:TeamsSendTool }
+    }
+    if ($HasChatworkTarget -and (Get-Command Test-ChatworkConfigured -ErrorAction SilentlyContinue) -and (Test-ChatworkConfigured)) {
+        $tools += $script:ChatworkSendTool
+    }
+    if ($HasBacklogTarget -and (Get-Command Test-BacklogConfigured -ErrorAction SilentlyContinue) -and (Test-BacklogConfigured)) {
+        $tools += $script:BacklogCommentTool
     }
     # 人間送りの出口は常に見せる。ただし呼べるかどうかは別で、
     # 実際に手を動かした証跡が無ければワーカーが呼び出し時に差し戻す
@@ -506,7 +538,8 @@ function Get-HumanStepHeadline {
 # 呼び出し側は「もう一度やらせる」判断の前にこれを見る。
 function Test-IrreversibleTool {
     param([Parameter(Mandatory)] [string] $Name, $ToolInput)
-    if (@('send_gmail', 'send_slack_message', 'send_outlook_mail', 'send_teams_message') -contains $Name) { return $true }
+    if (@('send_gmail', 'send_slack_message', 'send_outlook_mail', 'send_teams_message',
+          'send_chatwork_message', 'add_backlog_comment') -contains $Name) { return $true }
     # 書き込みメソッドの http_request も戻せない。承諾した招待は取り消せないし、
     # 送った出欠は相手に見えている。修正ラウンドで同じ POST をもう一度
     # 投げないよう、送信と同じ扱いにする。
@@ -533,7 +566,9 @@ function Get-ToolRisk {
         [string] $SlackChannelName,
         [string] $GmailThreadLabel,
         [string] $TeamsChatName,
-        [string] $OutlookThreadLabel
+        [string] $OutlookThreadLabel,
+        [string] $ChatworkRoomName,
+        [string] $BacklogIssueKey
     )
 
     switch ($Name) {
@@ -564,6 +599,22 @@ function Get-ToolRisk {
                 risky   = $true
                 summary = "Teams に投稿します: $where"
                 detail  = "投稿先: $where`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+            }
+        }
+        'send_chatwork_message' {
+            $where = if ($ChatworkRoomName) { $ChatworkRoomName } else { '(元の通知の部屋)' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Chatwork に投稿します: $where"
+                detail  = "投稿先: $where`n形式: 元の発言への返信として`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+            }
+        }
+        'add_backlog_comment' {
+            $where = if ($BacklogIssueKey) { $BacklogIssueKey } else { '(元の通知の課題)' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Backlog の課題にコメントします: $where"
+                detail  = "投稿先: 課題 $where`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。課題の関係者に通知が飛びます。"
             }
         }
         'send_outlook_mail' {
@@ -731,6 +782,12 @@ function Invoke-WorkTool {
         [string] $OutlookMessageId,
         # Teams から来たカードの場合の投稿先。
         [string] $TeamsChatId,
+        # Chatwork から来たカードの場合の投稿先と、返信先の発言。
+        [string] $ChatworkRoomId,
+        [string] $ChatworkMessageId,
+        [string] $ChatworkAccountId,
+        # Backlog から来たカードの場合のコメント先。
+        [string] $BacklogIssueKey,
         # open_source が取り直す対象。モデルは「どのカードの出自か」を
         # 指定できない。指定できるようにすると、別のカードの中身を
         # 読ませる指示が通ってしまう。
@@ -782,6 +839,31 @@ function Invoke-WorkTool {
                 $link = if ($r.permalink) { " {0}" -f $r.permalink } else { '' }
                 return [pscustomobject]@{
                     text     = ("Teams のチャットに投稿しました。取り消しはできません。{0}" -f $link)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'send_chatwork_message' {
+                if (-not (Get-Command Send-ChatworkMessage -ErrorAction SilentlyContinue)) {
+                    throw 'Chatwork 連携が設定されていません。'
+                }
+                if (-not $ChatworkRoomId) { throw 'このカードには Chatwork の投稿先がありません。' }
+                $r = Send-ChatworkMessage -RoomId $ChatworkRoomId -Text ([string] $ToolInput.text) `
+                        -ReplyToAccountId $ChatworkAccountId -ReplyToMessageId $ChatworkMessageId
+                return [pscustomobject]@{
+                    text     = ("Chatwork に投稿しました。取り消しはできません。{0}" -f $r.permalink)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'add_backlog_comment' {
+                if (-not (Get-Command Add-BacklogComment -ErrorAction SilentlyContinue)) {
+                    throw 'Backlog 連携が設定されていません。'
+                }
+                if (-not $BacklogIssueKey) { throw 'このカードには Backlog の課題がありません。' }
+                $r = Add-BacklogComment -IssueKey $BacklogIssueKey -Content ([string] $ToolInput.text)
+                return [pscustomobject]@{
+                    text     = ("Backlog の課題 {0} にコメントしました。取り消しはできません。{1}" -f $BacklogIssueKey, $r.permalink)
                     artifact = $null
                     isError  = $false
                 }

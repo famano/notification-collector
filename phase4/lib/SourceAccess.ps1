@@ -343,6 +343,61 @@ function Get-SourceContext {
         }
     }
 
+    # ---- Chatwork
+    if ($source -eq 'chatwork') {
+        if (-not ((Get-Command Test-ChatworkConfigured -ErrorAction SilentlyContinue) -and (Test-ChatworkConfigured))) {
+            $empty.kind = 'chatwork'
+            $empty.note = 'Chatwork 連携が未設定のため取り直せません。'
+            return $empty
+        }
+        $t = Get-ChatworkThread -Link $link
+        if (-not $t) {
+            $empty.kind = 'chatwork'
+            $empty.note = 'このリンクから Chatwork の部屋を特定できませんでした。'
+            return $empty
+        }
+        $ref = ConvertFrom-ChatworkLink $link
+        $ids = @{ roomId = $ref.roomId; messageId = $ref.messageId; permalink = $t.permalink }
+        if ($raw -and $raw.accountId) { $ids['senderAccountId'] = [string] $raw.accountId }
+        return [pscustomobject]@{
+            ok = $true; kind = 'chatwork'
+            text = Limit-SourceText $t.text
+            attachments = @()
+            identifiers = $ids
+            links = Get-LinksFromText $t.text
+            note = ''
+        }
+    }
+
+    # ---- Backlog
+    if ($source -eq 'backlog') {
+        if (-not ((Get-Command Test-BacklogConfigured -ErrorAction SilentlyContinue) -and (Test-BacklogConfigured))) {
+            $empty.kind = 'backlog'
+            $empty.note = 'Backlog 連携が未設定のため取り直せません。'
+            return $empty
+        }
+        $key = ''
+        if ($raw -and $raw.issueKey) { $key = [string] $raw.issueKey }
+        if (-not $key) {
+            $ref = ConvertFrom-BacklogLink $link
+            if ($ref) { $key = $ref.issueKey }
+        }
+        if (-not $key) {
+            $empty.kind = 'backlog'
+            $empty.note = 'このカードに課題の識別子が残っていません。'
+            return $empty
+        }
+        $c = Get-BacklogIssueContext -IssueKey $key
+        return [pscustomobject]@{
+            ok = [bool] $c.text.Trim(); kind = 'backlog'
+            text = Limit-SourceText $c.text
+            attachments = @()
+            identifiers = @{ issueKey = $c.issueKey; summary = $c.summary; permalink = $c.permalink }
+            links = Get-LinksFromText $c.text
+            note = ''
+        }
+    }
+
     # ---- Slack
     if ($link -like 'slack://*') {
         if (-not ((Get-Command Test-SlackConfigured -ErrorAction SilentlyContinue) -and (Test-SlackConfigured))) {

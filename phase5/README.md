@@ -14,9 +14,11 @@
 | `lib/SlackConnector.ps1` | 掃き寄せ、スレッド全文の取得、スレッドへの投稿 |
 | `lib/GmailConnector.ps1` | OAuth、本文取得、本物の下書き作成、送信 |
 | `lib/GraphConnector.ps1` | Microsoft Graph。Outlook のメールと Teams のチャット |
+| `lib/ChatworkConnector.ps1` | Chatwork。DM とメンションの掃き寄せ、同じ部屋への投稿 |
+| `lib/BacklogConnector.ps1` | Backlog。自分宛のお知らせ、課題へのコメント |
 | `lib/HtmlText.ps1` | HTML を平文に落とす (メールも Teams も本文が HTML で来る) |
 | `Connect-Service.ps1` | 設定ウィザード |
-| `Sync-Sources.ps1` | Slack / Teams の掃き寄せ・補完と、Gmail / Outlook の取り込み |
+| `Sync-Sources.ps1` | Slack / Teams / Chatwork の掃き寄せ・補完と、Gmail / Outlook / Backlog の取り込み |
 | `Reset-SlackContext.ps1` | 補完に失敗した印を消して再試行させる |
 
 ## watermark 同期
@@ -29,6 +31,8 @@
 | `sync.gmail.lastInternalDate` | ここまでの Gmail は取り込んだ |
 | `sync.teams.lastTs` | ここまでの Teams は読んだ |
 | `sync.outlook.lastReceived` | ここまでの Outlook は取り込んだ |
+| `sync.chatwork.lastTs` | ここまでの Chatwork は読んだ |
+| `sync.backlog.lastCreated` | ここまでの Backlog のお知らせは取り込んだ |
 
 - **初回や記録が無いときは直近 24 時間**まで遡る。長くすると初回に大量のカードが立つ。
 - **取り切れたときだけ進める。** 一時的な理由 (レート制限・通信断) で読めなかった会話が
@@ -58,6 +62,8 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service slack
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service gmail
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service microsoft
+powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service chatwork
+powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service backlog
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Test
 ```
 
@@ -230,6 +236,60 @@ Gmail と Outlook は**別の種類の鍵**にしてある。束ねてよいの�
 - チャットの添付は SharePoint / OneDrive 上のファイルへの参照で、開くには別の権限
   (`Files.Read`) が要る。いまは本文中のリンクとして渡すところまで
 
+## Chatwork
+
+API トークンを1本貼るだけ。読むのも書くのも同じトークンで、
+個人設定の「サービス連携 → API Token」から発行する。
+
+- 掃き寄せ — `/rooms` を並べ、**最終更新が watermark より新しい部屋だけ**
+  `/rooms/{id}/messages` を読む。部屋の数だけ叩くことになるので、ここで落とせる分は落とす
+  (レート制限は 5 分あたりで決まっている)。
+- 拾うのは2種類だけ。**ダイレクトチャット**と、**`[To:自分]` / 返信で名指しされたもの**。
+  `[toall]` は拾わない ―― 全員宛の連絡は「自分に用がある」とは限らず、
+  グループの数だけカードが増える。
+- 本文は Chatwork 記法のまま載せない。`[To:…]` は `@名前` に、引用は
+  「（引用ここから）」に均す。**中身は落とさない** ―― 引用も情報ブロックも判断材料そのもの。
+- 投稿 — `send_chatwork_message`。元の発言への返信 (`[rp aid=… to=…]`) として投稿する。
+  投稿先はカードの元通知から束縛され、モデルは指定できない。
+
+**`force=0` は使わない。**「前回の続き」をサーバ側が覚えている方式で、
+二度目は空で返る。こちらの watermark と二重管理になり、同期が失敗した回のぶんが
+どちらからも拾われないまま消える。`force=1` で直近を取り、`send_time` で自分で切る。
+
+**1部屋あたり 100 件が上限。**上限に当たった部屋があった周回は watermark を進めない
+(進めると、あふれた分が永久に入らない)。
+
+## Backlog
+
+API キーとスペースのアドレス (`example.backlog.jp`) を入れる。
+スペースは `https://` やパスが付いたまま貼られても保存時に均す。
+
+**このアプリで唯一、掃き寄せが要らない経路。**`/notifications` が
+「担当に設定された」「コメントが付いた」といった**自分宛の出来事だけ**を
+新しい順に返すので、選別はサーバ側で済んでいる。
+
+- 取り込み — お知らせを watermark 以降で取り、古い順にイベントにする。
+  1ページ (既定 100 件) に収まらなかったら進めない。
+- **既読にはしない。** `/notifications/{id}/markAsRead` はあるが、押すと利用者の
+  Backlog の画面からお知らせが消える。同期が利用者の画面を書き換えてよい理由はない。
+- 取り直し — カードの課題キーで、課題の本文と直近のコメントをまとめて読む。
+- コメント — `add_backlog_comment`。宛先 (`notifiedUserId`) は渡さない。
+  渡せる形にすると、カードの文面から通知先を作ることになり、
+  「宛先はカードの出自から束縛する」という原則が崩れる。
+
+**API キーはクエリ文字列にしか載せられない** (Backlog の API キー認証は
+Authorization ヘッダを受け付けない)。そのため**汎用 HTTP ツールには資格情報を注入しない** ――
+注入するとモデルに見せる URL と承認画面にキーが載る。Backlog を叩くのはこのコネクタ経由だけ。
+
+## メール通知との二重取り
+
+Chatwork も Backlog も、既定ではメールでも通知を送る。両方が生きていると
+**同じ用件でメールのカードと Chatwork / Backlog のカードが2枚立つ。**
+突き合わせ (`dedup_key`) は通知と同期の1対1しか結ばないので、ここは自動では畳めない
+(メールの件名の形はサービス側の都合で変わるため、それに合わせに行くと壊れやすい)。
+
+**繋いだらサービス側のメール通知を切るのが早い。**設定の画面にもそう書いてある。
+
 ## 資格情報の扱い
 
 DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する。
@@ -253,8 +313,8 @@ DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する
 | Gmail / Google カレンダー | 実装済み | 取り込み・下書き・送信・出欠 |
 | GitHub | 実装済み | 調査・招待の承諾 (汎用 HTTP に資格情報を注入) |
 | **Microsoft 365 (Outlook / Teams)** | **実装した** | 上の節のとおり |
-| Chatwork | 可能。未実装 | API トークン1本で読み書きできる。次に足すならここ |
-| Backlog | 可能。未実装 | API キー1本。「自分宛のお知らせ」の API がある |
+| **Chatwork** | **実装した** | API トークン1本。DM とメンションの掃き寄せ、同じ部屋への投稿 |
+| **Backlog** | **実装した** | API キー1本。「自分宛のお知らせ」をそのまま取り込む |
 | Google Chat | 可能。未実装 | 既存の Google クライアントにスコープを足すだけで済む |
 | LINE WORKS | 部分的 | Bot が入っているトークルームだけ |
 | Jira / Confluence (Atlassian) | 部分的 | 課題とコメントは読めるが、通知の受信箱そのものは無い |
@@ -267,30 +327,18 @@ DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する
 | X (旧 Twitter) | 実質不可 | DM の読み取りは有料階層。費用が用途に見合わない |
 | WhatsApp | 不可 | Business Platform は事業者番号宛のみ |
 
-### 次に足すならこの3つ
+### 次に足すなら Google Chat
 
-いずれも「自分宛が読める」「投稿できる」「追加インストールが要らない」を満たす。
-**Chatwork と Backlog は貼るだけのトークン**なので、設定の画面も既存の
-`flow = 'token'` がそのまま使える。
-
-**Chatwork** — `https://api.chatwork.com/v2`。個人設定で API トークンを発行し、
-`X-ChatWorkToken` ヘッダに入れる。`GET /rooms` で部屋を並べ、
-`GET /rooms/{room_id}/messages?force=1` で直近 100 件、`POST` で投稿できる。
-注意が2つ: **1リクエストで 100 件が上限**なので watermark と相性を見ること
-(`force=0` は「未取得ぶん」を返し、二度目は空になる ―― 同期の取りこぼしを作りやすいので
-`force=1` と `message_id` での突き合わせのほうが安全)。もう1つはレート制限
-(応答の `x-ratelimit-*` ヘッダ。300 回 / 5 分)。
-
-**Backlog** — `https://<スペース>.backlog.jp/api/v2`。個人設定で API キーを発行する。
-`GET /notifications` が**そのまま「自分宛のお知らせ」**を返すので、
-掃き寄せの組み立てが要らない。コメントの投稿は
-`POST /issues/{key}/comments` (`notifiedUserId` で通知先も指定できる)。
+Chatwork と Backlog は上の節のとおり実装した。残るのはこれ。
 
 **Google Chat** — 既存の Google の OAuth クライアントに `chat.messages.readonly`
 (と投稿するなら `chat.messages`) を足すだけ。スペースの一覧には
 `chat.spaces.readonly` が要る。**Google Workspace 専用**で、個人の Google アカウントでは使えない。
 スコープを足したら**リフレッシュトークンを取り直す**こと (既存のトークンには入っていない ――
 カレンダーのときと同じ落とし穴)。
+
+ここだけ後回しにしたのは、**動いている Gmail の設定に手を入れることになる**ため。
+Chatwork と Backlog は新しいトークンを1本足すだけで、失敗しても他の経路に影響しない。
 
 ### 「部分的」と判定したもの
 
@@ -371,8 +419,29 @@ Slack の掃き寄せも、現在の Bot Token では Bot が入っているチ�
 **0 件でしか確認できていない**（メンション判定に使う自分のユーザーIDも未設定）。
 `Connect-Service.ps1 -Service slack` をもう一度流すのが最初の一歩になる。
 
-**Microsoft 365 も実アカウントでは未検証。** 手元にテナントが無いため、
-上に挙げたのはすべて応答の形を与えたうえでの確認で、実際のアプリ登録・同意・
-メールの取り込み・投稿は通していない。最初の一歩は
-`Connect-Service.ps1 -Service microsoft`（またはカンバンの「接続」）で、
-そこで `AADSTS` 番号が出たら、その番号がそのまま直すべき設定を指している。
+Chatwork / Backlog について確認したこと（`tests\cases\ChatworkBacklog.Tests.ps1`）:
+
+- Chatwork の掃き寄せ — DM は拾い、自分の発言・watermark より古いもの・`[toall]`・
+  グループの雑談は拾わないこと。名指しだけを `mention` として拾うこと
+- 最終更新が watermark より古い部屋を**開かない**こと（レート制限があるため）
+- 権限不足 (403) は恒久的な失敗として watermark を進め、429 では据え置くこと
+- **1部屋 100 件の上限に当たったら「取り切れていない」と伝える**こと
+  （ここで進めると、あふれた分が永久に入らない）
+- Chatwork 記法を均しても中身が消えないこと（引用・情報ブロック・添付の印）
+- 投稿が元の発言への返信 (`[rp aid=… to=…]`) として組み立てられること
+- Backlog のお知らせが watermark で切られ、古い順に返ること。
+  1ページに収まらなければ進めないこと
+- コメントに通知先 (`notifiedUserId`) を混ぜないこと
+- Chatwork のトークンが `Authorization` ではなく `X-ChatWorkToken` に載ること
+- **Backlog には資格情報を注入しない**こと（キーが URL にしか載せられないため）
+- 投稿・コメントの承認の要否と、投稿先がカードから束縛されていること
+
+この過程で `ConvertFrom-BacklogLink` のバグが1つ見つかっている ――
+`$Matches` が2回目の `-match` で丸ごと入れ替わり、課題キーが空になっていた。
+症状は「コメントの投稿先が消える」で、テストが無ければ実データで踏むまで分からない。
+
+**Microsoft 365 / Chatwork / Backlog とも実アカウントでは未検証。** 手元にテナントが無いため、
+手元にテナントも各サービスのアカウントも無いため、上に挙げたのはすべて
+応答の形を与えたうえでの確認で、実際の発行・同意・取り込み・投稿は通していない。
+最初の一歩はカンバンの「接続」（または `Connect-Service.ps1 -Service <名前>`）で、
+Microsoft で `AADSTS` 番号が出たら、その番号がそのまま直すべき設定を指している。

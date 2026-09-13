@@ -104,6 +104,24 @@ function Get-SubjectKey {
         return ''
     }
 
+    # Chatwork: 部屋が件。Teams のチャットと同じで、スレッドという単位が無い。
+    if ($source -eq 'chatwork') {
+        if (Get-Command ConvertFrom-ChatworkLink -ErrorAction SilentlyContinue) {
+            $ref = ConvertFrom-ChatworkLink $link
+            if ($ref) { return ('chatwork-room:{0}' -f $ref.roomId) }
+        }
+        return ''
+    }
+
+    # Backlog: 課題が件。同じ課題に何度お知らせが来ても、利用者にとっては1件の用事。
+    if ($source -eq 'backlog') {
+        if (Get-Command ConvertFrom-BacklogLink -ErrorAction SilentlyContinue) {
+            $ref = ConvertFrom-BacklogLink $link
+            if ($ref) { return ('backlog-issue:{0}' -f $ref.issueKey) }
+        }
+        return ''
+    }
+
     # 通知は「アプリ名 + 件名」。件名が無い、あるいは正規化で消えてしまう
     # (数字と記号だけ) 場合はキーを付けない。同じアプリというだけで
     # 束ねると、無関係な通知が1枚に潰れる。

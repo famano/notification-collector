@@ -6,8 +6,10 @@ Windows の通知とメールを起点に、対応の要否を判断し、実際
 ```
 [収集]              [判断]           [実行]              [操作]
 通知DB (Phase 1) ─┐
-Slack / Teams ────┼→ トリアージ ──→ ワーカー ──────→ カンバン
-Gmail / Outlook ──┘   (Phase 2)      (Phase 4)         (Phase 3)
+Slack / Teams ────┤
+Chatwork ─────────┼→ トリアージ ──→ ワーカー ──────→ カンバン
+Gmail / Outlook ──┤   (Phase 2)      (Phase 4)         (Phase 3)
+Backlog / GitHub ─┘
                                          ↑                 │
                                          └── 承認・指示・割り込み ─┘
 ```
@@ -23,7 +25,7 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 | [phase2](phase2/README.md) | 判断層とタスクストア。ルールで足切りしてから Claude で判定 |
 | [phase3](phase3/README.md) | カンバン UI。承認・割り込み・修正・アーカイブ |
 | [phase4](phase4/README.md) | ワーカー。出自を取り直し、API で実際に操作し、自己検証する |
-| [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub / Microsoft 365 (Outlook・Teams) |
+| [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub / Microsoft 365 (Outlook・Teams) / Chatwork / Backlog |
 | [tests](tests/README.md) | テスト。追加インストールもキーも要らない |
 
 ## 動かす
@@ -34,7 +36,7 @@ $env:ANTHROPIC_API_KEY = 'sk-ant-...'
 .\Start.ps1
 ```
 
-外部サービス (Slack / Gmail / GitHub / Microsoft 365) は
+外部サービス (Slack / Gmail / GitHub / Microsoft 365 / Chatwork / Backlog) は
 **カンバンのヘッダの「接続」から繋ぐ。**
 端末から設定したい場合は `.\phase5\Connect-Service.ps1 -Service slack` など。
 
@@ -162,7 +164,7 @@ googleapis.com にしか付かず、未知のホストには何も付かない�
 別の件で同じサービスを触るときにも効く。
 
 **外向きの送信は、承認を通してから行う。**
-メールの送信と Slack / Teams への投稿はできるが、実行前に必ずカンバンで止まり、
+メールの送信と Slack / Teams / Chatwork への投稿はできるが、実行前に必ずカンバンで止まり、
 宛先と本文が全文出る。既定は下書きまでで、送信するのは利用者がそう指示したときだけ。
 投稿先・返信先はモデルに決めさせず、カードの元通知から束縛して渡す。
 利用者がカンバンから直接送る場合も同じで、**宛先はサーバがカードから決め、

@@ -131,6 +131,20 @@ Describe '同一性の組み立て' {
         Assert-NotEqual $a (New-EventIdentity -Kind 'mail' -Parts @(('x' * 24), 'GitHub'))
     }
 
+    It 'Chatwork の通知も送信者と本文の頭で鍵を作る' {
+        $body = 'お世話になります。先ほどの見積について1点だけ確認させてください。'
+        $n = [pscustomobject]@{
+            aumid = 'jp.co.chatwork.desktop'; title = '山田 太郎'; body = $body
+            lines = @('山田 太郎', $body)
+        }
+        $row = @{
+            source = 'chatwork'
+            raw_json = (@{ sender = '山田 太郎'; text = $body } | ConvertTo-Json -Compress)
+        }
+        Assert-NotNull (Get-NotificationIdentity $n)
+        Assert-Equal (Get-EventIdentityFromRow -Row $row) (Get-NotificationIdentity $n)
+    }
+
     It '関係のないアプリの通知では鍵を作らない' {
         Assert-Null (Get-NotificationIdentity ([pscustomobject]@{ aumid = 'Chrome'; title = 'x'; body = 'y' }))
     }

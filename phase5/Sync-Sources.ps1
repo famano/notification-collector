@@ -25,6 +25,11 @@
        取り込む。Slack / Gmail と同じ形 (掃き寄せ → 補完 → メール) にしてあるので、
        後段 (判定・カード・ワーカー) は経路ごとの分岐を持たない。
 
+    5. Chatwork — ダイレクトチャットと自分宛メンションを掃き寄せる。
+
+    6. Backlog — 自分宛のお知らせを取り込む。ここだけ掃き寄せが要らない
+       (どれが自分宛かをサーバ側が決めてくれる唯一の経路)。
+
     すべて冪等。同じものを何度取り込んでも events の UNIQUE 制約で弾かれる。
     watermark は「取り切れた」ときだけ進める。途中で失敗したら次回もう一度読み直す。
 
@@ -49,9 +54,13 @@ param(
     [int]      $SlackMax = 30,
     [int]      $OutlookMax = 200,
     [int]      $TeamsMax = 30,
+    [int]      $ChatworkMax = 30,
+    [int]      $BacklogMax = 100,
     [switch]   $SkipSlack,
     [switch]   $SkipGmail,
-    [switch]   $SkipMicrosoft
+    [switch]   $SkipMicrosoft,
+    [switch]   $SkipChatwork,
+    [switch]   $SkipBacklog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,6 +68,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\SlackConnector.ps1"
 . "$PSScriptRoot\lib\GmailConnector.ps1"
 . "$PSScriptRoot\lib\GraphConnector.ps1"
+. "$PSScriptRoot\lib\ChatworkConnector.ps1"
+. "$PSScriptRoot\lib\BacklogConnector.ps1"
 
 # 初回や watermark が無いときにどこまで遡るか。
 # 長くすると初回に大量のカードが立つので、既定は控えめにする。
@@ -402,6 +413,144 @@ try {
                 $mark = $fetchStart.AddMinutes(-2)
                 if ($maxReceived -and $maxReceived -gt $mark) { $mark = $maxReceived }
                 Set-Setting -Conn $conn -Key 'sync.outlook.lastReceived' -Value $mark.ToString('o')
+            }
+        }
+    }
+
+    # ---------------- Chatwork: 前回の続きから拾う ----------------
+    if (-not $SkipChatwork) {
+        if (-not (Test-ChatworkConfigured)) {
+            Write-Host 'Chatwork: 未設定のため飛ばします' -ForegroundColor DarkGray
+        }
+        else {
+            $from = Get-StartPoint $conn 'sync.chatwork.lastTs'
+            Write-Host ("Chatwork: {0} 以降を掃き寄せ" -f $from.ToString('MM/dd HH:mm')) -ForegroundColor Cyan
+            $sweepStart = Get-Date
+            try {
+                if (-not (Get-ChatworkSelfId)) {
+                    # 自分が分からないとメンションを判定できず、拾えるのは DM だけになる
+                    Write-Host '  注意: 自分のアカウント ID が不明です。メンションを拾えません。' -ForegroundColor Yellow
+                }
+                $sweep = Get-ChatworkUpdates -Since $from -MaxRooms $ChatworkMax
+                $new = 0
+                foreach ($m in $sweep.messages) {
+                    $link = New-ChatworkLink -RoomId $m.roomId -MessageId $m.messageId
+                    $r = Add-Event -Conn $conn -Source 'chatwork' -SourceKey ("{0}|{1}" -f $m.roomId, $m.messageId) `
+                            -App 'Chatwork' -AppId 'chatwork' -OccurredAt $m.createdAt.ToString('o') `
+                            -Title ("{0} / {1}" -f $m.roomName, $m.sender) `
+                            -Body $m.text -Link $link `
+                            -RawJson ($m | ConvertTo-Json -Depth 6 -Compress) `
+                            -DedupKey (New-EventIdentity -Kind 'chatwork' -Parts @($m.sender, $m.text))
+                    if ($r.isNew) {
+                        $new++
+                        # link がそのままブラウザで開ける https なので permalink も同じもの。
+                        [void] $conn.NonQuery('UPDATE events SET permalink = ? WHERE id = ?',
+                            [object[]] @($link, $r.id))
+                        Write-Host ("  新規[{0}]: {1} / {2}" -f $m.reason, $m.roomName, $m.sender) -ForegroundColor Green
+                    }
+                }
+                Write-Host ("Chatwork: {0} 件該当 / {1} 件が新規" -f $sweep.messages.Count, $new) -ForegroundColor Yellow
+
+                $retryable = @($sweep.errors | Where-Object { -not $_.permanent })
+                foreach ($e in $sweep.errors) {
+                    $color = if ($e.permanent) { 'DarkGray' } else { 'Yellow' }
+                    Write-Host ("  読めない部屋: {0} ({1})" -f $e.room, $e.message) -ForegroundColor $color
+                }
+                if ($sweep.truncated) {
+                    # 1部屋 100 件の上限で切れている。進めると間が飛ぶ。
+                    Write-Host '  100 件の上限で切れた部屋があります。次回も同じ範囲を読み直します' -ForegroundColor Yellow
+                }
+                elseif ($retryable.Count -gt 0) {
+                    Write-Host ("  {0} 件を一時的な理由で読めなかったため、次回も同じ範囲を読み直します" -f $retryable.Count) -ForegroundColor Yellow
+                }
+                elseif (-not $Since) {
+                    Set-Setting -Conn $conn -Key 'sync.chatwork.lastTs' -Value $sweepStart.AddMinutes(-2).ToString('o')
+                }
+            }
+            catch {
+                Write-Host ("Chatwork: 掃き寄せに失敗しました: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            }
+        }
+    }
+
+    # ---------------- Chatwork: イベントに部屋の流れを足す ----------------
+    if (-not $SkipChatwork -and (Test-ChatworkConfigured)) {
+        $rows = @($conn.Query(
+            "SELECT id, link, body FROM events
+              WHERE source = 'chatwork' AND context_fetched IS NULL
+              ORDER BY occurred_at DESC LIMIT ?", [object[]] @($ChatworkMax)))
+        Write-Host ("Chatwork: 補完対象 {0} 件" -f $rows.Count) -ForegroundColor Cyan
+
+        foreach ($r in $rows) {
+            $id = [string] $r['id']
+            try {
+                $t = Get-ChatworkThread -Link ([string] $r['link'])
+                if (-not $t) {
+                    [void] $conn.NonQuery('UPDATE events SET context_fetched = ? WHERE id = ?',
+                        [object[]] @('unsupported', $id))
+                    continue
+                }
+                $newBody = ("{0}`n`n--- 直近のやり取り ({1} 件) ---`n{2}" -f $r['body'], $t.messageCount, $t.text)
+                [void] $conn.NonQuery('UPDATE events SET body = ?, context_fetched = ? WHERE id = ?',
+                    [object[]] @($newBody, (Get-Date).ToString('o'), $id))
+                Write-Host ("  補完: {0} ({1} 件のメッセージ)" -f $t.room, $t.messageCount) -ForegroundColor Green
+            }
+            catch {
+                Write-Host ("  失敗: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                [void] $conn.NonQuery('UPDATE events SET context_fetched = ? WHERE id = ?',
+                    [object[]] @('error', $id))
+            }
+        }
+    }
+
+    # ---------------- Backlog: 自分宛のお知らせを取り込む ----------------
+    if (-not $SkipBacklog) {
+        if (-not (Test-BacklogConfigured)) {
+            Write-Host 'Backlog: 未設定のため飛ばします' -ForegroundColor DarkGray
+        }
+        else {
+            $from = Get-StartPoint $conn 'sync.backlog.lastCreated'
+            Write-Host ("Backlog: {0} 以降のお知らせ" -f $from.ToString('MM/dd HH:mm')) -ForegroundColor Cyan
+            $fetchStart = Get-Date
+            try {
+                $res = Get-BacklogNotifications -Since $from -Max $BacklogMax
+                $new = 0
+                $maxCreated = $null
+                foreach ($n in $res.items) {
+                    # 本文は「何が起きたか」+ コメント + 課題の説明。
+                    # 課題の全文と経緯は、必要になった1枚だけワーカーが取り直す。
+                    $body = ("{0}: [{1}] {2}" -f $n.reason, $n.issueKey, $n.summary)
+                    if ($n.sender)  { $body += "`n実行者: $($n.sender)" }
+                    if ($n.comment) { $body += "`n`n--- コメント ---`n$($n.comment)" }
+                    elseif ($n.description) { $body += "`n`n--- 課題の説明 ---`n$($n.description)" }
+
+                    $r = Add-Event -Conn $conn -Source 'backlog' -SourceKey $n.id `
+                            -App 'Backlog' -AppId 'backlog' -OccurredAt $n.createdAt.ToString('o') `
+                            -Title ("[{0}] {1}" -f $n.issueKey, $n.summary) `
+                            -Body $body -Link $n.link `
+                            -RawJson ($n | ConvertTo-Json -Depth 6 -Compress)
+                    if ($r.isNew) {
+                        $new++
+                        [void] $conn.NonQuery('UPDATE events SET permalink = ? WHERE id = ?',
+                            [object[]] @($n.link, $r.id))
+                        Write-Host ("  新規: [{0}] {1}" -f $n.issueKey, $n.reason) -ForegroundColor Green
+                    }
+                    if (-not $maxCreated -or $n.createdAt -gt $maxCreated) { $maxCreated = $n.createdAt }
+                }
+                Write-Host ("Backlog: {0} 件中 {1} 件が新規" -f $res.items.Count, $new) -ForegroundColor Yellow
+
+                if ($res.truncated) {
+                    Write-Host ("  1ページ ({0} 件) に収まりませんでした。-BacklogMax を上げてもう一度実行してください" -f $BacklogMax) -ForegroundColor Yellow
+                }
+                elseif (-not $Since) {
+                    # 取り切れたので進める。新着 0 件でも書く (他の経路と同じ理由)。
+                    $mark = $fetchStart.AddMinutes(-2)
+                    if ($maxCreated -and $maxCreated -gt $mark) { $mark = $maxCreated }
+                    Set-Setting -Conn $conn -Key 'sync.backlog.lastCreated' -Value $mark.ToString('o')
+                }
+            }
+            catch {
+                Write-Host ("Backlog: 取り込みに失敗しました: {0}" -f $_.Exception.Message) -ForegroundColor Red
             }
         }
     }

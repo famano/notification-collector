@@ -304,6 +304,7 @@ function ConvertTo-IdentityText {
 #             束ねてよいのは「通知1件と同期1件」だけで、Gmail と Outlook のように
 #             同期どうしを突き合わせると、両方の受信箱に届いた同じメールが
 #             片方だけ消える (どちらが正かを決める材料がこちらに無い)。
+#   chatwork… 送信者と本文の頭。Teams と同じ理由 (トーストに主キーが載らない)。
 #   teams   … 送信者と本文の頭。Teams のトーストにはチャットIDもメッセージIDも載らないので、
 #             Slack のように主キーでは結べない。内容の一致で見るほかない。
 #             頭だけを短く (24文字) 見るのは、トーストが文面を途中で切ってくるため。
@@ -312,7 +313,7 @@ function ConvertTo-IdentityText {
 #             取り違えても失うのは通知1件で、カードが二重に立つより害が小さい。
 function New-EventIdentity {
     param(
-        [Parameter(Mandatory)] [ValidateSet('slack', 'mail', 'outlook', 'teams')] [string] $Kind,
+        [Parameter(Mandatory)] [ValidateSet('slack', 'mail', 'outlook', 'teams', 'chatwork')] [string] $Kind,
         # Mandatory を付けないこと。件名の無いメールのように材料が空のものがあり、
         # 必須にすると束縛エラーで同期ごと止まる。空は「突き合わせない」であって異常ではない。
         [AllowNull()] [AllowEmptyCollection()] [string[]] $Parts,
@@ -323,8 +324,8 @@ function New-EventIdentity {
     )
     if (-not $Parts) { return $null }
     if ($Max -le 0) {
-        # Teams だけ短い。トーストが本文を途中で切ってくるので、頭だけを見る。
-        $Max = $(if ($Kind -eq 'teams') { 24 } else { 80 })
+        # Teams と Chatwork だけ短い。トーストが本文を途中で切ってくるので、頭だけを見る。
+        $Max = $(if (@('teams', 'chatwork') -contains $Kind) { 24 } else { 80 })
     }
     $norm = @($Parts | ForEach-Object { ConvertTo-IdentityText $_ $Max })
     # 材料が欠けているものは突き合わせない。空文字どうしが一致してしまう。
@@ -388,6 +389,12 @@ function Get-NotificationIdentity {
         return New-EventIdentity -Kind 'outlook' -Parts @($subject, $N.title)
     }
 
+    # Chatwork のデスクトップ通知。title は送信者、body が本文。
+    # メッセージ ID は載らないので、Teams と同じく内容で突き合わせる。
+    if (Test-NotificationApp $N @('chatwork')) {
+        return New-EventIdentity -Kind 'chatwork' -Parts @($N.title, $N.body)
+    }
+
     # Teams のデスクトップ通知。title は送信者 (グループなら「送信者 (グループ名)」)、
     # body が本文。チャットIDもメッセージIDも載らないので内容で突き合わせる。
     # トーストは長い本文を切って出すので、頭だけを見る。
@@ -427,6 +434,7 @@ function Get-EventIdentityFromRow {
         'gmail'        { return New-EventIdentity -Kind 'mail'  -Parts @($raw.subject, (Get-MailDisplayName $raw.from)) }
         'outlook'      { return New-EventIdentity -Kind 'outlook' -Parts @($raw.subject, (Get-MailDisplayName $raw.from)) }
         'teams'        { return New-EventIdentity -Kind 'teams' -Parts @($raw.sender, $raw.text) }
+        'chatwork'     { return New-EventIdentity -Kind 'chatwork' -Parts @($raw.sender, $raw.text) }
     }
     return $null
 }

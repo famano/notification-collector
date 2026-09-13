@@ -24,6 +24,11 @@
 # ホスト → 資格情報。サフィックス一致で引く。
 # ここに無いホストには認証情報を付けない (公開 API と素の Web ページは
 # それで問題なく読める)。
+#
+# header を書くと、Authorization ではなくそのヘッダに載せる (Chatwork など)。
+# **クエリ文字列に載せる方式のサービスはここに書かない。** URL に載った時点で
+# 承認画面と作業ログにキーが残り、「トークンを URL に入れない」という
+# 全体の約束が崩れる (Backlog がこれに当たる。専用のコネクタ経由でだけ叩く)。
 $script:CredentialHosts = @(
     @{
         service  = 'github'
@@ -50,6 +55,15 @@ $script:CredentialHosts = @(
         configured = 'Test-SlackConfigured'
         scheme   = 'Bearer'
         setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service slack)'
+    },
+    @{
+        service  = 'chatwork'
+        match    = @('api.chatwork.com', 'chatwork.com')
+        label    = 'Chatwork トークン'
+        secret   = 'chatwork.token'
+        header   = 'X-ChatWorkToken'
+        scheme   = ''
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service chatwork)'
     },
     @{
         # Outlook と Teams は同じ入口 (Graph)。設定カードも1枚に束ねるので、
@@ -111,7 +125,9 @@ $script:BoundOnlyEndpoints = @(
     @{ pattern = 'graph\.microsoft\.com/[^/]+/(me|users/[^/]+)/messages/[^/]+/(send|reply|replyAll|forward)' },
     # Teams: チャットへの投稿。同じ URL の GET は会話を読むだけなので通す。
     @{ pattern = 'graph\.microsoft\.com/[^/]+/chats/[^/]+/messages'; methods = @('POST') },
-    @{ pattern = 'graph\.microsoft\.com/[^/]+/teams/[^/]+/channels/[^/]+/messages'; methods = @('POST') }
+    @{ pattern = 'graph\.microsoft\.com/[^/]+/teams/[^/]+/channels/[^/]+/messages'; methods = @('POST') },
+    # Chatwork: 部屋への投稿。GET は履歴の取得なので通す。
+    @{ pattern = 'api\.chatwork\.com/v2/rooms/\d+/messages'; methods = @('POST') }
 )
 
 function Test-BoundOnlyEndpoint {
@@ -188,8 +204,12 @@ function Get-CredentialStatus {
     }
     if (-not $token) { return $out }
     $out.state = 'ok'
+    # scheme が空なら token だけを載せる (Authorization 以外のヘッダを使うサービス)。
+    $value = if ($spec.scheme) { "{0} {1}" -f $spec.scheme, $token } else { [string] $token }
+    $header = if ($spec.header) { [string] $spec.header } else { 'Authorization' }
     $out.credential = [pscustomobject]@{
-        value = ("{0} {1}" -f $spec.scheme, $token)
+        value = $value
+        header = $header
         label = $spec.label
         setupHint = $spec.setupHint
     }
@@ -269,7 +289,7 @@ function Invoke-HttpAction {
             isError = $true
             text = 'この宛先は汎用の http_request からは叩けません。人に届くメッセージの送信は、' +
                    '宛先がカードから束縛される専用ツール (send_gmail / send_outlook_mail / ' +
-                   'send_slack_message / send_teams_message) を使ってください。'
+                   'send_slack_message / send_teams_message / send_chatwork_message) を使ってください。'
         }
     }
 
@@ -283,14 +303,24 @@ function Invoke-HttpAction {
     }
 
     # モデルが付けた認証ヘッダは捨てる。認証はホストから決まる。
+    # そのホストが使うヘッダ名 (Chatwork の X-ChatWorkToken など) も同じ扱いにする ――
+    # 残すと、こちらが載せる前にモデルの値で上書きされる余地ができる。
+    # ヘッダ名はホストの定義から決める (資格情報が取れたかどうかに関わらず)。
+    # 取れなかったときだけ素通りさせると、未設定のあいだはモデルが書いた
+    # X-ChatWorkToken がそのまま飛ぶ。カードに載った第三者の文面から
+    # トークンらしき文字列を拾って付ける、という筋道を残さない。
+    $spec = Get-HostCredentialSpec -Url $Url
+    $credHeader = 'Authorization'
+    if ($spec -and $spec.header) { $credHeader = [string] $spec.header }
+    $credStatus = Get-CredentialStatus -Url $Url
     $send = @{}
     if ($Headers) {
         foreach ($k in @($Headers.PSObject.Properties.Name)) {
             if ($k -imatch '^(authorization|cookie|proxy-authorization)$') { continue }
+            if ($k -ieq $credHeader) { continue }
             $send[$k] = [string] $Headers.$k
         }
     }
-    $credStatus = Get-CredentialStatus -Url $Url
     if ($credStatus.state -eq 'failed') {
         # 認証なしで送ると 401 が返り、「未設定」に見えてしまう。送らずに本当の理由を返す。
         return [pscustomobject]@{
@@ -301,7 +331,7 @@ function Invoke-HttpAction {
         }
     }
     $cred = $credStatus.credential
-    if ($cred) { $send['Authorization'] = $cred.value }
+    if ($cred) { $send[$credHeader] = $cred.value }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $req = @{

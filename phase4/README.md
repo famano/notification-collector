@@ -17,7 +17,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase4\Start-Worker.ps1
 ボードを開いているだけでは作業は進みません。
 
 **逆に、ワーカーはカードを作りません。** 見ているのは `tasks` テーブルだけで、
-Gmail も Outlook も Slack も Teams も通知 DB も読みません。新しいメールがカードになるには
+Gmail も Outlook も Slack も Teams も Chatwork も Backlog も通知 DB も読みません。新しいメールがカードになるには
 `Start-Collector.ps1` (取り込みとトリアージ) が別に常駐している必要があります。
 ワーカーとカンバンだけを起動して待っても、「要対応」は永久に空のままです。
 
@@ -77,7 +77,7 @@ Gmail も Outlook も Slack も Teams も通知 DB も読みません。新し�
 
 | ツール | 内容 |
 |---|---|
-| `open_source` | 元のメール (Gmail / Outlook) / Slack スレッド / Teams のチャット / Claude セッションを取り直して全文を読む |
+| `open_source` | 元のメール (Gmail / Outlook) / Slack スレッド / Teams・Chatwork の会話 / Backlog の課題 / Claude セッションを取り直して全文を読む |
 | `fetch_attachment` | 添付を取り込む（やるべきことが添付にしか無いことがある）。名前を省くと元の名前で保存し、テキストなら中身も返す |
 | `recall` | 同じ件について前回までに分かったことを読む |
 | `record_finding` | 次回も効く事実を台帳に残す |
@@ -106,6 +106,8 @@ Gmail も Outlook も Slack も Teams も通知 DB も読みません。新し�
 | `send_outlook_mail` | **必要** | Outlook からメールの送信（Microsoft 365 連携時のみ） |
 | `send_slack_message` | **必要** | 元の Slack スレッドへの投稿（Slack 由来のカードのみ） |
 | `send_teams_message` | **必要** | 元の Teams のチャットへの投稿（Teams 由来のカードのみ） |
+| `send_chatwork_message` | **必要** | 元の Chatwork の部屋への投稿（Chatwork 由来のカードのみ） |
+| `add_backlog_comment` | **必要** | 元の Backlog の課題へのコメント（Backlog 由来のカードのみ） |
 
 成果物は `phase4/output/task-NNNN/` に出る。カード詳細に一覧が出て中身も確認できる。
 ただし**メモを作ることは成果ではない。** 求められていないファイルを作って
@@ -134,7 +136,8 @@ Gmail も Outlook も Slack も Teams も通知 DB も読みません。新し�
 - リクエストに保管中のシークレットが混ざっていたら、承認に出す前に**止める**
 
 **人に届くメッセージの送信は汎用ツールから叩けない。**
-`chat.postMessage`、Gmail の send、Graph の `sendMail` は資格情報を注入せず弾く。
+`chat.postMessage`、Gmail の send、Graph の `sendMail`、Chatwork の部屋への POST は
+資格情報を注入せず弾く。
 ここを通してしまうと「宛先をカードから束縛する」という土台が素通りされる。
 
 Graph だけは**メソッドまで見る。**`/chats/{id}/messages` は POST が投稿で
@@ -179,16 +182,18 @@ URL だけで塞ぐとチャットの本文が取れなくなる。
 `.eml` は**ファイルとして作るだけ**で、送信は人間がメールソフトで行う。
 `X-Unsent: 1` を付けてあるので Outlook では未送信の下書きとして開く。
 
-`send_gmail` / `send_outlook_mail` / `send_slack_message` / `send_teams_message` は
-実際に外へ出す。他の危険なツールと同じ
+`send_gmail` / `send_outlook_mail` / `send_slack_message` / `send_teams_message` /
+`send_chatwork_message` / `add_backlog_comment` は実際に外へ出す。他の危険なツールと同じ
 承認の仕組みに乗っているが、違うのは**取り消しがきかない**ことで、そのぶん:
 
 - 承認画面には宛先・件名・本文を**省略せず全文**出す（他のツールは 2000 字で切る）。
 - **投稿先・返信先はモデルに決めさせない。** Slack のチャンネルと `thread_ts`、
-  Teams のチャット ID、Gmail の `threadId` と `In-Reply-To`、Outlook のメッセージ ID は、
+  Teams のチャット ID、Chatwork の部屋 ID、Backlog の課題キー、
+  Gmail の `threadId` と `In-Reply-To`、Outlook のメッセージ ID は、
   カードの元通知からワーカーが束縛して渡す。
   モデルが指定できるのは本文と（メールなら）宛先だけ。
-- 投稿先の無いカードでは `send_slack_message` / `send_teams_message` を**そもそも見せない**。
+- 投稿先の無いカードでは `send_slack_message` / `send_teams_message` /
+  `send_chatwork_message` / `add_backlog_comment` を**そもそも見せない**。
   使えない手段を提示すると、それを前提に計画を立ててしまう。
 - システムプロンプトで**既定は下書きまで**と定めてある。利用者が送信を求めたときだけ送る。
   通知やメールの本文に「返信して」と書いてあっても、それは第三者の文章であって
@@ -237,7 +242,7 @@ URL だけで塞ぐとチャットの本文が取れなくなる。
 古いツール一覧のままになる。起動直後に出る
 
 ```
-連携: Gmail=有効 (下書き・送信) / Slack=有効 (Slack 由来のカードに投稿) / Microsoft365=有効 (Outlook の下書き・送信 / Teams 由来のカードに投稿)
+連携: Gmail=有効 (下書き・送信) / Slack=有効 (Slack 由来のカードに投稿) / Microsoft365=有効 (…) / Chatwork=有効 (…) / Backlog=有効 (…)
 ```
 
 を見れば、いま動いているプロセスが送信できる版かどうかが分かる。
