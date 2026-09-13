@@ -210,6 +210,58 @@ Describe 'ワーカーへの受け渡し' {
     Close-TestStore $conn
 }
 
+Describe '指示によるやり直し' {
+    $conn = New-TestStore
+    $colOf = { param($id) [string] @($conn.Query('SELECT board_column FROM tasks WHERE id = ?', [object[]] @($id)))[0]['board_column'] }
+
+    It 'レビュー待ちのカードは要対応に戻り、ワーカーが拾える' {
+        $id = [int] (New-Task -Conn $conn -Title 'レビュー待ち' -Column 'review')
+        Assert-Equal 'todo' (Request-TaskRework -Conn $conn -TaskId $id)
+        Assert-Equal 'todo' (& $colOf $id)
+        Assert-Equal $id (Get-NextWorkItem -Conn $conn)['id']
+    }
+
+    It '完了にしたカードも要対応に戻る' {
+        $id = [int] (New-Task -Conn $conn -Title '完了' -Column 'done')
+        Assert-Equal 'todo' (Request-TaskRework -Conn $conn -TaskId $id)
+        Assert-Equal 'todo' (& $colOf $id)
+    }
+
+    It '棚上げ (中止要求) も解く。残るとワーカーが永久に飛ばす' {
+        $id = [int] (New-Task -Conn $conn -Title '棚上げ' -Column 'todo')
+        [void] (Set-TaskCancel -Conn $conn -TaskId $id -Requested $true)
+        [void] (Request-TaskRework -Conn $conn -TaskId $id)
+        Assert-False (Test-TaskCancelled -Conn $conn -TaskId $id)
+    }
+
+    It '実行中のカードは動かさない (中止要求と区別が付かなくなるため)' {
+        $id = [int] (New-Task -Conn $conn -Title '実行中' -Column 'doing')
+        Assert-Equal 'doing' (Request-TaskRework -Conn $conn -TaskId $id)
+        Assert-Equal 'doing' (& $colOf $id)
+    }
+
+    It '設定カードは動かさない (ワーカーが拾わないので要対応に置いても進まない)' {
+        $sid = [int] (New-SetupTask -Conn $conn -What 'GitHub トークン' -HowTo '設定してください' -ServiceKey 'github')
+        Assert-Equal 'review' (Request-TaskRework -Conn $conn -TaskId $sid)
+    }
+
+    It '無いカードは $null' {
+        Assert-Null (Request-TaskRework -Conn $conn -TaskId 999999)
+    }
+
+    It '既読にするのは作業の最初に読んだ分まで (作業中に届いた指示を消さない)' {
+        $id = [int] (New-Task -Conn $conn -Title '指示あり' -Column 'doing')
+        $first = [int] (Add-TaskComment -Conn $conn -TaskId $id -Author 'user' -Body '最初の指示')
+        $late  = [int] (Add-TaskComment -Conn $conn -TaskId $id -Author 'user' -Body '作業中に届いた指示')
+        Set-CommentsConsumed -Conn $conn -TaskId $id -UpToId $first
+        $left = @(Get-UnconsumedComments -Conn $conn -TaskId $id)
+        Assert-Equal 1 $left.Count
+        Assert-Equal $late ([int] $left[0]['id'])
+    }
+
+    Close-TestStore $conn
+}
+
 Describe '設定カード' {
     $conn = New-TestStore
 

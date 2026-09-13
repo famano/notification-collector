@@ -133,6 +133,9 @@ function Invoke-WorkItem {
     # 割り込み指示の取り込み
     $comments = @(Get-UnconsumedComments -Conn $conn -TaskId $id)
     $instructions = @($comments | ForEach-Object { [string] $_['body'] })
+    # 既読にするのはここで読んだ分まで。作業中に届いた指示は終わったあとに見る。
+    $commentWatermark = 0
+    foreach ($c in $comments) { if ([int] $c['id'] -gt $commentWatermark) { $commentWatermark = [int] $c['id'] } }
     if ($instructions.Count -gt 0) {
         Write-Step $id 'step' ("利用者の指示を {0} 件読み込みました" -f $instructions.Count) 'Magenta'
     }
@@ -575,7 +578,7 @@ function Invoke-WorkItem {
         $summary += "`n`n[自己検証: $mark] " + $verdict.summary
     }
     [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ agent_output = $summary })
-    Set-CommentsConsumed -Conn $conn -TaskId $id
+    Set-CommentsConsumed -Conn $conn -TaskId $id -UpToId $commentWatermark
 
     # 解消しなかった指摘はコメントに残す。レビューする人がまずここを見る。
     if ($verdict -and @($verdict.issues | Where-Object { $_.severity -eq 'high' }).Count -gt 0) {
@@ -587,6 +590,17 @@ function Invoke-WorkItem {
     }
 
     [void] $conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($id))
+
+    # 作業中に指示が届いていたら、レビューに回さずやり直す。
+    # 指示を書くのは「やり直して」の意思表示で、実行中のカードはカンバン側では
+    # 動かさない (中止要求と区別が付かなくなる) ので、ここで拾う。
+    $late = @(Get-UnconsumedComments -Conn $conn -TaskId $id).Count
+    if ($late -gt 0) {
+        [void] (Set-TaskColumn -Conn $conn -TaskId $id -Column 'todo')
+        Write-Step $id 'done' ("作業中に指示が {0} 件届いたため、要対応に戻してやり直します。" -f $late) 'Magenta'
+        return
+    }
+
     [void] (Set-TaskColumn -Conn $conn -TaskId $id -Column 'review')
 
     $msg = if ($sentItems.Count -gt 0) {

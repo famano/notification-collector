@@ -976,11 +976,57 @@ function Get-UnconsumedComments {
         [object[]] @($TaskId))
 }
 
+# $UpToId を渡すと、その id までだけを既読にする。ワーカーは作業の最初に
+# 読んだ分までを渡すこと。全部を既読にすると、作業中に届いた指示が
+# 一度も読まれないまま消える。
 function Set-CommentsConsumed {
-    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [int] $UpToId = -1)
+    if ($UpToId -ge 0) {
+        [void] $Conn.NonQuery(
+            'UPDATE task_comments SET consumed_at = ? WHERE task_id = ? AND consumed_at IS NULL AND id <= ?',
+            [object[]] @((Get-Now), $TaskId, $UpToId))
+        return
+    }
     [void] $Conn.NonQuery(
         'UPDATE task_comments SET consumed_at = ? WHERE task_id = ? AND consumed_at IS NULL',
         [object[]] @((Get-Now), $TaskId))
+}
+
+function Request-TaskRework {
+    <#
+      .SYNOPSIS
+        利用者が指示を書いたカードを要対応に戻す。
+      .DESCRIPTION
+        指示を書くのは「これを踏まえてやり直して」のときである。
+        レビュー待ちや完了に置いたままだとワーカーは拾わず、指示は読まれない。
+      .OUTPUTS
+        [string] 処理後の列。カードが無ければ $null。
+    #>
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $rows = @($Conn.Query('SELECT board_column, shape, archived_at, cancel_requested FROM tasks WHERE id = ?',
+                          [object[]] @($TaskId)))
+    if ($rows.Count -eq 0) { return $null }
+    $col = [string] $rows[0]['board_column']
+
+    # 実行中はワーカーの手の中にある。ここで列を動かすと中止要求と区別が付かない。
+    # 作業を終えた時点で未読の指示が残っていれば、ワーカー自身が要対応に戻す。
+    if ($col -eq 'doing') { return $col }
+    # 設定カードはワーカーが拾わない。要対応に置いても誰も動かない。
+    if ([string] $rows[0]['shape'] -eq 'setup') { return $col }
+    # アーカイブ済みは一覧に出ない。戻すと見えないところで動き出す。
+    if ($rows[0]['archived_at']) { return $col }
+
+    # 棚上げ (中止要求) が残っているとワーカーが永久に飛ばすので解く
+    $wasCancelled = ([int] $rows[0]['cancel_requested'] -ne 0)
+    if ($wasCancelled) { [void] (Set-TaskCancel -Conn $Conn -TaskId $TaskId -Requested $false) }
+    if ($col -ne 'todo') {
+        [void] $Conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($TaskId))
+        [void] (Set-TaskColumn -Conn $Conn -TaskId $TaskId -Column 'todo')
+    }
+    if ($col -ne 'todo' -or $wasCancelled) {
+        Add-TaskActivity -Conn $Conn -TaskId $TaskId -Kind 'user' -Message '指示が届いたので、要対応に戻しました'
+    }
+    return 'todo'
 }
 
 # 中止要求が立っているか (ワーカーが各ステップの前に確認する)

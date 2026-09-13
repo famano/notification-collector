@@ -1112,10 +1112,16 @@
         ci.placeholder = 'ワーカーへの指示（改行できます／Ctrl+Enter で送信）';
         var send = function () {
           if (!ci.value.trim()) return;
+          var wasColumn = t.board_column;
           return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ci.value })
-            .then(function () {
+            .then(function (r) {
               ci.value = '';
-              toast('指示を送りました。次の実行時に反映されます', 'ok');
+              // 指示を送る = やり直してほしい。サーバが要対応に戻す (実行中は終わってから戻る)。
+              var col = r && r.body ? r.body.column : null;
+              var msg = col === 'doing' ? '指示を送りました。いまの作業が終わったら、指示を踏まえてやり直します'
+                      : (col === 'todo' && wasColumn !== 'todo') ? '指示を送りました。要対応に戻したので、ワーカーがやり直します'
+                      : '指示を送りました。次の実行時に反映されます';
+              toast(msg, 'ok');
               openSections['comments'] = true;
               return refresh(true);
             })
