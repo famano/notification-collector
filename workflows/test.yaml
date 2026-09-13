@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows-powershell-51:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # shell: powershell は Windows PowerShell 5.1。pwsh (7.x) ではない
+      - name: テスト
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host $PSVersionTable.PSVersion
+          .\tests\Run-Tests.ps1
