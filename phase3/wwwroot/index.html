@@ -293,6 +293,72 @@
   #toast.ok { background: var(--ok); }
   #toast.err { background: var(--danger); }
 
+  /* ---------- 書式付きの本文 (ワーカーの報告) ---------- */
+  /* 一番読まれるものなので、記号のままにしない。組み立ては JS 側で
+     createElement + textContent。ここは見た目だけ。 */
+  .md { font-size: 13px; line-height: 1.75; word-break: break-word; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 9px; }
+  .md h4, .md h5, .md h6 { margin: 15px 0 5px; line-height: 1.45; font-weight: 700; }
+  .md h4 { font-size: 14px; }
+  .md h5 { font-size: 13px; }
+  .md h6 { font-size: 12.5px; color: var(--muted); }
+  .md ul, .md ol { margin: 0 0 9px; padding-left: 1.45em; }
+  .md li { margin: 2px 0; }
+  .md li.task { list-style: none; margin-left: -1.25em; }
+  .md li.task .box { margin-right: 5px; color: var(--accent); }
+  .md code {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px;
+    background: var(--soft); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
+  }
+  .md pre { margin: 0 0 9px; font-size: 12px; }
+  .md blockquote {
+    margin: 0 0 9px; padding: 2px 0 2px 11px; color: var(--muted);
+    border-left: 2px solid var(--border);
+  }
+  .md hr { border: none; border-top: 1px solid var(--line); margin: 13px 0; }
+  /* 幅の広い表でドロワーごと横に伸びないようにする */
+  .md .tablewrap { overflow-x: auto; margin: 0 0 9px; }
+  .md table { border-collapse: collapse; font-size: 12px; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; vertical-align: top; }
+  .md th { background: var(--soft); font-weight: 650; white-space: nowrap; }
+  .md a.mdlink { color: var(--accent); }
+  /* 主役の箱は淡い地なので、その中のコードは逆に紙の色に置く */
+  .primary .md code, .primary .md pre { background: var(--panel); }
+
+  /* ---------- カードの出口 ---------- */
+  /* 3つのうちどれを選ぶかが先。ボタンを横一列に並べると「終わらせる」ものと
+     「戻す」ものが同じ重さで並び、押す前に区別が付かない。 */
+  .exit .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 11px; }
+  .exit .tab { font-size: 12px; padding: 5px 12px; border-radius: 999px; background: var(--panel); }
+  .exit .tab.on {
+    border-color: var(--accent); color: var(--accent); font-weight: 650;
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  }
+  .exit .tab.on:hover:not(:disabled) { color: var(--accent); }
+  .exit .panel textarea { margin-top: 2px; }
+  /* 中止は出口ではなく割り込み。同じ塊に見えないように線で切る */
+  .exit .interrupt { margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line); }
+  .note { font-size: 12px; color: var(--muted); line-height: 1.65; margin-bottom: 8px; }
+  .primary .path { font-size: 11px; color: var(--faint); word-break: break-all; }
+
+  /* ---------- 返信先の内容 ---------- */
+  /* 相手の文面には書式を付けない (第三者が書いた URL を押せる形にしない)。
+     整えるのは並びだけで、誰がいつ何と言ったかを縦に読めるようにする。 */
+  .convo {
+    max-height: 320px; overflow-y: auto; padding: 2px 11px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--panel);
+  }
+  .convo .msg { padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .convo .msg:last-child { border-bottom: none; }
+  .convo .mh {
+    display: flex; gap: 9px; flex-wrap: wrap; align-items: baseline;
+    font-size: 11px; color: var(--muted); margin-bottom: 3px;
+  }
+  .convo .mh b { color: var(--text); font-size: 12px; font-weight: 650; }
+  .convo .mb { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.7; }
+
   /* ---------- 判断の方針 ---------- */
   #policy {
     position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40;
@@ -413,6 +479,9 @@
   var workerWarn = '', collectorWarn = '', setupWarn = '';
   // 折りたたみの開閉はカードを開き直しても保つ
   var openSections = {};
+  // カードごとに選んだ出口 (送る / 承認 / 差し戻す / 自分で対応)。
+  // 更新のたびに既定へ戻ると、書きかけの欄ごと切り替わってしまう。
+  var exitTab = {};
 
   var URGENCY = { high: '高', normal: '中', low: '低' };
   var CATEGORY = {
@@ -835,12 +904,257 @@
     }).catch(function () { statusEl.textContent = '接続なし'; });
   }
 
+  // ---------------------------------------------------------------- 書式付きの本文
+  //
+  // レビューで一番読まれるのはワーカーの報告である。にもかかわらず、見出しも
+  // 箇条書きも表も記号のまま出していたので、長い報告ほど読めなくなっていた。
+  //
+  // 生の HTML は決して通さない。報告はモデルが書いた文字列で、そこには第三者の
+  // 文面が引用として混ざる。ここでも innerHTML は使わず、すべて createElement +
+  // textContent で組む。書式として通すのは自分が知っている記法だけで、
+  // 知らないものは文字として出す。
+  //
+  // リンクだけはスキームを絞る (http / https / mailto)。それ以外は文字列のまま出す。
+  var MD_SAFE_LINK = /^(https?:|mailto:)/i;
+  var MD_INLINE = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|\*([^*\n]+)\*|\[([^\]\n]*)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>"'`)\]]+)/g;
+
+  function mdLink(parent, text, url) {
+    if (!MD_SAFE_LINK.test(url)) {
+      // 踏ませないものは、見た目もリンクにしない。飛び先を隠さず文字で出す。
+      parent.appendChild(document.createTextNode(text + '（' + url + '）'));
+      return;
+    }
+    var a = el('a', 'mdlink', text || url);
+    a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = url;
+    parent.appendChild(a);
+  }
+
+  function mdInline(parent, text) {
+    var last = 0, m;
+    MD_INLINE.lastIndex = 0;
+    while ((m = MD_INLINE.exec(text)) !== null) {
+      if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+      if (m[1] != null)      parent.appendChild(el('code', null, m[1]));
+      else if (m[2] != null) parent.appendChild(el('strong', null, m[2]));
+      else if (m[3] != null) parent.appendChild(el('strong', null, m[3]));
+      else if (m[4] != null) parent.appendChild(el('em', null, m[4]));
+      else if (m[5] != null) mdLink(parent, m[5], m[6]);
+      else if (m[7] != null) mdLink(parent, m[7], m[7]);
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  function mdCells(line) {
+    return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|')
+      .map(function (c) { return c.trim(); });
+  }
+
+  function mdIsTable(lines, i) {
+    return lines[i].indexOf('|') >= 0 && i + 1 < lines.length
+      && /^[\s|:-]+$/.test(lines[i + 1])
+      && lines[i + 1].indexOf('-') >= 0 && lines[i + 1].indexOf('|') >= 0;
+  }
+
+  function mdIsBlock(lines, i) {
+    var ln = lines[i];
+    return !ln.trim() || /^\s*(```|~~~)/.test(ln) || /^#{1,6}\s+/.test(ln)
+      || /^\s*>/.test(ln) || /^\s*([-*+]|\d+[.)])\s+/.test(ln) || mdIsTable(lines, i);
+  }
+
+  // 箇条書き。入れ子は字下げで決める。
+  function mdList(root, lines, i) {
+    var stack = [];
+    function top() { return stack[stack.length - 1]; }
+    while (i < lines.length) {
+      var m = lines[i].match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      if (!m) {
+        // 空行か、箇条書きでない行で終わり。字下げされた続きの行だけは
+        // 直前の項目に足す (長い項目が折り返されているだけなので)。
+        if (!lines[i].trim() || !stack.length || !/^\s+\S/.test(lines[i])) break;
+        var prev = top().list.lastChild;
+        if (!prev) break;
+        prev.appendChild(document.createTextNode(' '));
+        mdInline(prev, lines[i].trim());
+        i++;
+        continue;
+      }
+      var indent = m[1].replace(/\t/g, '  ').length;
+      var ordered = /^\d/.test(m[2]);
+      while (stack.length > 1 && indent < top().indent) stack.pop();
+      if (!stack.length || indent > top().indent) {
+        var list = el(ordered ? 'ol' : 'ul');
+        if (stack.length) { (top().list.lastChild || top().list).appendChild(list); }
+        else { root.appendChild(list); }
+        stack.push({ indent: indent, list: list });
+      }
+      var li = el('li');
+      var body = m[3];
+      var task = body.match(/^\[([ xX])\]\s+(.*)$/);
+      if (task) {
+        li.className = 'task';
+        li.appendChild(el('span', 'box', task[1] === ' ' ? '☐' : '☑'));
+        body = task[2];
+      }
+      mdInline(li, body);
+      top().list.appendChild(li);
+      i++;
+    }
+    return i;
+  }
+
+  function mdRender(text) {
+    var root = el('div', 'md');
+    var lines = String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n');
+    var i = 0;
+    while (i < lines.length) {
+      if (!lines[i].trim()) { i++; continue; }
+
+      var fence = lines[i].match(/^\s*(```|~~~)/);
+      if (fence) {
+        var buf = [];
+        i++;
+        while (i < lines.length && lines[i].indexOf(fence[1]) < 0) { buf.push(lines[i]); i++; }
+        i++;
+        root.appendChild(el('pre', null, buf.join('\n')));
+        continue;
+      }
+
+      var h = lines[i].match(/^(#{1,6})\s+(.*)$/);
+      if (h) {
+        // 見出しは階層が分かればよい。報告の中で本文より目立ちすぎないよう抑えつつ、
+        // 一番外側 (# でも ## でも) は必ず本文より強くする。
+        var hx = el('h' + Math.min(Math.max(h[1].length + 2, 4), 6));
+        mdInline(hx, h[2].replace(/\s*#+\s*$/, '').trim());
+        root.appendChild(hx);
+        i++;
+        continue;
+      }
+
+      if (/^\s*([-*_])\s*(\1\s*){2,}$/.test(lines[i])) { root.appendChild(el('hr')); i++; continue; }
+
+      if (mdIsTable(lines, i)) {
+        var tb = el('table');
+        var thead = el('thead'), trh = el('tr');
+        mdCells(lines[i]).forEach(function (c) { var th = el('th'); mdInline(th, c); trh.appendChild(th); });
+        thead.appendChild(trh); tb.appendChild(thead);
+        i += 2;
+        var tbody = el('tbody');
+        while (i < lines.length && lines[i].trim() && lines[i].indexOf('|') >= 0) {
+          var tr = el('tr');
+          mdCells(lines[i]).forEach(function (c) { var td = el('td'); mdInline(td, c); tr.appendChild(td); });
+          tbody.appendChild(tr);
+          i++;
+        }
+        tb.appendChild(tbody);
+        // 幅の広い表でドロワーごと横に伸びないようにする
+        var wrap = el('div', 'tablewrap');
+        wrap.appendChild(tb);
+        root.appendChild(wrap);
+        continue;
+      }
+
+      if (/^\s*>/.test(lines[i])) {
+        var q = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        var bq = el('blockquote');
+        bq.appendChild(mdRender(q.join('\n')));
+        root.appendChild(bq);
+        continue;
+      }
+
+      if (/^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) { i = mdList(root, lines, i); continue; }
+
+      var para = [];
+      while (i < lines.length && !mdIsBlock(lines, i)) { para.push(lines[i]); i++; }
+      var p = el('p');
+      // 段落内の改行は保つ。報告は箇条書きに近い書かれ方をするので、
+      // 詰めると意味の切れ目が消える。
+      para.forEach(function (x, n) {
+        if (n) p.appendChild(el('br'));
+        mdInline(p, x.trim());
+      });
+      root.appendChild(p);
+    }
+    return root;
+  }
+
+  // ---------------------------------------------------------------- 返信先の内容
+  //
+  // 送る前にいちばん要るのは「相手が何と言ってきたか」である。トーンは文脈でしか
+  // 決まらないので、これが読めないと文面に自信が持てず、結局は元のメールを
+  // 開き直すことになる ―― カンバンだけで終わらせるという前提がそこで崩れる。
+  //
+  // ただし相手の文面に書式は付けない。第三者が書いた URL を押せる形にすると、
+  // 見えている文字と飛び先が違うものを作れてしまう。整えるのは並びだけにして、
+  // 誰がいつ何と言ったかを縦に読めるようにする。
+  function renderConversation(msgs) {
+    var box = el('div', 'convo');
+    msgs.forEach(function (m) {
+      var d = el('div', 'msg');
+      var hd = el('div', 'mh');
+      if (m.from) hd.appendChild(el('b', null, m.from));
+      if (m.at) hd.appendChild(el('span', 'at', m.at));
+      if (m.to) hd.appendChild(el('span', 'at', '宛先 ' + m.to));
+      if (m.cc) hd.appendChild(el('span', 'at', 'Cc ' + m.cc));
+      if (hd.childNodes.length) d.appendChild(hd);
+      d.appendChild(el('div', 'mb', m.text));
+      box.appendChild(d);
+    });
+    return box;
+  }
+
+  // ---------------------------------------------------------------- 入力中の保持
+  //
+  // ドロワーは 1.5 秒ごとの更新でも、出口のタブを切り替えても作り直される。
+  // 書きかけをサーバの値で上書きすると、書いた指示や文面が黙って消える。
+  // カード id ごとに手元へ置いて、作り直しのたびに戻す。
+  var scratch = {};
+  function sc(id) {
+    if (!scratch[id]) scratch[id] = {};
+    return scratch[id];
+  }
+  function clearScratch(id, key) {
+    if (scratch[id]) delete scratch[id][key];
+  }
+  function bindArea(id, key, initial, placeholder, rows) {
+    var s = sc(id);
+    var ta = document.createElement('textarea');
+    ta.rows = rows || 3;
+    ta.placeholder = placeholder || '';
+    ta.value = (s[key] != null) ? s[key] : (initial || '');
+    ta.oninput = function () {
+      s[key] = ta.value;
+      // 保存しないと消えるのは、サーバに送る文面と記録だけ。指示は送る操作と
+      // 一体なので、閉じるときの確認までは要らない。
+      if (key === 'draft' || key === 'record') dirty = true;
+    };
+    return ta;
+  }
+
+  // 「まだ閉じない」ときの逃げ道。出口のボタンとは別に、下書きだけ残す。
+  function saveDraft(t, text, key) {
+    return api('/api/tasks/' + t.id, 'PATCH', { user_edited: text, version: t.version })
+      .then(function (r) {
+        if (r.status === 409) { toast('他で更新されていたため保存できませんでした', 'err'); }
+        else {
+          toast('保存しました', 'ok');
+          dirty = false;
+          // サーバの値と一致したので、手元の控えは捨ててよい
+          if (key) clearScratch(t.id, key);
+        }
+        return refresh(true);
+      });
+  }
+
   // ---------------------------------------------------------------- 詳細
 
-  // 既定で閉じている折りたたみ。開閉状態は openSections に覚える。
-  function foldable(key, label, count, buildBody) {
+  // 折りたたみ。開閉状態は openSections に覚える。
+  // defaultOpen は「まだ一度も触っていないときに開いておく」の意味で、
+  // 閉じた状態は覚える (返信先の内容のように、初回は開いていてほしいものがある)。
+  function foldable(key, label, count, buildBody, defaultOpen) {
     var d = document.createElement('details');
-    d.open = !!openSections[key];
+    d.open = (openSections[key] === undefined) ? !!defaultOpen : !!openSections[key];
     var s = document.createElement('summary');
     s.appendChild(el('span', null, label));
     if (count != null) s.appendChild(el('span', 'n', '（' + count + '）'));
@@ -866,6 +1180,8 @@
       var t = r.body.task, ev = r.body.event, openLink = r.body.openLink, outlet = r.body.outlet;
       var comments = r.body.comments || [], activity = r.body.activity || [], files = r.body.artifacts || [];
       var attempts = r.body.attempts || [];
+      // 返信先の内容と作業フォルダ。どちらも「送る前」「直す前」に要るもの。
+      var conversation = r.body.conversation || [], workspace = r.body.workspace || '';
       var scroll = keepScroll ? drawer.scrollTop : 0;
 
       drawer.innerHTML = '';
@@ -962,10 +1278,44 @@
         pad.appendChild(hbox);
       }
 
-      // --- 主役1: 成果物 ---
-      if (files.length > 0) {
+      // --- 主役1: ワーカーの報告 ---
+      //
+      // レビューで最初に読むのはこれで、たいていはこれしか読まない。
+      // 折りたたみの中に置いていたが、毎回開くものを畳んでおく意味はない。
+      //
+      // 書式も落とさない。見出しも箇条書きも表も記号のまま出していたため、
+      // 長い報告ほど読めなくなっていた ―― 一番読まれる文章なのに。
+      if (t.agent_output) {
+        var rep = el('div', 'primary report');
+        rep.appendChild(el('div', 'cap', 'ワーカーの報告'));
+        rep.appendChild(mdRender(t.agent_output));
+        pad.appendChild(rep);
+      }
+
+      // --- 主役2: 成果物 ---
+      //
+      // 成果物が要るカードは、中身を眺めて終わりではなくファイルを触ることになる。
+      // 1枚ずつ「中身を見る」で開くだけでは足りないので、フォルダごと開けるようにする。
+      // 開く先はサーバが DB の記録から決める (画面からパスは送らない)。
+      if (files.length > 0 || workspace) {
         var box = el('div', 'primary');
-        box.appendChild(el('div', 'cap', 'ワーカーが作成したファイル'));
+        box.appendChild(el('div', 'cap', files.length > 0 ? 'ワーカーが作成したファイル' : '作業フォルダ'));
+        if (workspace) {
+          var fr = el('div', 'row'); fr.style.margin = '0 0 9px';
+          fr.appendChild(actionButton('フォルダを開く', null, '開いています…', function () {
+            return api('/api/tasks/' + t.id + '/folder', 'POST', {}).then(function (a) {
+              if (a.status !== 200 || !a.body || a.body.ok === false) {
+                toast('開けませんでした: ' + ((a.body && a.body.error) || a.status), 'err');
+                return;
+              }
+              toast('エクスプローラーで開きました', 'ok');
+            });
+          }));
+          var pth = el('span', 'path', workspace);
+          pth.title = workspace;
+          fr.appendChild(pth);
+          box.appendChild(fr);
+        }
         files.forEach(function (f) {
           var row = el('div', 'file');
           row.appendChild(el('span', 'nm', f.name));
@@ -975,7 +1325,9 @@
               if (a.status !== 200) { toast('ファイルを開けませんでした', 'err'); return; }
               var v = document.getElementById('view-' + f.id);
               if (v) { v.hidden = !v.hidden; return; }
-              var p = pre(a.body.content);
+              // .md は報告と同じ書式で出す。原稿として書かれたものを記号のまま
+              // 見せると、そのまま送っていいのか判断できない。
+              var p = /\.md$/i.test(f.name) ? mdRender(a.body.content) : pre(a.body.content);
               p.id = 'view-' + f.id;
               p.style.marginTop = '6px';
               row.parentNode.insertBefore(p, row.nextSibling);
@@ -983,110 +1335,232 @@
           }));
           box.appendChild(row);
         });
-        box.appendChild(el('div', 'hintline',
-          'ファイルはカードごとの作業フォルダに保存されています。.eml はメールソフトで開くと下書きになります。'));
+        if (files.length > 0) {
+          box.appendChild(el('div', 'hintline',
+            'ファイルはカードごとの作業フォルダに保存されています。.eml はメールソフトで開くと下書きになります。'));
+        }
         pad.appendChild(box);
       }
 
-      // --- 主役2: このカードの出口 ---
-      // 送り先があるカードは「送る文面」、無いカードは「対応の記録」。
-      // どちらも、書いた内容がカードを閉じる操作に直結する。
-      // 保存しても何も起きない欄にはしない。
+      // --- 主役3: この後どうするか ---
+      //
+      // 報告を読んだあとに選ぶのは3つしかない。
+      //   承認して終了 / 差し戻す (＋指示) / 自分で対応して終了
+      // 以前はボタンを横一列に並べていたが、それでは「終わらせる」ものと
+      // 「戻す」ものが同じ重さで並び、押す前にどちらなのか読み取れなかった。
+      // 先に道を選んでから、その道に要る欄だけを出す。
+      //
+      // 送り先があるカードだけは「承認」が「送る」に置き換わる。送るのが
+      // 承認そのものだからで、代わりに送信は出口を2つ持つ ―― 送って終わる場合と、
+      // 「承知しました」と返してから作業が始まる場合がある。
       var sendable = outlet && outlet.kind !== 'none';
-      var edit = el('div', 'primary');
-      edit.appendChild(el('div', 'cap', sendable ? '送る文面' : '対応の記録'));
-      if (sendable) {
+      var tabs = [];
+      if (sendable) { tabs.push('send'); }
+      else if (t.agent_output) { tabs.push('approve'); }
+      tabs.push('rework');
+      tabs.push('self');
+      // まだ報告が無いカードを「差し戻す」とは呼ばない。戻す先の仕事がまだ無い。
+      var canReject = !!t.agent_output && t.board_column !== 'doing';
+      var TAB_LABEL = {
+        send: '送る', approve: '承認して終了',
+        rework: canReject ? '差し戻す' : '指示を送る',
+        self: '自分で対応して終了'
+      };
+      var cur = exitTab[t.id];
+      if (tabs.indexOf(cur) < 0) { cur = tabs[0]; }
+      exitTab[t.id] = cur;
+
+      var exit = el('div', 'primary exit');
+      exit.appendChild(el('div', 'cap', 'この後どうするか'));
+      var tabRow = el('div', 'tabs');
+      tabs.forEach(function (k) {
+        var b = el('button', 'tab' + (k === cur ? ' on' : ''), TAB_LABEL[k]);
+        b.onclick = function () { exitTab[t.id] = k; openDetail(t.id, true); };
+        tabRow.appendChild(b);
+      });
+      exit.appendChild(tabRow);
+      var panel = el('div', 'panel');
+      exit.appendChild(panel);
+      pad.appendChild(exit);
+
+      if (cur === 'send') {
+        // 取り消せない操作。宛先は欄より先に目に入る位置に置く。
         var dest = el('div', 'dest');
         dest.appendChild(el('b', null, outlet.label));
         dest.appendChild(document.createTextNode(' — この欄の内容がそのまま送られます'));
-        edit.appendChild(dest);
-      }
-      var ta = document.createElement('textarea');
-      ta.id = 'draftBox';
-      // ワーカーの提案 (draft_text) は下敷き。自分が直した版があればそちらが優先。
-      // 再実行しても user_edited は上書きされない。
-      ta.value = t.user_edited || t.draft_text || '';
-      ta.placeholder = sendable
-        ? '送る本文。ここに書いた内容はワーカーが再実行しても消えません。'
-        : 'やったこと・決めたことを残す（空のままでも完了にできます）。';
-      ta.oninput = function () { dirty = true; };
-      edit.appendChild(ta);
-      if (sendable && !t.user_edited && t.draft_text) {
-        edit.appendChild(el('div', 'hintline', 'ワーカーが用意した文面です。保存するか送ると、あなたの版として確定します。'));
-      }
+        panel.appendChild(dest);
 
-      var er = el('div', 'row'); er.style.marginTop = '7px';
-      // 主役は出口のボタン（送る / 完了にする）。保存は「まだ閉じない」ときの逃げ道なので沈める。
-      er.appendChild(actionButton('保存', null, '保存中…', function () {
-        return api('/api/tasks/' + t.id, 'PATCH', { user_edited: ta.value, version: t.version })
-          .then(function (r2) {
-            if (r2.status === 409) toast('他で更新されていたため保存できませんでした', 'err');
-            else toast('保存しました', 'ok');
-            dirty = false;
-            return refresh(true);
-          });
-      }));
+        // 返信先の内容。トーンは文脈でしか決まらないので、これが読めないと
+        // 文面に自信が持てず、結局は元のメールを開き直すことになる。
+        // 相手の文面には書式を付けない ―― 第三者が書いた URL を押せる形にすると、
+        // 見えている文字と飛び先が違うものを作れてしまう。整えるのは並びだけ。
+        if (conversation.length > 0) {
+          panel.appendChild(foldable('replyctx', '返信先の内容', conversation.length, function (b) {
+            b.appendChild(renderConversation(conversation));
+          }, true));
+        }
 
-      if (sendable) {
-        // 取り消せない操作。宛先と全文を出してから確認を取る。
-        // 宛先はここで決めず、サーバがカードの元イベントから決める。
-        er.appendChild(actionButton('この内容で送る', 'primary', '送信中…', function () {
-          var body = ta.value;
-          if (!body.trim()) { toast('本文が空です', 'err'); return; }
-          if (!confirm('次の内容を送信します。取り消せません。\n\n宛先: ' + outlet.label
-            + '\n\n--- 本文 ---\n' + body)) return;
-          return api('/api/tasks/' + t.id + '/send', 'POST',
-              { text: body, version: t.version, confirm: true })
+        var ta = bindArea(t.id, 'draft', t.user_edited || t.draft_text || '',
+          '送る本文。ここに書いた内容はワーカーが再実行しても消えません。', 8);
+        ta.id = 'draftBox';
+        panel.appendChild(ta);
+        if (!t.user_edited && t.draft_text) {
+          panel.appendChild(el('div', 'hintline', 'ワーカーが用意した文面です。保存するか送ると、あなたの版として確定します。'));
+        }
+
+        var followup = bindArea(t.id, 'followup', '',
+          '送ったあとに続ける作業の指示（任意）。「送って作業を続ける」を押したときだけ使われます。', 2);
+        panel.appendChild(followup);
+
+        var sr = el('div', 'row'); sr.style.marginTop = '8px';
+        function sendWith(finish, label, busy, cls) {
+          sr.appendChild(actionButton(label, cls, busy, function () {
+            var body = ta.value;
+            if (!body.trim()) { toast('本文が空です', 'err'); return; }
+            if (!confirm('次の内容を送信します。取り消せません。\n\n宛先: ' + outlet.label
+              + '\n\n--- 本文 ---\n' + body)) return;
+            return api('/api/tasks/' + t.id + '/send', 'POST',
+                { text: body, version: t.version, confirm: true, finish: finish })
+              .then(function (r2) {
+                if (r2.status === 409) { toast('他で更新されていたため送信しませんでした', 'err'); return refresh(true); }
+                if (r2.status !== 200 || r2.body.ok === false) {
+                  toast('送信できませんでした: ' + (r2.body.error || r2.status), 'err');
+                  return refresh(true);
+                }
+                dirty = false;
+                clearScratch(t.id, 'draft');
+                var after = Promise.resolve();
+                // 続きの指示は送信が通ってから積む。送信の成否と混ぜない。
+                if (!finish && followup.value.trim()) {
+                  after = api('/api/tasks/' + t.id + '/comment', 'POST', { body: followup.value })
+                    .then(function () { clearScratch(t.id, 'followup'); });
+                }
+                return after.then(function () {
+                  toast(finish
+                    ? ('送信しました（' + r2.body.to + '）。完了に移しました')
+                    : ('送信しました（' + r2.body.to + '）。用件は残っているので要対応に戻しました'), 'ok');
+                  return refresh(true);
+                });
+              });
+          }));
+        }
+        sendWith(true, '送って完了', '送信中…', 'primary');
+        sendWith(false, '送って作業を続ける', '送信中…', null);
+        sr.appendChild(actionButton('下書きを保存', 'quiet', '保存中…', function () {
+          return saveDraft(t, ta.value, 'draft');
+        }));
+        panel.appendChild(sr);
+        var sh = el('div', 'note',
+          '「送って作業を続ける」は、返信だけ先に出して用件を残す場合に使います。カードは要対応に戻り、ワーカーが続きを拾います。');
+        sh.style.margin = '8px 0 0';
+        panel.appendChild(sh);
+      }
+      else if (cur === 'approve') {
+        panel.appendChild(el('div', 'note', 'ワーカーの報告の内容で了とし、完了に移します。報告はそのまま記録として残ります。'));
+        var note = bindArea(t.id, 'note', '', 'ひとこと残す（任意）。あとで判断を辿るためのものです。', 2);
+        panel.appendChild(note);
+        var ar = el('div', 'row'); ar.style.marginTop = '8px';
+        ar.appendChild(actionButton('承認して完了', 'primary', '処理中…', function () {
+          return api('/api/tasks/' + t.id + '/approve', 'POST', { note: note.value, version: t.version })
             .then(function (r2) {
-              if (r2.status === 409) { toast('他で更新されていたため送信しませんでした', 'err'); return refresh(true); }
+              if (r2.status === 409) { toast('他で更新されていたため完了にできませんでした', 'err'); return refresh(true); }
               if (r2.status !== 200 || r2.body.ok === false) {
-                toast('送信できませんでした: ' + (r2.body.error || r2.status), 'err');
+                toast('完了にできませんでした: ' + ((r2.body && r2.body.error) || r2.status), 'err');
                 return refresh(true);
               }
+              clearScratch(t.id, 'note');
               dirty = false;
-              toast('送信しました（' + r2.body.to + '）。完了に移しました', 'ok');
+              toast('承認して完了にしました', 'ok');
               return refresh(true);
             });
         }));
-      } else {
-        er.appendChild(actionButton('これで完了にする', 'primary', '処理中…', function () {
-          return api('/api/tasks/' + t.id + '/done', 'POST', { text: ta.value, version: t.version })
+        panel.appendChild(ar);
+      }
+      else if (cur === 'rework') {
+        panel.appendChild(el('div', 'note', t.board_column === 'doing'
+          ? '実行中のカードです。いまの作業が終わってから、この指示を踏まえてやり直します。'
+          : canReject
+            ? '直してほしいことを書いて戻します。カードは要対応に戻り、ワーカーがやり直します。'
+            : 'やってほしいことを書いて渡します。カードは要対応に戻り、ワーカーが着手します。'));
+        var ins = bindArea(t.id, 'instruct',
+          '', (canReject ? '何を直してほしいか' : '何をしてほしいか') + '（改行できます／Ctrl+Enter で送信）', 4);
+        var doRework = function () {
+          if (!ins.value.trim()) { toast('指示が空です', 'err'); return; }
+          var wasColumn = t.board_column;
+          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ins.value })
+            .then(function (r2) {
+              if (r2.status !== 200) { toast('送れませんでした: ' + r2.status, 'err'); return refresh(true); }
+              clearScratch(t.id, 'instruct');
+              var col = r2.body ? r2.body.column : null;
+              toast(col === 'doing' ? '指示を送りました。いまの作業が終わったら、指示を踏まえてやり直します'
+                  : (col === 'todo' && wasColumn !== 'todo') ? '差し戻しました。要対応に戻したので、ワーカーがやり直します'
+                  : '指示を送りました。次の実行時に反映されます', 'ok');
+              openSections['comments'] = true;
+              return refresh(true);
+            });
+        };
+        ins.onkeydown = function (e) {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doRework(); }
+        };
+        panel.appendChild(ins);
+        var rr = el('div', 'row'); rr.style.marginTop = '8px';
+        rr.appendChild(actionButton(TAB_LABEL.rework, 'primary', '送信中…', doRework));
+        panel.appendChild(rr);
+      }
+      else {
+        // 自分で片付けて終わらせる。ここに書くのは「なぜ自分は完了にしたのか」で、
+        // メモではない。カンバンで完結するとは、後からその判断を辿れることでもある。
+        panel.appendChild(el('div', 'note', sendable
+          ? '送らずに、自分で対応して終わらせます。やったこと・決めたことを残してください。'
+          : 'やったこと・決めたことを残して完了にします。'));
+        var rec = bindArea(t.id, 'record', (sendable ? '' : (t.user_edited || t.draft_text || '')),
+          '対応の記録（空のままでも完了にできます）', 6);
+        panel.appendChild(rec);
+        var dr = el('div', 'row'); dr.style.marginTop = '8px';
+        dr.appendChild(actionButton('これで完了にする', 'primary', '処理中…', function () {
+          return api('/api/tasks/' + t.id + '/done', 'POST', { text: rec.value, version: t.version })
             .then(function (r2) {
               if (r2.status === 409) { toast('他で更新されていたため完了にできませんでした', 'err'); return refresh(true); }
+              clearScratch(t.id, 'record');
               dirty = false;
               toast('完了にしました', 'ok');
               return refresh(true);
             });
         }));
+        if (t.agent_output) {
+          dr.appendChild(actionButton('報告を取り込む', null, '…', function () {
+            rec.value = t.agent_output;
+            sc(t.id).record = rec.value;
+            dirty = true;
+            toast('編集欄に入れました。完了にすると記録として残ります', 'ok');
+          }));
+        }
+        dr.appendChild(actionButton('保存だけする', 'quiet', '保存中…', function () {
+          return saveDraft(t, rec.value, 'record');
+        }));
+        panel.appendChild(dr);
       }
 
-      if (t.agent_output) {
-        er.appendChild(actionButton('報告を取り込む', null, '…', function () {
-          ta.value = t.agent_output; dirty = true;
-          toast('編集欄に入れました。保存すると確定します', 'ok');
-        }));
-      }
+      // 割り込みはどの道からも要る。出口とは別のものなので線で切って下に置く。
+      var ir = el('div', 'row interrupt');
       if (t.cancel_requested) {
-        er.appendChild(actionButton('中止を解除して要対応へ', null, '解除中…', function () {
+        ir.appendChild(actionButton('中止を解除して要対応へ', 'quiet', '解除中…', function () {
           return api('/api/tasks/' + t.id + '/cancel', 'POST', { cancel: false })
             .then(function () { return api('/api/tasks/' + t.id + '/move', 'POST', { column: 'todo', from: t.board_column }); })
             .then(function () { toast('要対応に戻しました', 'ok'); return refresh(true); });
         }));
       } else {
-        er.appendChild(actionButton('作業を中止', 'danger', '中止要求中…', function () {
+        ir.appendChild(actionButton('作業を中止', 'danger', '中止要求中…', function () {
           return api('/api/tasks/' + t.id + '/cancel', 'POST', {}).then(function () {
             toast('中止を要求しました', 'ok');
             return refresh(true);
           });
         }));
       }
-      edit.appendChild(er);
-      pad.appendChild(edit);
+      exit.appendChild(ir);
 
       // --- 以下は既定で折りたたむ ---
-      if (t.agent_output) {
-        pad.appendChild(foldable('report', 'ワーカーの報告', null, function (b) { b.appendChild(pre(t.agent_output)); }));
-      }
+      // 報告はここから出した。毎回開くものを畳んでおく意味はない (上の主役1)。
       if (t.reason) {
         pad.appendChild(foldable('reason', 'この判定にした理由', null, function (b) { b.appendChild(pre(t.reason)); }));
       }
@@ -1118,44 +1592,21 @@
         });
       }));
 
-      pad.appendChild(foldable('comments', '指示・やりとり', comments.length, function (b) {
-        // 入力欄を先頭に、やりとりは新しい順。増えても入力とその直前の文脈が
-        // 常に手前にあり、下までスクロールする必要がない。
-        var ci = document.createElement('textarea');
-        ci.rows = 3;
-        ci.placeholder = 'ワーカーへの指示（改行できます／Ctrl+Enter で送信）';
-        var send = function () {
-          if (!ci.value.trim()) return;
-          var wasColumn = t.board_column;
-          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ci.value })
-            .then(function (r) {
-              ci.value = '';
-              // 指示を送る = やり直してほしい。サーバが要対応に戻す (実行中は終わってから戻る)。
-              var col = r && r.body ? r.body.column : null;
-              var msg = col === 'doing' ? '指示を送りました。いまの作業が終わったら、指示を踏まえてやり直します'
-                      : (col === 'todo' && wasColumn !== 'todo') ? '指示を送りました。要対応に戻したので、ワーカーがやり直します'
-                      : '指示を送りました。次の実行時に反映されます';
-              toast(msg, 'ok');
-              openSections['comments'] = true;
-              return refresh(true);
-            })
-            .then(function () {
-              var next = drawer.querySelector('details .body textarea');
-              if (next) next.focus();
-            });
-        };
-        ci.onkeydown = function (e) {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
-        };
-        b.appendChild(ci);
-        var sr = el('div', 'row'); sr.style.margin = '6px 0 12px';
-        sr.appendChild(actionButton('指示を送る', null, '送信中…', send));
-        b.appendChild(sr);
-
+      // やりとりは履歴として読むだけ。指示を書く欄は「この後どうするか」の
+      // 「差し戻す」に1つだけ置く ―― 同じことをする欄が2か所にあると、
+      // どちらがカードを動かすのか分からなくなる (どちらも動かしていた)。
+      pad.appendChild(foldable('comments', 'やりとり', comments.length, function (b) {
+        if (comments.length === 0) {
+          b.appendChild(el('div', 'note', 'まだやりとりはありません。指示は上の「差し戻す」から送れます。'));
+          return;
+        }
+        // 新しい順。増えても直近のものが手前にあり、下までスクロールしなくてよい。
         comments.slice().reverse().forEach(function (c) {
           var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
           d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
-          d.appendChild(el('div', 'bd', c.body));
+          // ワーカーの発言は報告と同じ書式で出す。書いているものは同じ性質のもの。
+          if (c.author === 'agent') { d.appendChild(mdRender(c.body)); }
+          else { d.appendChild(el('div', 'bd', c.body)); }
           b.appendChild(d);
         });
       }));
@@ -1163,7 +1614,10 @@
       if (ev) {
         pad.appendChild(foldable('event', '元の通知', null, function (b) {
           b.appendChild(pre((ev.app_id || '') + '\n' + hhmm(ev.occurred_at)));
-          if (ev.body) b.appendChild(pre(ev.body));
+          // 送り先が無いカード (未接続のメールなど) でも、元の文面は読める形で出す。
+          // 割れなかったときだけ生の本文にする。
+          if (conversation.length > 0) { b.appendChild(renderConversation(conversation)); }
+          else if (ev.body) { b.appendChild(pre(ev.body)); }
           var a2 = openLinkEl(openLink, 'btn');
           if (a2) b.appendChild(a2);
           if (ev.link) {

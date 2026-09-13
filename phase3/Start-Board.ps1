@@ -15,6 +15,10 @@
 .PARAMETER NoBrowser
     起動時にブラウザを開かない。
 
+.PARAMETER OutputRoot
+    ワーカーの作業フォルダの親 (既定 phase4\output)。成果物のあるカードから
+    エクスプローラーで開くために要る。
+
 .EXAMPLE
     .\Start-Board.ps1
 #>
@@ -24,6 +28,7 @@ param(
     [string] $DbPath,
     # トリアージ方針。既定は phase2\config\policy.json (Invoke-Triage と同じもの)。
     [string] $PolicyPath,
+    [string] $OutputRoot,
     [switch] $NoBrowser
 )
 
@@ -53,6 +58,11 @@ catch {
 }
 
 $WebRoot = Join-Path $PSScriptRoot 'wwwroot'
+
+# ワーカーの作業フォルダ。成果物を直すときはファイルを1つずつ覗くより
+# フォルダごと開くほうが早い (phase4\Start-Worker.ps1 の -OutputRoot と同じ既定)。
+if (-not $OutputRoot) { $OutputRoot = Join-Path $PSScriptRoot '..\phase4\output' }
+$script:OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 
 $Columns = @(
     @{ key = 'inbox';     label = '未分類' },
@@ -277,6 +287,92 @@ function Get-TaskOutlet {
         catch { }   # 投稿先を引けないだけ。カードは「実施」として扱えばよい
     }
     return $none
+}
+
+# ---------------------------------------------------------------- 返信先の内容
+#
+# 送る前にいちばん要るのは「相手が何と言ってきたか」である。トーンは文脈でしか
+# 決まらないので、これが読めないと文面に自信が持てず、結局は元のメールを開き直す
+# ことになる ―― カンバンだけで終わらせるという前提がそこで崩れる。
+#
+# events.body は経路ごとに決まった形で積んである (Phase 5)。
+#   Gmail … 「差出人:／宛先:／Cc:／日時:」の見出しに続けて本文
+#   Slack … 通知本文のあとに「--- スレッド全文 (N 件) ---」、
+#           各発言が「--- 誰 / いつ」で始まる
+# 画面で文字列を切り分けると、形を知っている場所が2つに増える。ここで割ってから渡す。
+function Get-EventConversation {
+    param($Event)
+    if (-not $Event) { return @() }
+    $body = [string] $Event['body']
+    if (-not $body -or -not $body.Trim()) { return @() }
+
+    $lines = $body -split "`r?`n"
+    $i = 0
+    $head = @{}
+    while ($i -lt $lines.Count -and $lines[$i] -match '^(差出人|宛先|Cc|日時)\s*[:：]\s*(.*)$') {
+        $head[$Matches[1]] = $Matches[2].Trim()
+        $i++
+    }
+    while ($i -lt $lines.Count -and -not $lines[$i].Trim()) { $i++ }
+
+    $msgs = [System.Collections.ArrayList]::new()
+    $cur  = @{ from = ''; at = ''; text = [Text.StringBuilder]::new() }
+    if ($head.Count -gt 0) {
+        if ($head.ContainsKey('差出人')) { $cur.from = $head['差出人'] }
+        if ($head.ContainsKey('日時'))   { $cur.at   = $head['日時'] }
+    }
+    else {
+        $cur.from = [string] $Event['title']
+        $cur.at   = [string] $Event['occurred_at']
+    }
+
+    for (; $i -lt $lines.Count; $i++) {
+        $ln = $lines[$i]
+        # 「--- スレッド全文 (3 件) ---」のような区切りは見出しであって発言ではない
+        if ($ln -match '^\s*---\s*スレッド全文') { continue }
+        if ($ln -match '^\s*---\s+(.+?)\s+/\s+(.+?)\s*$') {
+            if ($cur.text.ToString().Trim()) { [void] $msgs.Add($cur) }
+            $cur = @{ from = $Matches[1].Trim(); at = $Matches[2].Trim(); text = [Text.StringBuilder]::new() }
+            continue
+        }
+        [void] $cur.text.AppendLine($ln)
+    }
+    if ($cur.text.ToString().Trim()) { [void] $msgs.Add($cur) }
+
+    $out = @()
+    $first = $true
+    foreach ($m in $msgs) {
+        $o = [ordered]@{ from = $m.from; at = $m.at; text = $m.text.ToString().Trim() }
+        # 宛先と Cc は最初の1通にだけ添える (返信の宛名を決めるのに要る)
+        if ($first) {
+            if ($head.ContainsKey('宛先')) { $o['to'] = $head['宛先'] }
+            if ($head.ContainsKey('Cc'))   { $o['cc'] = $head['Cc'] }
+            $first = $false
+        }
+        $out += [pscustomobject] $o
+    }
+    return @($out)
+}
+
+# ---------------------------------------------------------------- 作業フォルダ
+#
+# 成果物が要るカードは、中身を眺めて終わりではなくファイルを触ることになる。
+# 1つずつ「中身を見る」で開くのでは足りないので、フォルダごと開けるようにする。
+#
+# パスは DB の記録か OutputRoot からのみ組み立てる。クライアントから受けた
+# パスは一切使わない (成果物の中身を返す口と同じ扱い)。
+function Get-TaskWorkspaceDir {
+    param($Conn, [int] $TaskId)
+    foreach ($r in @(Get-TaskArtifacts -Conn $Conn -TaskId $TaskId)) {
+        $p = [string] $r['path']
+        if (-not $p) { continue }
+        $dir = Split-Path -Parent $p
+        if ($dir -and (Test-Path -LiteralPath $dir)) { return (Resolve-Path -LiteralPath $dir).Path }
+    }
+    # 成果物がまだ無くても、ワーカーが作ったフォルダがあれば開ける
+    $guess = Join-Path $script:OutputRoot ("task-{0:D4}" -f $TaskId)
+    if (Test-Path -LiteralPath $guess) { return (Resolve-Path -LiteralPath $guess).Path }
+    return $null
 }
 
 function ConvertTo-CardObject {
@@ -737,6 +833,11 @@ function Invoke-Route {
                 event    = (ConvertTo-PlainObject $d.event)
                 openLink = $openLink
                 outlet   = (Get-TaskOutlet $d.event)
+                # 返信先の内容。送る前にトーンを決めるのに要るので、
+                # 「元の通知」の折りたたみとは別に、割った形でも渡す。
+                conversation = @(Get-EventConversation $d.event)
+                # 成果物を触るためのフォルダ。無ければ null (画面はボタンを出さない)。
+                workspace = (Get-TaskWorkspaceDir -Conn $Conn -TaskId $taskId)
                 activity = @(Get-TaskActivity -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
                 # 実際に何を叩いて何が返ったか。「手を尽くしたのか」を
                 # 報告の書きぶりではなくここで確かめられるようにする。
@@ -861,13 +962,65 @@ function Invoke-Route {
             'done' {
                 if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
                 $text = [string] $b.text
-                $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
-                        -Fields @{ user_edited = $text } -ExpectedVersion $expected
-                if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
-                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
-                $note = if ($text.Trim()) { '利用者が対応の記録を残して完了にしました' } else { '利用者が完了にしました' }
-                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message $note
+                # 空で押されたときに user_edited を空で上書きしない。
+                # 送る文面と対応の記録は同じ列に入るので、「送らずに完了」を
+                # 選んだだけで書きかけの文面が消えると取り返しがつかない。
+                if ($text.Trim()) {
+                    $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
+                            -Fields @{ user_edited = $text } -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                    [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                    Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' `
+                        -Message '利用者が対応の記録を残して完了にしました'
+                }
+                else {
+                    $ok = Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done' -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                    Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message '利用者が完了にしました'
+                }
                 Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # レビューで最も読まれるのはワーカーの報告で、多くはその内容で了として閉じる。
+            # 「対応の記録」を書き写させずに、承認したという事実だけを残して完了にする。
+            # 自分で手を動かして終わらせた場合 (done) とは意味が違うので、別の口にしている。
+            'approve' {
+                $note = ''
+                if ($b -and $null -ne $b.note) { $note = [string] $b.note }
+                if ($note.Trim()) {
+                    $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
+                            -Fields @{ user_edited = $note } -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                    [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                }
+                else {
+                    $ok = Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done' -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                }
+                $m = '利用者がワーカーの報告を承認して完了にしました'
+                if ($note.Trim()) { $m = '利用者がワーカーの報告を承認しました: ' + $note }
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message $m
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # 成果物のあるカードは、中身を眺めて終わりではなくファイルを触ることになる。
+            # フォルダはサーバが DB の記録から決める。クライアントからパスは受け取らない。
+            'folder' {
+                $dir = Get-TaskWorkspaceDir -Conn $Conn -TaskId $taskId
+                if (-not $dir) {
+                    Write-JsonResponse $Context @{ ok = $false; error = 'このカードには作業フォルダがありません' } 404
+                    return
+                }
+                if ($env:OS -ne 'Windows_NT') {
+                    Write-JsonResponse $Context @{ ok = $false; error = 'この環境ではフォルダを開けません'; path = $dir } 500
+                    return
+                }
+                try { [void] (Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $dir)) }
+                catch {
+                    Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message; path = $dir } 500
+                    return
+                }
+                Write-JsonResponse $Context @{ ok = $true; path = $dir }
                 return
             }
             # 「送る」で終わるカードの出口。取り消せないので、ここだけは条件を厚くする:
@@ -875,6 +1028,10 @@ function Invoke-Route {
             #   - confirm が無いと送らない (UI の確認ダイアログを通った印)
             #   - 送る文面は先に user_edited へ保存する。送ったものと残るものを一致させる
             #   - version 照合。画面が古いまま押した場合は 409 で止める
+            #
+            # 送信は終わりとは限らない。「承知しました、対応します」と返してから
+            # 実際の作業が始まる用件があり、そこで完了に落とすとカードが行方不明になる。
+            # finish=false なら送ったうえで要対応に戻し、続きをワーカーに拾わせる。
             'send' {
                 if (-not $b -or -not $b.confirm) {
                     Write-JsonResponse $Context @{ error = '確認が必要です' } 400; return
@@ -917,8 +1074,19 @@ function Invoke-Route {
 
                 Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'sent' `
                     -Message ("利用者がカンバンから送信しました: {0}" -f $sentTo)
-                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
-                Write-JsonResponse $Context @{ ok = $true; to = $sentTo; permalink = $permalink }
+
+                # 既定は「送って完了」。用件が残っているときだけ finish=false で戻す。
+                $finish = $true
+                if ($null -ne $b.finish) { $finish = [bool] $b.finish }
+                if ($finish) {
+                    [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                    $column = 'done'
+                }
+                else {
+                    $column = Request-TaskRework -Conn $Conn -TaskId $taskId `
+                                -Note '返信は送りましたが用件が残っているため、要対応に戻しました'
+                }
+                Write-JsonResponse $Context @{ ok = $true; to = $sentTo; permalink = $permalink; column = $column }
                 return
             }
             default {
