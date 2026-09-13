@@ -15,6 +15,10 @@
 .PARAMETER NoBrowser
     起動時にブラウザを開かない。
 
+.PARAMETER OutputRoot
+    ワーカーの作業フォルダの親 (既定 phase4\output)。成果物のあるカードから
+    エクスプローラーで開くために要る。
+
 .EXAMPLE
     .\Start-Board.ps1
 #>
@@ -24,11 +28,15 @@ param(
     [string] $DbPath,
     # トリアージ方針。既定は phase2\config\policy.json (Invoke-Triage と同じもの)。
     [string] $PolicyPath,
+    [string] $OutputRoot,
     [switch] $NoBrowser
 )
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
+# 要求を通すかどうかの判定 (Host / Origin)。壊れても画面には何も出ない場所なので、
+# ボードを起動せずに確かめられる形にしてある。
+. "$PSScriptRoot\lib\RequestGuard.ps1"
 # トリアージ方針。カンバンから直せるようにする (気付いた場所で直せないと直されない)。
 . "$PSScriptRoot\..\phase2\lib\Policy.ps1"
 $script:PolicyPath = $PolicyPath
@@ -53,6 +61,11 @@ catch {
 }
 
 $WebRoot = Join-Path $PSScriptRoot 'wwwroot'
+
+# ワーカーの作業フォルダ。成果物を直すときはファイルを1つずつ覗くより
+# フォルダごと開くほうが早い (phase4\Start-Worker.ps1 の -OutputRoot と同じ既定)。
+if (-not $OutputRoot) { $OutputRoot = Join-Path $PSScriptRoot '..\phase4\output' }
+$script:OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
 
 $Columns = @(
     @{ key = 'inbox';     label = '未分類' },
@@ -344,6 +357,92 @@ function Get-TaskOutlet {
     return $none
 }
 
+# ---------------------------------------------------------------- 返信先の内容
+#
+# 送る前にいちばん要るのは「相手が何と言ってきたか」である。トーンは文脈でしか
+# 決まらないので、これが読めないと文面に自信が持てず、結局は元のメールを開き直す
+# ことになる ―― カンバンだけで終わらせるという前提がそこで崩れる。
+#
+# events.body は経路ごとに決まった形で積んである (Phase 5)。
+#   Gmail … 「差出人:／宛先:／Cc:／日時:」の見出しに続けて本文
+#   Slack … 通知本文のあとに「--- スレッド全文 (N 件) ---」、
+#           各発言が「--- 誰 / いつ」で始まる
+# 画面で文字列を切り分けると、形を知っている場所が2つに増える。ここで割ってから渡す。
+function Get-EventConversation {
+    param($Event)
+    if (-not $Event) { return @() }
+    $body = [string] $Event['body']
+    if (-not $body -or -not $body.Trim()) { return @() }
+
+    $lines = $body -split "`r?`n"
+    $i = 0
+    $head = @{}
+    while ($i -lt $lines.Count -and $lines[$i] -match '^(差出人|宛先|Cc|日時)\s*[:：]\s*(.*)$') {
+        $head[$Matches[1]] = $Matches[2].Trim()
+        $i++
+    }
+    while ($i -lt $lines.Count -and -not $lines[$i].Trim()) { $i++ }
+
+    $msgs = [System.Collections.ArrayList]::new()
+    $cur  = @{ from = ''; at = ''; text = [Text.StringBuilder]::new() }
+    if ($head.Count -gt 0) {
+        if ($head.ContainsKey('差出人')) { $cur.from = $head['差出人'] }
+        if ($head.ContainsKey('日時'))   { $cur.at   = $head['日時'] }
+    }
+    else {
+        $cur.from = [string] $Event['title']
+        $cur.at   = [string] $Event['occurred_at']
+    }
+
+    for (; $i -lt $lines.Count; $i++) {
+        $ln = $lines[$i]
+        # 「--- スレッド全文 (3 件) ---」のような区切りは見出しであって発言ではない
+        if ($ln -match '^\s*---\s*スレッド全文') { continue }
+        if ($ln -match '^\s*---\s+(.+?)\s+/\s+(.+?)\s*$') {
+            if ($cur.text.ToString().Trim()) { [void] $msgs.Add($cur) }
+            $cur = @{ from = $Matches[1].Trim(); at = $Matches[2].Trim(); text = [Text.StringBuilder]::new() }
+            continue
+        }
+        [void] $cur.text.AppendLine($ln)
+    }
+    if ($cur.text.ToString().Trim()) { [void] $msgs.Add($cur) }
+
+    $out = @()
+    $first = $true
+    foreach ($m in $msgs) {
+        $o = [ordered]@{ from = $m.from; at = $m.at; text = $m.text.ToString().Trim() }
+        # 宛先と Cc は最初の1通にだけ添える (返信の宛名を決めるのに要る)
+        if ($first) {
+            if ($head.ContainsKey('宛先')) { $o['to'] = $head['宛先'] }
+            if ($head.ContainsKey('Cc'))   { $o['cc'] = $head['Cc'] }
+            $first = $false
+        }
+        $out += [pscustomobject] $o
+    }
+    return @($out)
+}
+
+# ---------------------------------------------------------------- 作業フォルダ
+#
+# 成果物が要るカードは、中身を眺めて終わりではなくファイルを触ることになる。
+# 1つずつ「中身を見る」で開くのでは足りないので、フォルダごと開けるようにする。
+#
+# パスは DB の記録か OutputRoot からのみ組み立てる。クライアントから受けた
+# パスは一切使わない (成果物の中身を返す口と同じ扱い)。
+function Get-TaskWorkspaceDir {
+    param($Conn, [int] $TaskId)
+    foreach ($r in @(Get-TaskArtifacts -Conn $Conn -TaskId $TaskId)) {
+        $p = [string] $r['path']
+        if (-not $p) { continue }
+        $dir = Split-Path -Parent $p
+        if ($dir -and (Test-Path -LiteralPath $dir)) { return (Resolve-Path -LiteralPath $dir).Path }
+    }
+    # 成果物がまだ無くても、ワーカーが作ったフォルダがあれば開ける
+    $guess = Join-Path $script:OutputRoot ("task-{0:D4}" -f $TaskId)
+    if (Test-Path -LiteralPath $guess) { return (Resolve-Path -LiteralPath $guess).Path }
+    return $null
+}
+
 function ConvertTo-CardObject {
     param($Row, $Counts, $Links)
     $o = ConvertTo-PlainObject $Row
@@ -516,8 +615,12 @@ function Invoke-Route {
     if ($path -eq '/api/setup/google/authorize' -and $method -eq 'POST') {
         if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
         $b = Read-JsonBody $Context
-        $cid = if ($b) { [string] $b.clientId } else { '' }
-        $sec = if ($b) { [string] $b.clientSecret } else { '' }
+        # 入力が空でも、配る人が用意したクライアントがあればそれで進む。
+        # 「Google Cloud でプロジェクトを作ってください」は、配った先では行き止まりになる。
+        $given = Get-GoogleClientCredential -ClientId $(if ($b) { [string] $b.clientId } else { '' }) `
+                                            -ClientSecret $(if ($b) { [string] $b.clientSecret } else { '' })
+        $cid = [string] $given.clientId
+        $sec = [string] $given.clientSecret
         if (-not $cid.Trim() -or -not $sec.Trim()) {
             Write-JsonResponse $Context @{ ok = $false; error = 'クライアント ID とシークレットを入力してください' } 400
             return
@@ -527,6 +630,60 @@ function Invoke-Route {
         $redirect = "http://127.0.0.1:$script:BoardPort/oauth/google/callback"
         $req = Get-GoogleAuthRequest -ClientId $cid -ClientSecret $sec -RedirectUri $redirect
         Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $req.url; redirectUri = $redirect })
+        return
+    }
+
+    # Slack も同意が要るが、Google と違って**戻り先に HTTPS を要求する。**
+    # 127.0.0.1 を直接登録できないので、戻り先は転送しかしない中継ページにして、
+    # そこから下の /oauth/slack/callback に戻してもらう。
+    # ポート番号は中継ページが知らないので state に埋めて渡す。
+    if ($path -eq '/api/setup/slack/authorize' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $b = Read-JsonBody $Context
+        $given = Get-SlackClientCredential -ClientId $(if ($b) { [string] $b.clientId } else { '' }) `
+                                           -ClientSecret $(if ($b) { [string] $b.clientSecret } else { '' })
+        if (-not ([string] $given.clientId).Trim() -or -not ([string] $given.clientSecret).Trim()) {
+            Write-JsonResponse $Context @{ ok = $false; error = 'クライアント ID とシークレットを入力してください' } 400
+            return
+        }
+        if (-not ([string] $given.redirectUri).Trim()) {
+            # ここが無いと同意画面まで行けない。配る人の作業なので、そう言う。
+            Write-JsonResponse $Context @{
+                ok = $false
+                error = '中継ページの URL が設定されていません (config\app-config.json の slack.redirectUrl)。配布元に確認してください。'
+            } 400
+            return
+        }
+        try {
+            $r = Get-SlackAuthRequest -ClientId $given.clientId -ClientSecret $given.clientSecret `
+                    -RedirectUri $given.redirectUri -BoardPort $script:BoardPort
+        }
+        catch {
+            Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400
+            return
+        }
+        Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $r.url; redirectUri = $r.redirectUri })
+        return
+    }
+
+    if ($path -eq '/oauth/slack/callback' -and $method -eq 'GET') {
+        $q = @{}
+        foreach ($pair in (([string] $req.Url.Query).TrimStart('?') -split '&')) {
+            $kv = $pair -split '=', 2
+            if ($kv.Count -eq 2) { $q[$kv[0]] = [Uri]::UnescapeDataString($kv[1]) }
+        }
+        $result = if (-not $script:Connectors) {
+            [pscustomobject]@{ ok = $false; error = '連携を読み込めていません' }
+        } else {
+            Complete-SlackAuth -Code $q['code'] -State $q['state'] -OAuthError $q['error']
+        }
+
+        $resumed = 0
+        if ($result.ok) {
+            $done = Invoke-SetupCompletion -Conn $Conn -Service 'slack' -Account $result.account
+            $resumed = $done.resumed
+        }
+        Write-OAuthResultPage -Context $Context -Result $result -Resumed $resumed
         return
     }
 
@@ -789,6 +946,11 @@ function Invoke-Route {
                 event    = (ConvertTo-PlainObject $d.event)
                 openLink = $openLink
                 outlet   = (Get-TaskOutlet $d.event)
+                # 返信先の内容。送る前にトーンを決めるのに要るので、
+                # 「元の通知」の折りたたみとは別に、割った形でも渡す。
+                conversation = @(Get-EventConversation $d.event)
+                # 成果物を触るためのフォルダ。無ければ null (画面はボタンを出さない)。
+                workspace = (Get-TaskWorkspaceDir -Conn $Conn -TaskId $taskId)
                 activity = @(Get-TaskActivity -Conn $Conn -TaskId $taskId | ForEach-Object { ConvertTo-PlainObject $_ })
                 # 実際に何を叩いて何が返ったか。「手を尽くしたのか」を
                 # 報告の書きぶりではなくここで確かめられるようにする。
@@ -913,13 +1075,65 @@ function Invoke-Route {
             'done' {
                 if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
                 $text = [string] $b.text
-                $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
-                        -Fields @{ user_edited = $text } -ExpectedVersion $expected
-                if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
-                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
-                $note = if ($text.Trim()) { '利用者が対応の記録を残して完了にしました' } else { '利用者が完了にしました' }
-                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message $note
+                # 空で押されたときに user_edited を空で上書きしない。
+                # 送る文面と対応の記録は同じ列に入るので、「送らずに完了」を
+                # 選んだだけで書きかけの文面が消えると取り返しがつかない。
+                if ($text.Trim()) {
+                    $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
+                            -Fields @{ user_edited = $text } -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                    [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                    Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' `
+                        -Message '利用者が対応の記録を残して完了にしました'
+                }
+                else {
+                    $ok = Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done' -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                    Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message '利用者が完了にしました'
+                }
                 Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # レビューで最も読まれるのはワーカーの報告で、多くはその内容で了として閉じる。
+            # 「対応の記録」を書き写させずに、承認したという事実だけを残して完了にする。
+            # 自分で手を動かして終わらせた場合 (done) とは意味が違うので、別の口にしている。
+            'approve' {
+                $note = ''
+                if ($b -and $null -ne $b.note) { $note = [string] $b.note }
+                if ($note.Trim()) {
+                    $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
+                            -Fields @{ user_edited = $note } -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                    [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                }
+                else {
+                    $ok = Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done' -ExpectedVersion $expected
+                    if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                }
+                $m = '利用者がワーカーの報告を承認して完了にしました'
+                if ($note.Trim()) { $m = '利用者がワーカーの報告を承認しました: ' + $note }
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' -Message $m
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # 成果物のあるカードは、中身を眺めて終わりではなくファイルを触ることになる。
+            # フォルダはサーバが DB の記録から決める。クライアントからパスは受け取らない。
+            'folder' {
+                $dir = Get-TaskWorkspaceDir -Conn $Conn -TaskId $taskId
+                if (-not $dir) {
+                    Write-JsonResponse $Context @{ ok = $false; error = 'このカードには作業フォルダがありません' } 404
+                    return
+                }
+                if ($env:OS -ne 'Windows_NT') {
+                    Write-JsonResponse $Context @{ ok = $false; error = 'この環境ではフォルダを開けません'; path = $dir } 500
+                    return
+                }
+                try { [void] (Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $dir)) }
+                catch {
+                    Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message; path = $dir } 500
+                    return
+                }
+                Write-JsonResponse $Context @{ ok = $true; path = $dir }
                 return
             }
             # 「送る」で終わるカードの出口。取り消せないので、ここだけは条件を厚くする:
@@ -927,6 +1141,10 @@ function Invoke-Route {
             #   - confirm が無いと送らない (UI の確認ダイアログを通った印)
             #   - 送る文面は先に user_edited へ保存する。送ったものと残るものを一致させる
             #   - version 照合。画面が古いまま押した場合は 409 で止める
+            #
+            # 送信は終わりとは限らない。「承知しました、対応します」と返してから
+            # 実際の作業が始まる用件があり、そこで完了に落とすとカードが行方不明になる。
+            # finish=false なら送ったうえで要対応に戻し、続きをワーカーに拾わせる。
             'send' {
                 if (-not $b -or -not $b.confirm) {
                     Write-JsonResponse $Context @{ error = '確認が必要です' } 400; return
@@ -996,8 +1214,19 @@ function Invoke-Route {
 
                 Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'sent' `
                     -Message ("利用者がカンバンから送信しました: {0}" -f $sentTo)
-                [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
-                Write-JsonResponse $Context @{ ok = $true; to = $sentTo; permalink = $permalink }
+
+                # 既定は「送って完了」。用件が残っているときだけ finish=false で戻す。
+                $finish = $true
+                if ($null -ne $b.finish) { $finish = [bool] $b.finish }
+                if ($finish) {
+                    [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
+                    $column = 'done'
+                }
+                else {
+                    $column = Request-TaskRework -Conn $Conn -TaskId $taskId `
+                                -Note '返信は送りましたが用件が残っているため、要対応に戻しました'
+                }
+                Write-JsonResponse $Context @{ ok = $true; to = $sentTo; permalink = $permalink; column = $column }
                 return
             }
             default {
@@ -1025,22 +1254,44 @@ function Invoke-Route {
 # ---------------------------------------------------------------- main
 
 $conn     = Open-TaskStore -Path $DbPath
-# OAuth の戻り先を組み立てるのに要る。戻り先は「いま開いているカンバン」。
-$script:BoardPort = $Port
-$listener = New-Object System.Net.HttpListener
-$listener.Prefixes.Add("http://127.0.0.1:$Port/")
-$listener.Prefixes.Add("http://localhost:$Port/")
 
-try {
-    $listener.Start()
+# ポートが埋まっていたら、隣を試す。
+#
+# 既定の 8787 が別のアプリに使われている PC は珍しくない。そこで諦めると、
+# 監視役が延々と起動し直すだけになり、画面は最後まで開かない ――
+# 配った先では「アイコンを押しても何も起きない」としか見えず、直しようがない。
+# 戻り先 (OAuth) は実際に開いたポートで組み立てるので、ずれても同意は通る。
+$listener = $null
+foreach ($p in $Port..($Port + 9)) {
+    $l = New-Object System.Net.HttpListener
+    $l.Prefixes.Add("http://127.0.0.1:$p/")
+    $l.Prefixes.Add("http://localhost:$p/")
+    try {
+        $l.Start()
+        if ($p -ne $Port) {
+            Write-Host ("ポート {0} は使われていたので {1} で開きました" -f $Port, $p) -ForegroundColor Yellow
+        }
+        $Port = $p
+        $listener = $l
+        break
+    }
+    catch { try { $l.Close() } catch { } }
 }
-catch {
-    Write-Host "ポート $Port を開けませんでした: $($_.Exception.Message)" -ForegroundColor Red
+if (-not $listener) {
+    Write-Host ("ポート {0} から {1} まで、どれも開けませんでした。" -f $Port, ($Port + 9)) -ForegroundColor Red
+    Write-Host '  config\app-config.json の startup.port を空いている番号に変えてください。' -ForegroundColor DarkGray
     $conn.Dispose()
     return
 }
 
+# OAuth の戻り先を組み立てるのに要る。戻り先は「いま開いているカンバン」。
+$script:BoardPort = $Port
+
 $url = "http://localhost:$Port/"
+# 実際に開いたポートを残す。監視役 (Start.ps1) はこれを読んで、
+# ずれていれば本当の URL を出す ―― 案内した番号が違うと、
+# 「開かない」と言われたときに見に行く先まで間違える。
+try { Set-Setting -Conn $conn -Key 'board.url' -Value $url } catch { }
 Write-Host "カンバンボード: $url" -ForegroundColor Green
 Write-Host "停止するには Ctrl+C" -ForegroundColor DarkGray
 if (-not $NoBrowser) { Start-Process $url }
@@ -1049,19 +1300,13 @@ try {
     while ($listener.IsListening) {
         $ctx = $listener.GetContext()
         try {
-            # DNS リバインディング対策。127.0.0.1 バインドでも Host は検証しておく。
-            $hostHeader = $ctx.Request.Headers['Host']
-            # 状態を変える要求は Origin も見る。ブラウザは別サイトからの POST に
-            # 必ず Origin を付けるので、外のページが localhost を叩いて
-            # 削除や送信を起こす経路をここで塞ぐ。同一オリジンからは付かないか、
-            # 自分自身の Origin が付く。
-            $origin = $ctx.Request.Headers['Origin']
-            $badOrigin = ($ctx.Request.HttpMethod -ne 'GET' -and $origin -and
-                          $origin -notmatch "^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
-            if ($hostHeader -and $hostHeader -notmatch '^(localhost|127\.0\.0\.1)(:\d+)?$') {
+            # 通すかどうかの判定は lib\RequestGuard.ps1 にある
+            # (ボードを起動しないと確かめられない場所に置くと、確かめられない)。
+            if (-not (Test-AllowedHost -HostHeader $ctx.Request.Headers['Host'])) {
                 $ctx.Response.StatusCode = 400
             }
-            elseif ($badOrigin) {
+            elseif (-not (Test-AllowedOrigin -Method $ctx.Request.HttpMethod `
+                            -Origin $ctx.Request.Headers['Origin'] -Port $Port)) {
                 $ctx.Response.StatusCode = 403
             }
             else {

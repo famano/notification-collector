@@ -98,7 +98,7 @@ try {
             if (-not $self) {
                 # メンション判定ができないと、拾えるのは DM と既知スレッドの続きだけになる
                 Write-Host '  注意: 自分の Slack ユーザーIDが不明です。メンションを拾えません。' -ForegroundColor Yellow
-                Write-Host '        Connect-Service.ps1 -Service slack で設定できます。' -ForegroundColor DarkGray
+                Write-Host '        カンバンのヘッダの「接続」から設定できます。' -ForegroundColor DarkGray
             }
             Write-Host ("Slack: {0} 以降を掃き寄せ" -f $from.ToString('MM/dd HH:mm')) -ForegroundColor Cyan
 

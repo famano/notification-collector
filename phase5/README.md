@@ -17,7 +17,8 @@
 | `lib/ChatworkConnector.ps1` | Chatwork。DM とメンションの掃き寄せ、同じ部屋への投稿 |
 | `lib/BacklogConnector.ps1` | Backlog。自分宛のお知らせ、課題へのコメント |
 | `lib/HtmlText.ps1` | HTML を平文に落とす (メールも Teams も本文が HTML で来る) |
-| `Connect-Service.ps1` | 設定ウィザード |
+| `lib/ServiceSetup.ps1` | 画面と端末の共通の設定経路 (保存・疎通確認・用意済みの判定) |
+| `Connect-Service.ps1` | 設定ウィザード (端末から。画面の「接続」と同じことをする) |
 | `Sync-Sources.ps1` | Slack / Teams / Chatwork の掃き寄せ・補完と、Gmail / Outlook / Backlog の取り込み |
 | `Reset-SlackContext.ps1` | 補完に失敗した印を消して再試行させる |
 
@@ -55,12 +56,15 @@
 **カンバンのヘッダの「接続」から設定できる。** 権限不足でカードが止まっているときは、
 その設定カードを開けばその場で入力できる（保存・疎通確認・止まっていたカードの再開まで）。
 仕組みは `lib/ServiceSetup.ps1` にあり、画面と端末の両方がここを呼ぶ。
+Claude の API キーも同じ経路に載っている（無いとカードが1枚も作られないので、
+画面では先頭に出て、未設定のうちはボードの上部に警告が出る）。
 
 端末から設定したい場合は従来どおり:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service slack
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service gmail
+powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service anthropic
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service microsoft
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service chatwork
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase5\Connect-Service.ps1 -Service backlog
@@ -93,12 +97,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 | `mention` | 自分が名指しされたもの (`<@自分>`) |
 | `thread` | **すでにカードがあるスレッドへの新しい返信** ＝ 会話の続き |
 
-`mention` の判定には自分のユーザーIDが要る。`Connect-Service.ps1 -Service slack` が
-メールアドレスか表示名から引いて保存する。User Token を入れた場合は `auth.test` で
-自動的に分かるので聞かない。
+`mention` の判定には自分のユーザーIDが要る。同意画面を通ると `authed_user.id` が
+そのまま本人なので、繋いだ時点で確定する（Bot Token だけの構成では `auth.test` が
+Bot を返すため、`Connect-Service.ps1 -Service slack` がメールアドレスや表示名から引く）。
 
 掃き寄せたメッセージは通知から来たものと同じ形の `slack://` リンクを持たせてある。
 そのため次の補完段がそのまま動き、スレッド全文も permalink も同じ経路で埋まる。
+
+### 接続のしかた（ユーザートークン / 同意画面）
+
+**カンバンの「接続」から Slack に繋ぐと、同意画面を通って自分のユーザートークンが入る。**
+以前は `xoxb-` / `xoxp-` を手で貼る方式だったが、**その画面に入れるのはアプリを
+作れる人だけ**で、配った先では永久に埋まらない空欄になっていた。
+
+Slack は OAuth の戻り先に **HTTPS を要求する**（Google の「デスクトップ アプリは
+ループバックを任意のポートで許す」に相当する例外が無い）。そのため
+`http://127.0.0.1:<port>/...` を直接登録できず、**転送しかしない中継ページ**を
+1枚挟む。ページは `docs/slack-oauth-redirect.html`、URL は配布設定の
+`slack.redirectUrl`。ポート番号は中継ページが知らないので `state` に埋めて渡し、
+戻ってきた `state` はカンバン側で照合する。
+
+中継ページを通るのは単回・短命の認可コードだけで、**トークンへの引き換えは
+client secret を持つ手元のカンバンでしか行えない。**
+
+求めるのは User Token Scopes だけで、`scope`（Bot 用）は空で投げる。
+ワークスペースに Bot を増やさないためで、結果として**チャンネルへの招待も要らない。**
 
 ### Bot Token と User Token
 
@@ -110,7 +133,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 | DM | Bot 自身宛のものだけ | **自分の DM が読める** |
 
 つまり Bot Token だけの構成では、**夜のあいだに来た DM は取りこぼしたままになる。**
-そこを埋めたい場合は User Token を入れる。投稿は Bot Token がある限り Bot 名義のまま。
+このアプリが要るのは「本人に届いたもの」なので、**既定は User Token だけ**にしてある。
+
+Bot Token は任意。入れると投稿だけが Bot 名義になる（読み取りは User Token を優先）。
+端末から足す: `.\phase5\Connect-Service.ps1 -Service slack`
 
 ### 補完
 
@@ -300,6 +326,15 @@ DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する
 
 疎通確認に失敗したときは**保存前の値に戻す**。貼り間違えたトークンが残ると
 「設定済みなのに全部 401」という一番分かりにくい状態になるため。
+
+### 配る人が用意した分の取り込み
+
+利用者の権限では取れないもの ―― Google の OAuth クライアント、Slack アプリのトークン、
+Claude の API キー ―― は、配る人が `config\app-config.json` に入れておける。
+起動時に `Import-AppConfigSecrets` が保管庫へ取り込み、**すでにある項目は上書きしない**
+(画面から入れ直した値が次の起動で配布時の値に戻らないようにするため)。
+取り込まれていれば画面に入力欄は出ず、Google は「接続する」を押すだけになる。
+詳しくは [docs/配布手順.md](../docs/配布手順.md)。
 
 ## 他のサービスの調査
 

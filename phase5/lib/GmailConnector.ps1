@@ -145,7 +145,7 @@ function Get-GmailAccessToken {
     $ref = Get-Secret -Name 'gmail.refreshToken'
     if (-not $ref) {
         Clear-GmailAccessToken
-        throw 'Gmail が未設定です。Connect-Service.ps1 -Service gmail を実行してください。'
+        throw 'Gmail が未設定です。カンバンのヘッダの「接続」から設定してください。'
     }
     if ($script:GmailToken -and $script:GmailTokenSource -eq $ref -and (Get-Date) -lt $script:GmailTokenExpiry) {
         return $script:GmailToken

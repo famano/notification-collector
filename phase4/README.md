@@ -6,7 +6,8 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\phase4\Start-Worker.ps1
 ```
 
-`-Once` で1周だけ実行。`ANTHROPIC_API_KEY` が必要。
+`-Once` で1周だけ実行。Claude の API キーが要る（環境変数 `ANTHROPIC_API_KEY`、
+カンバンの「接続」から入れたもの、配布設定のいずれか。`lib\ApiKey.ps1` が順に見る）。
 
 ## 何をきっかけに動くのか
 
@@ -97,7 +98,7 @@ Gmail も Outlook も Slack も Teams も Chatwork も Backlog も通知 DB も�
 
 | ツール | 承認 | 内容 |
 |---|---|---|
-| `propose_reply` | 不要 | 返信文面を「送る文面」欄に載せる（返信先があるカードのみ） |
+| `propose_reply` | 不要 | 返信文面をカンバンの「送る」欄に載せる（返信先があるカードのみ） |
 | `require_human_step` | 不要 | 本人にしかできない1手を提示して閉じる（後述の条件あり） |
 | `create_email_draft` | 不要 | メールの下書きを `.eml` として作成 |
 | `create_gmail_draft` | **必要** | Gmail に本物の下書きを作成（Gmail 連携時のみ） |
@@ -167,8 +168,8 @@ URL だけで塞ぐとチャットの本文が取れなくなる。
 ### 送信を指示されていないときは、文面をカードに載せる
 
 返信先があるカードで利用者が送信を指示していない場合、`propose_reply` で
-**カンバンの「送る文面」欄に文面を置く**（`tasks.draft_text`）。利用者はその欄で
-内容を直し、そこから送信できる。
+**カンバンの「送る」欄に文面を置く**（`tasks.draft_text`）。利用者はその欄で
+内容を直し、相手の言い分を隣に読みながら、そこから送信できる。
 
 外へは出ないので承認は要らない。書き込むのは `draft_text` で、`user_edited`
 （利用者が確定させた版）は踏まない。何度作り直しても手を入れた内容は消えない。

@@ -18,10 +18,11 @@
     こちらは要約だけを出す。詳しく見たいときは -Follow か logs\ を直接見る。
 
 .PARAMETER Port
-    カンバンのポート。既定 8787。
+    カンバンのポート。省略時は config\app-config.json の startup.port、無ければ 8787。
+    そのポートが使われていた場合、カンバンは隣の空きポートで開く。
 
 .PARAMETER NoTriage
-    カード化を行わない。ANTHROPIC_API_KEY を使わずに取り込みだけ試すとき用。
+    カード化を行わない。API キーを使わずに取り込みだけ試すとき用。
     ワーカーも起動しない (処理するカードが増えないため)。
 
 .PARAMETER NoWorker
@@ -34,6 +35,8 @@
     起動しているこのリポジトリのプロセスを止めるだけ。
     親を強制終了して子が残ってしまったときの後始末用。
 
+    通常はここではなく Start.cmd (ダブルクリック) から起動される。
+
 .EXAMPLE
     .\Start.ps1
     .\Start.ps1 -Port 9000
@@ -42,7 +45,8 @@
 #>
 [CmdletBinding()]
 param(
-    [int]    $Port = 8787,
+    # 0 のときは配布設定 (config\app-config.json) の startup.port、無ければ 8787。
+    [int]    $Port = 0,
     [string] $DbPath,
     [int]    $NotifyIntervalSeconds = 5,
     [int]    $SyncIntervalSeconds = 180,
@@ -55,6 +59,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\phase2\lib\TaskStore.ps1"
+# API キーの置き場所 (環境変数 / 保管庫 / 配布設定) と配布設定の取り込み。
+. "$PSScriptRoot\lib\ApiKey.ps1"
+
+if ($Port -le 0) { $Port = Get-AppConfigInt -Path 'startup.port' -Default 8787 }
+if (-not $PSBoundParameters.ContainsKey('NoBrowser') -and -not (Get-AppConfigBool -Path 'startup.openBrowser' -Default $true)) {
+    $NoBrowser = [switch]::Present
+}
 
 $LogDir = Join-Path $PSScriptRoot 'logs'
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
@@ -141,16 +152,40 @@ Write-Host ''
 Write-Host 'notification-collector' -ForegroundColor Cyan
 Write-Host ''
 
-if (-not $NoTriage -and -not $env:ANTHROPIC_API_KEY) {
-    # ここで止める。3つ起動してから個別に失敗されると、
-    # 「動いているのにカードが増えない」という一番分かりにくい形になる。
-    Write-Host 'ANTHROPIC_API_KEY が設定されていません。' -ForegroundColor Red
-    Write-Host '判断とワーカーはこのキーを使います。設定して再実行してください:' -ForegroundColor Yellow
-    Write-Host '  $env:ANTHROPIC_API_KEY = ''sk-ant-...''' -ForegroundColor DarkGray
-    Write-Host ''
-    Write-Host 'キー無しで取り込みだけ試すなら -NoTriage を付けてください。' -ForegroundColor DarkGray
-    Write-Host ''
-    return
+# 配る人が同梱した資格情報を保管庫へ取り込む。すでに入っているものは触らない。
+# これがあるので、利用者は「自分では取れないトークン」を一度も見ずに済む。
+try {
+    $imported = @(Import-AppConfigSecrets)
+    if ($imported.Count -gt 0) {
+        Write-Host ("配布設定から資格情報を取り込みました ({0} 件)" -f $imported.Count) -ForegroundColor DarkGray
+    }
+    [void] (Protect-AppConfigFile)
+    # 取り込みが済んでも、平文のキーはファイルに残り続ける。フォルダごとコピーすれば
+    # 一緒に運ばれ、バックアップにも同期フォルダにも残る。もう消してよいことは、
+    # 言わないと伝わらない (そして、たいてい消されないまま配り直される)。
+    if (Test-AppConfigHasPlainSecrets) {
+        Write-Host '  config\app-config.json に資格情報が平文で残っています。' -ForegroundColor DarkYellow
+        Write-Host '  保管庫に入っているので、該当の欄は空にしてかまいません。' -ForegroundColor DarkGray
+    }
+}
+catch {
+    Write-Host ("配布設定を取り込めませんでした: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+}
+
+# キーが無くても**起動する**。
+#
+# 以前はここで止めていた。開発機ではそれでよい ―― 環境変数を設定して打ち直せばよい。
+# だが配った先では、これは行き止まりになる。画面が出ないので、
+# 「どこで何を入れればよいか」を出す場所そのものが無い。ダブルクリックした人から見ると
+# 「一瞬黒い窓が出て消えた」だけで、次の一手が存在しない。
+#
+# そこで取り込みとカンバンだけ先に立ち上げ、キーは画面から受け取る。
+# 入った瞬間に判定とワーカーを足す (下の監視ループが見ている)。
+$script:TriageOn     = (-not $NoTriage)
+$script:WaitingForKey = $false
+if ($script:TriageOn -and -not (Test-AnthropicConfigured)) {
+    $script:TriageOn      = $false
+    $script:WaitingForKey = $true
 }
 
 # 連携の状況を先に見せる。未設定でも動くが、何ができない状態なのかは
@@ -168,7 +203,8 @@ try {
     $msOn     = Test-GraphConfigured
     $cwOn     = Test-ChatworkConfigured
     $blOn     = Test-BacklogConfigured
-    Write-Host ("連携: Slack={0} / Gmail={1} / GitHub={2} / Microsoft365={3} / Chatwork={4} / Backlog={5}" -f `
+    Write-Host ("接続: Claude={0} / Slack={1} / Gmail={2} / GitHub={3} / Microsoft365={4} / Chatwork={5} / Backlog={6}" -f `
+        $(if ($script:TriageOn) { '有効' } elseif ($NoTriage) { '使わない' } else { '未設定' }),
         $(if ($slackOn) { '有効' } else { '未設定' }),
         $(if ($gmailOn) { '有効' } else { '未設定' }),
         $(if ($githubOn) { '有効' } else { '未設定' }),
@@ -177,11 +213,24 @@ try {
         $(if ($blOn) { '有効' } else { '未設定' })) -ForegroundColor DarkGray
     if (-not $githubOn) {
         Write-Host '  GitHub 未設定: 招待の承諾や非公開リポの調査は本人操作になります' -ForegroundColor DarkGray
-        Write-Host '  設定する: .\phase5\Connect-Service.ps1 -Service github' -ForegroundColor DarkGray
+        Write-Host '  設定する: カンバンのヘッダの「接続」から' -ForegroundColor DarkGray
     }
 }
 catch {
-    Write-Host ("連携の確認に失敗しました: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray
+    # 一番多いのは「別の PC / 別のユーザーで作られた secrets.dat を持ってきた」。
+    # DPAPI は持ち主以外には復号できないので、消して入れ直す以外に道がない。
+    # そのことを言わずに「失敗しました」とだけ出すと、直しようがない。
+    Write-Host ("接続の確認に失敗しました: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    Write-Host ("  別の PC やユーザーで作られた資格情報は使えません。" +
+                "phase5\data\secrets.dat を削除してから、カンバンの「接続」で入れ直してください。") -ForegroundColor DarkGray
+}
+
+if ($script:WaitingForKey) {
+    Write-Host ''
+    Write-Host 'Claude の API キーがまだ設定されていません。' -ForegroundColor Yellow
+    Write-Host '  取り込みとカンバンは動きますが、カードは作られません。' -ForegroundColor DarkGray
+    Write-Host '  開いたカンバンの右上「接続」から入力してください。' -ForegroundColor DarkGray
+    Write-Host '  入力できたら、判定とワーカーはこのまま自動で動き始めます (再起動は不要です)。' -ForegroundColor DarkGray
 }
 
 $n = Stop-Running -Quiet
@@ -189,7 +238,9 @@ if ($n -gt 0) { Write-Host ("前回のプロセスが残っていたため {0} �
 
 # ---------------------------------------------------------------- 子プロセス
 
-$Children = @()
+# キーが後から入ったときにワーカーを足すので、関数からも触れる場所に置く。
+# (スクリプト直下の変数はスクリプトスコープなので、$Children と $script:Children は同じもの)
+$script:Children = @()
 
 function Start-Child {
     param(
@@ -220,26 +271,76 @@ function Restart-Child {
 $dbArgs = @()
 if ($DbPath) { $dbArgs = @('-DbPath', $DbPath) }
 
-$collectorArgs = $dbArgs + @('-NotifyIntervalSeconds', $NotifyIntervalSeconds, '-SyncIntervalSeconds', $SyncIntervalSeconds)
-if ($NoTriage) { $collectorArgs += '-NoTriage' }
+function Get-CollectorArgs {
+    $a = $dbArgs + @('-NotifyIntervalSeconds', $NotifyIntervalSeconds, '-SyncIntervalSeconds', $SyncIntervalSeconds)
+    if (-not $script:TriageOn) { $a += '-NoTriage' }
+    return $a
+}
 
 $boardArgs = $dbArgs + @('-Port', $Port)
 if ($NoBrowser) { $boardArgs += '-NoBrowser' }
 
 Write-Host ''
-$Children += Start-Child -Name 'collector' -Script (Join-Path $PSScriptRoot 'Start-Collector.ps1') -Arguments $collectorArgs
+$Children += Start-Child -Name 'collector' -Script (Join-Path $PSScriptRoot 'Start-Collector.ps1') -Arguments (Get-CollectorArgs)
 Write-Host '  収集を起動しました' -ForegroundColor Green
 
-if (-not $NoWorker -and -not $NoTriage) {
+if (-not $NoWorker -and $script:TriageOn) {
     $Children += Start-Child -Name 'worker' -Script (Join-Path $PSScriptRoot 'phase4\Start-Worker.ps1') -Arguments $dbArgs
     Write-Host '  ワーカーを起動しました' -ForegroundColor Green
+}
+elseif ($script:WaitingForKey) {
+    Write-Host '  ワーカーは API キーが入ってから起動します' -ForegroundColor DarkGray
 }
 else {
     Write-Host '  ワーカーは起動しません' -ForegroundColor DarkGray
 }
 
 $Children += Start-Child -Name 'board' -Script (Join-Path $PSScriptRoot 'phase3\Start-Board.ps1') -Arguments $boardArgs
-Write-Host ("  カンバンを起動しました: http://127.0.0.1:{0}/" -f $Port) -ForegroundColor Green
+Write-Host ("  カンバンを起動しました: http://localhost:{0}/ (ブラウザが開きます)" -f $Port) -ForegroundColor Green
+$script:AnnouncedUrl = "http://localhost:$Port/"
+
+# キーが画面から入ったときに、止めずに判定とワーカーを足す。
+#
+# 「再起動してください」で済ませない理由: そのとき窓は最小化されていて、
+# 利用者が見ているのはブラウザのカンバンである。入力した直後に
+# 「窓を探して閉じて、アイコンをもう一度押してください」と言うのは、
+# 設定を画面の中で完結させた意味を自分で捨てることになる。
+function Enable-Triage {
+    Write-Host ''
+    Write-Host ("[{0}] API キーを確認しました。判定とワーカーを開始します" -f (Get-Date -Format 'HH:mm:ss')) -ForegroundColor Green
+
+    # 途中で失敗しても監視役ごと落とさない。落とすと、キーを入れた直後に
+    # 画面ごと止まったように見える (一番説明しにくい壊れ方になる)。
+    try {
+        $script:TriageOn = $true
+        $collector = @($script:Children | Where-Object { $_.name -eq 'collector' })[0]
+        if ($collector) {
+            # 引数が変わるので作り直す。-NoTriage 付きで起動した子は、
+            # そのままでは何度再起動しても判定を始めない。
+            $collector.arguments = (Get-CollectorArgs)
+            if (-not $collector.process.HasExited) {
+                try { Stop-Process -Id $collector.process.Id -Force -ErrorAction Stop } catch { }
+                # 終わり切るまで待つ。同じログファイルに書き直すので、
+                # 前の子がまだ掴んでいると起動に失敗する。
+                try { [void] $collector.process.WaitForExit(5000) } catch { }
+            }
+            Restart-Child -Child $collector
+            Write-Host '  収集を判定ありで起動し直しました' -ForegroundColor Green
+        }
+
+        if (-not $NoWorker -and -not @($script:Children | Where-Object { $_.name -eq 'worker' })) {
+            $script:Children += Start-Child -Name 'worker' -Script (Join-Path $PSScriptRoot 'phase4\Start-Worker.ps1') -Arguments $dbArgs
+            Write-Host '  ワーカーを起動しました' -ForegroundColor Green
+        }
+        Save-RunState -Children $script:Children
+        $script:WaitingForKey = $false
+    }
+    catch {
+        # 待ち状態のままにして、次の周回でもう一度試す。
+        $script:TriageOn = $false
+        Write-Host ("  開始できませんでした (次の周回でもう一度試します): {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
 
 # 誰を動かしたかを残す。別のシェルから -Stop で止めるとき、
 # ここに書いた pid だけを対象にする。
@@ -254,6 +355,9 @@ Write-Host ''
 function Get-StatusLine {
     param($Conn)
     $parts = @()
+    # 一番上に出す。「動いているのにカードが増えない」の原因がこれなら、
+    # 数字の羅列より先にそう言うべきである。
+    if ($script:WaitingForKey) { $parts += 'Claude=未設定 (カンバンの「接続」から)' }
 
     $hb = Get-Setting -Conn $Conn -Key 'collector.heartbeat'
     if (-not $hb) { $parts += '収集=未開始' }
@@ -293,7 +397,28 @@ try {
     # 再起動を繰り返してログが埋まり、原因が読めなくなる。
     $restartBackoffSec = 10
 
+    # 画面からキーが入るのを待つ間だけ、少し間を置いて見に行く。
+    # (保管庫は別プロセスが書く。監視役はファイルを見るしかない)
+    $nextKeyCheck = (Get-Date).AddSeconds(5)
+
     while ($true) {
+        # ポートが埋まっていてカンバンが隣に逃げた場合、本当の URL を一度だけ出す。
+        if ($script:AnnouncedUrl) {
+            $real = Get-Setting -Conn $conn -Key 'board.url'
+            if ($real -and $real -ne $script:AnnouncedUrl) {
+                Write-Host ("[{0}] カンバンは {1} で開いています (ポートが使われていたため)" -f `
+                    (Get-Date -Format 'HH:mm:ss'), $real) -ForegroundColor Yellow
+                $script:AnnouncedUrl = $real
+            }
+        }
+
+        if ($script:WaitingForKey -and (Get-Date) -ge $nextKeyCheck) {
+            $nextKeyCheck = (Get-Date).AddSeconds(15)
+            $found = $false
+            try { $found = Test-AnthropicConfigured } catch { }
+            if ($found) { Enable-Triage }
+        }
+
         foreach ($c in $Children) {
             if (-not $c.process.HasExited) { continue }
             $since = ((Get-Date) - $c.lastStart).TotalSeconds

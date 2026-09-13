@@ -24,7 +24,7 @@
     1周だけ実行して終了する (動作確認用)。
 
 .PARAMETER NoTriage
-    カード化を行わない。ANTHROPIC_API_KEY を使わずに取り込みだけ試すとき用。
+    カード化を行わない。API キーを使わずに取り込みだけ試すとき用。
 
 .EXAMPLE
     .\Start-Collector.ps1
@@ -46,6 +46,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\phase2\lib\TaskStore.ps1"
+. "$PSScriptRoot\lib\ApiKey.ps1"
 
 $NotifyScript = Join-Path $PSScriptRoot 'phase1\Get-Notifications.ps1'
 $SyncScript   = Join-Path $PSScriptRoot 'phase5\Sync-Sources.ps1'
@@ -126,9 +127,11 @@ function Invoke-TriageStep {
     [void] (Invoke-Step 'トリアージ' { & $TriageScript @dbArgs })
 }
 
-if (-not $env:ANTHROPIC_API_KEY -and -not $NoTriage) {
+if (-not $NoTriage -and -not (Test-AnthropicConfigured)) {
     # 取り込みまでは動くが、カードにはならない。黙って進むと原因が分からなくなる。
-    Write-Host 'ANTHROPIC_API_KEY が設定されていません。取り込みは行いますが、カードは作られません。' -ForegroundColor Yellow
+    # キーの置き場所は環境変数だけではないので、判定は ApiKey.ps1 に任せる。
+    Write-Host 'Claude の API キーが設定されていません。取り込みは行いますが、カードは作られません。' -ForegroundColor Yellow
+    Write-Host 'カンバンのヘッダの「接続」から入力できます。' -ForegroundColor DarkGray
 }
 
 Write-Host ("収集を開始します (通知 {0}秒 / 同期 {1}秒) — Ctrl+C で停止" -f $NotifyIntervalSeconds, $SyncIntervalSeconds) -ForegroundColor Yellow

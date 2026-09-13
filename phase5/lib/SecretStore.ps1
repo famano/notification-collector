@@ -8,6 +8,39 @@
 
 Add-Type -AssemblyName System.Security
 
+function Set-PrivateFileAcl {
+    <#
+      .SYNOPSIS
+        そのファイルを「このユーザーだけが読める」状態にする。
+      .DESCRIPTION
+        DPAPI は中身を守るが、**ファイルの見え方までは変えない。** 既定では
+        Users グループに読み取りが継承されていることがあり、同じ PC の別アカウントに
+        暗号文ごとコピーされうる (復号はできないが、持ち出しの一歩にはなる)。
+        平文で置かざるを得ない配布設定では、もっと直接的に効く。
+
+        守れる範囲は限られる ―― **同じユーザーで動くプロセスからは守れない。**
+        管理者は所有権を取れる。ここで消せるのは「同居している別アカウント」と
+        「うっかり共有フォルダに置いた」場合の露出だけで、それ以上ではない。
+      .OUTPUTS
+        [bool] 絞れたかどうか (Windows 以外や失敗時は $false)
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+    # PowerShell 7 以降は $IsWindows がある。5.1 には無いので $null を Windows と見なす。
+    if ($null -ne $IsWindows -and -not $IsWindows) { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $me  = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = New-Object Security.AccessControl.FileSecurity
+        # 継承を切ってから自分だけを足す。足すだけでは既存の継承が残る。
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $me, 'FullControl', 'Allow')))
+        Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+        return $true
+    }
+    catch { return $false }
+}
+
 function Get-SecretStorePath {
     param([string] $Path)
     if ($Path) { return $Path }
@@ -51,6 +84,7 @@ function Write-SecretStore {
     $p = Get-SecretStorePath $Path
     $json = ($Store | ConvertTo-Json -Depth 8 -Compress)
     [IO.File]::WriteAllText($p, (Protect-Text $json), [Text.Encoding]::ASCII)
+    [void] (Set-PrivateFileAcl -Path $p)
 }
 
 # 1件取り出す。$Name は 'slack.botToken' のようなドット区切り。

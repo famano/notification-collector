@@ -1062,10 +1062,17 @@ function Request-TaskRework {
       .DESCRIPTION
         指示を書くのは「これを踏まえてやり直して」のときである。
         レビュー待ちや完了に置いたままだとワーカーは拾わず、指示は読まれない。
+      .PARAMETER Note
+        作業ログに残す理由。戻す事情は指示だけではない (返信を送ったが用件は
+        終わっていない、など) ので、呼ぶ側が実際の理由を書けるようにする。
       .OUTPUTS
         [string] 処理後の列。カードが無ければ $null。
     #>
-    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [string] $Note = '指示が届いたので、要対応に戻しました'
+    )
     $rows = @($Conn.Query('SELECT board_column, shape, archived_at, cancel_requested FROM tasks WHERE id = ?',
                           [object[]] @($TaskId)))
     if ($rows.Count -eq 0) { return $null }
@@ -1087,7 +1094,7 @@ function Request-TaskRework {
         [void] (Set-TaskColumn -Conn $Conn -TaskId $TaskId -Column 'todo')
     }
     if ($col -ne 'todo' -or $wasCancelled) {
-        Add-TaskActivity -Conn $Conn -TaskId $TaskId -Kind 'user' -Message '指示が届いたので、要対応に戻しました'
+        Add-TaskActivity -Conn $Conn -TaskId $TaskId -Kind 'user' -Message $Note
     }
     return 'todo'
 }

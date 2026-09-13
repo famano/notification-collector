@@ -10,11 +10,11 @@
 
 .PARAMETER DryRun
     LLM を呼ばず、ルール判定の結果だけを表示する。書き込みも行わない。
-    ANTHROPIC_API_KEY が無くても配線を確認できる。
+    API キーが無くても配線を確認できる。
 
 .EXAMPLE
     .\Invoke-Triage.ps1 -DryRun
-    $env:ANTHROPIC_API_KEY = '...'; .\Invoke-Triage.ps1
+    .\Invoke-Triage.ps1          # キーは環境変数 / 保管庫 / 配布設定のどこにあってもよい
 #>
 [CmdletBinding()]
 param(

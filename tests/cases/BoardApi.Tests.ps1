@@ -27,13 +27,16 @@ function Start-TestBoard {
       .OUTPUTS
         @{ process; port; base; db } / 起動できなければ $null
     #>
-    param([string] $DbPath)
+    param([string] $DbPath, [string] $OutputRoot)
     $port = Get-FreePort
     # いま動いている処理系でそのまま起動する (Windows なら powershell.exe)
     $exe = (Get-Process -Id $PID).Path
+    # 作業フォルダも一時フォルダに向ける。既定 (phase4\output) のままだと、
+    # 開発機に残っているフォルダの有無でテストの結果が変わる。
     $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                 (Join-Path $RepoRoot 'phase3\Start-Board.ps1'),
-                '-Port', $port, '-NoBrowser', '-DbPath', $DbPath)
+                '-Port', $port, '-NoBrowser', '-DbPath', $DbPath,
+                '-OutputRoot', $OutputRoot)
     $start = @{ FilePath = $exe; ArgumentList = $psArgs; PassThru = $true }
     # -WindowStyle は Windows 以外の PowerShell では受け付けられない
     if ($env:OS -eq 'Windows_NT') { $start['WindowStyle'] = 'Hidden' }
@@ -141,9 +144,33 @@ $reviewId  = [int] (New-Task -Conn $seed -Title 'レビュー待ちのカード'
 $doneId    = [int] (New-Task -Conn $seed -Title '完了のカード' -Column 'done')
 $reworkId  = [int] (New-Task -Conn $seed -Title '指示でやり直すカード' -Column 'review')
 $doingId   = [int] (New-Task -Conn $seed -Title '実行中のカード' -Column 'doing')
+$approveId = [int] (New-Task -Conn $seed -Title '報告を承認するカード' -Column 'review')
+$keepId    = [int] (New-Task -Conn $seed -Title '記録を消さないカード' -Column 'review')
+[void] (Update-TaskFields -Conn $seed -TaskId $keepId -Fields @{ user_edited = '書きかけの文面' })
+
+# 返信先の内容を割って返せるか。Phase 5 が積む形をそのまま入れる。
+$mailEv = Add-Event -Conn $seed -Source 'gmail' -SourceKey 'm1' -App 'Gmail' -AppId 'gmail' `
+            -OccurredAt '2026-09-12T10:00:00' -Title '請求書の件' `
+            -Body "差出人: 田中 <tanaka@example.com>`n宛先: me@example.com`nCc: keiri@example.com`n日時: Fri, 12 Sep 2026 10:00:00 +0900`n`nお世話になっております。`n請求書をお送りします。"
+$mailId = [int] (New-Task -Conn $seed -EventId $mailEv.id -Title '請求書の件' -Column 'review')
+
+$slackEv = Add-Event -Conn $seed -Source 'slack' -SourceKey 's1' -App 'Slack' -AppId 'slack' `
+            -OccurredAt '2026-09-12T11:00:00' -Title '#general / 佐藤' `
+            -Body "見てもらえますか`n`n--- スレッド全文 (2 件) ---`n--- 佐藤 / 11:00`nこれ確認できますか`n`n--- 鈴木 / 11:05`n私も気になっていました"
+$slackId = [int] (New-Task -Conn $seed -EventId $slackEv.id -Title '#general / 佐藤' -Column 'review')
 $seed.Dispose()
 
-$board = Start-TestBoard -DbPath $dbPath
+# 成果物のあるカード。フォルダの場所は DB の記録から引けること。
+$artDir = Join-Path $dbDir 'task-0099'
+[void] (New-Item -ItemType Directory -Path $artDir -Force)
+$artFile = Join-Path $artDir '成果物.md'
+Set-Content -LiteralPath $artFile -Value '# 出力' -Encoding UTF8
+$seed2 = Open-TaskStore -Path $dbPath
+$artId = [int] (New-Task -Conn $seed2 -Title '成果物のあるカード' -Column 'review')
+Add-TaskArtifact -Conn $seed2 -TaskId $artId -Path $artFile
+$seed2.Dispose()
+
+$board = Start-TestBoard -DbPath $dbPath -OutputRoot (Join-Path $dbDir 'output')
 if (-not $board) {
     Describe 'カンバンの API' { Skip-It 'すべて' 'ボードを起動できませんでした (ポートを開けない環境)' }
     return
@@ -249,6 +276,87 @@ Describe 'カードの出口' {
     }
 }
 
+Describe '報告を承認して閉じる' {
+
+    # レビューで一番読まれるのはワーカーの報告で、多くはその内容で了として閉じる。
+    # 「対応の記録」を書き写させずに閉じられること。
+    It '承認すると完了に移り、承認したことが作業ログに残る' {
+        $t = (Invoke-Board $board ("/api/tasks/$approveId")).body.task
+        $r = Invoke-Board $board ("/api/tasks/$approveId/approve") 'POST' @{ version = $t.version }
+        Assert-Equal 200 $r.status
+        $d = (Invoke-Board $board ("/api/tasks/$approveId")).body
+        Assert-Equal 'done' $d.task.board_column
+        Assert-Match '承認' ([string] (@($d.activity)[-1].message))
+    }
+
+    It '古い版で押したら 409 (画面が古いまま押した場合)' {
+        Assert-Equal 409 (Invoke-Board $board ("/api/tasks/$approveId/approve") 'POST' @{ version = 1 }).status
+    }
+
+    It 'ひとことを残せば、それが記録として残る' {
+        $t = (Invoke-Board $board ("/api/tasks/$doneId")).body.task
+        $r = Invoke-Board $board ("/api/tasks/$doneId/approve") 'POST' @{ note = '妥当と判断'; version = $t.version }
+        Assert-Equal 200 $r.status
+        Assert-Equal '妥当と判断' (Invoke-Board $board ("/api/tasks/$doneId")).body.task.user_edited
+    }
+
+    # 送る文面と対応の記録は同じ列に入る。「送らずに完了」を選んだだけで
+    # 書きかけの文面が消えると取り返しがつかない。
+    It '空のまま完了にしても、書きかけの文面は消えない' {
+        $t = (Invoke-Board $board ("/api/tasks/$keepId")).body.task
+        $r = Invoke-Board $board ("/api/tasks/$keepId/done") 'POST' @{ text = ''; version = $t.version }
+        Assert-Equal 200 $r.status
+        $after = (Invoke-Board $board ("/api/tasks/$keepId")).body.task
+        Assert-Equal 'done' $after.board_column
+        Assert-Equal '書きかけの文面' $after.user_edited
+    }
+}
+
+Describe '返信先の内容' {
+
+    # 送る前にいちばん要るのは「相手が何と言ってきたか」。文字列のまま画面に
+    # 渡すと、形を知っている場所がサーバと画面の2つに増える。ここで割る。
+    It 'メールは差出人・宛先・日時と本文に割れる' {
+        $c = @((Invoke-Board $board ("/api/tasks/$mailId")).body.conversation)
+        Assert-Equal 1 $c.Count
+        Assert-Match 'tanaka@example.com' ([string] $c[0].from)
+        Assert-Equal 'me@example.com' ([string] $c[0].to)
+        Assert-Equal 'keiri@example.com' ([string] $c[0].cc)
+        Assert-Match '請求書をお送りします' ([string] $c[0].text)
+        # 見出しは本文に混ぜない
+        Assert-True (([string] $c[0].text) -notmatch '差出人:')
+    }
+
+    It 'Slack はスレッドの発言ごとに割れる' {
+        $c = @((Invoke-Board $board ("/api/tasks/$slackId")).body.conversation)
+        Assert-Equal 3 $c.Count
+        Assert-Equal '佐藤' ([string] $c[1].from)
+        Assert-Equal '鈴木' ([string] $c[2].from)
+        # 「--- スレッド全文 (2 件) ---」は見出しであって発言ではない
+        Assert-True (([string] $c[0].text) -notmatch 'スレッド全文')
+    }
+
+    It '元の通知が無いカードは空になる' {
+        Assert-Equal 0 @((Invoke-Board $board ("/api/tasks/$todoId")).body.conversation).Count
+    }
+}
+
+Describe '作業フォルダ' {
+
+    # 成果物が要るカードはファイルを触ることになる。開く先はサーバが
+    # DB の記録から決める (画面からパスは受け取らない)。
+    It '成果物のあるカードはフォルダの場所が返る' {
+        $d = (Invoke-Board $board ("/api/tasks/$artId")).body
+        Assert-NotNull $d.workspace
+        Assert-Match 'task-0099' ([string] $d.workspace)
+    }
+
+    It '作業フォルダの無いカードは場所も返らず、開けない (404)' {
+        Assert-Null (Invoke-Board $board ("/api/tasks/$todoId")).body.workspace
+        Assert-Equal 404 (Invoke-Board $board ("/api/tasks/$todoId/folder") 'POST' @{}).status
+    }
+}
+
 Describe '編集' {
 
     It '編集欄を保存できる' {
@@ -327,6 +435,14 @@ Describe '外から叩かれたとき' {
     It '別サイトからの POST は Origin で弾く' {
         $r = Invoke-Board $board ("/api/tasks/$todoId/comment") 'POST' @{ body = '外から' } `
                 @{ Origin = 'https://evil.example' }
+        Assert-Equal 403 $r.status
+    }
+
+    It '同じ PC の別のローカルサーバからの POST も弾く' {
+        # 「localhost なら通す」にすると、開発サーバや他のアプリのローカル UI が
+        # 出したページから、この画面の操作を起こせてしまう。
+        $r = Invoke-Board $board ("/api/tasks/$todoId/comment") 'POST' @{ body = '隣のポートから' } `
+                @{ Origin = ('http://localhost:' + ($board.port + 1)) }
         Assert-Equal 403 $r.status
     }
 

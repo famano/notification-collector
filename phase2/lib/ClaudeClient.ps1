@@ -1,6 +1,11 @@
 ﻿# ClaudeClient.ps1
 # Claude API 呼び出し。PowerShell に公式 SDK が無いため素の HTTP で叩く。
-# API キーは環境変数 ANTHROPIC_API_KEY から読む (ファイルには置かない)。
+#
+# API キーの取得元は lib\ApiKey.ps1 が決める。環境変数だけにしていた頃は、
+# 配った先で「環境変数を設定してください」が最後の壁になっていた ――
+# 設定できなければ起動すら拒まれ、直し方を出す画面にも辿り着けなかった。
+# いまは環境変数 → カンバンから入れた資格情報 → 配布設定 の順に見る。
+. "$PSScriptRoot\..\..\lib\ApiKey.ps1"
 
 $script:ApiUrl       = 'https://api.anthropic.com/v1/messages'
 $script:ApiVersion   = '2023-06-01'
@@ -330,8 +335,8 @@ function Send-ClaudeRequest {
         [int] $MaxRetries = 2
     )
 
-    $apiKey = $env:ANTHROPIC_API_KEY
-    if (-not $apiKey) { throw 'ANTHROPIC_API_KEY が設定されていません。' }
+    $apiKey = Get-AnthropicApiKey
+    if (-not $apiKey) { throw (Get-AnthropicMissingMessage) }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
