@@ -22,6 +22,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `WorkTools.Tests.ps1` | 危険度の判定 (承認の要否) と人間送りのゲート |
 | `HttpAction.Tests.ps1` | 資格情報をホストから決めること、送信の口を汎用ツールから塞ぐこと |
 | `SourceAccess.Tests.ps1` | 本文からのリンク抽出と切り詰め |
+| `BoardApi.Tests.ps1` | **実際にボードを起動して** HTTP API を外から叩く |
 
 選び方の基準は「壊れても静かなところ」。承認の要否や宛先の束縛は、
 壊れていても画面上は普通に動いて見えるのに、外に出るものが変わる。
@@ -44,6 +45,21 @@ Describe 'まとまりの名前' {
 `Assert-Null` / `Assert-NotNull` / `Assert-Match` / `Assert-Throws`。
 DB が要るときは `New-TestStore` と `Close-TestStore`、環境が足りないときは
 `Skip-It`。環境の有無は `Test-SqliteAvailable` で判定できる。
+
+## ボードのテストについて
+
+`BoardApi.Tests.ps1` だけは実際に `Start-Board.ps1` を子プロセスとして起動し、
+`127.0.0.1` の空きポートに対して HTTP を投げる。ここはこのアプリで一番
+テストしにくく、一番危ないところでもあるため:
+
+- ブラウザから来る操作が全部ここを通る（削除・送信・承認）
+- ボードには第三者が書いた文面が載っている
+- `127.0.0.1` で開いているので、他のページから叩かれうる
+
+見ているのは列の移動と版の照合、カードの出口、**宛先をリクエストから受け取らないこと**、
+`Origin` と `Host` の検査、`wwwroot` の外に出られないこと、承認が二度決着しないこと。
+外に出るのは `127.0.0.1` だけで、DB は一時フォルダに作って捨てる。
+ポートを開けない環境では `skip` と出して飛ばす。
 
 ## 注意
 
