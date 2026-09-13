@@ -256,6 +256,93 @@ function Get-SourceContext {
         }
     }
 
+    # ---- Outlook
+    if ($source -eq 'outlook') {
+        if (-not ((Get-Command Test-GraphConfigured -ErrorAction SilentlyContinue) -and (Test-GraphConfigured))) {
+            $empty.kind = 'outlook'
+            $empty.note = 'Microsoft 365 連携が未設定のため取り直せません。'
+            return $empty
+        }
+        $msgId = if ($raw) { [string] $raw.id } else { '' }
+        $convId = if ($raw) { [string] $raw.conversationId } else { '' }
+        if (-not $msgId -and -not $convId) {
+            $empty.kind = 'outlook'
+            $empty.note = 'このカードにメールの識別子が残っていません。'
+            return $empty
+        }
+        $text = ''
+        $atts = @()
+        $ids  = @{}
+        if ($convId) {
+            $t = Get-OutlookThread -ConversationId $convId
+            $text = $t.text
+            $atts = @($t.attachments | ForEach-Object {
+                [pscustomobject]@{
+                    id = ('outlook:' + $_.messageId + ':' + $_.attachmentId)
+                    name = $_.filename; mimeType = $_.mimeType; size = $_.size
+                }
+            })
+            $ids['conversationId'] = $convId
+            $ids['subject'] = $t.subject
+        }
+        if ($msgId) {
+            $m = Get-OutlookMessage -MessageId $msgId
+            $ids['messageId'] = $m.id
+            $ids['rfcMessageId'] = $m.messageId
+            $ids['from'] = $m.from; $ids['to'] = $m.to; $ids['cc'] = $m.cc
+            if (-not $text) {
+                $text = $m.body
+                $atts = @()
+                if ($m.hasAttachments) {
+                    $atts = @(Get-OutlookAttachmentList -MessageId $m.id | ForEach-Object {
+                        [pscustomobject]@{
+                            id = ('outlook:' + $m.id + ':' + $_.attachmentId)
+                            name = $_.filename; mimeType = $_.mimeType; size = $_.size
+                        }
+                    })
+                }
+            }
+        }
+        return [pscustomobject]@{
+            ok = [bool] $text.Trim(); kind = 'outlook'
+            text = Limit-SourceText $text
+            attachments = $atts
+            identifiers = $ids
+            links = Get-LinksFromText $text
+            note = $(if ($text.Trim()) { '' } else { 'スレッドは取得できましたが本文が空でした。' })
+        }
+    }
+
+    # ---- Teams
+    if ($link -like 'msteams://*') {
+        if (-not ((Get-Command Test-GraphConfigured -ErrorAction SilentlyContinue) -and (Test-GraphConfigured))) {
+            $empty.kind = 'teams'
+            $empty.note = 'Microsoft 365 連携が未設定のため取り直せません。'
+            return $empty
+        }
+        $t = Get-TeamsThread -Link $link
+        if (-not $t) {
+            $empty.kind = 'teams'
+            $empty.note = 'このリンクから Teams のチャットを特定できませんでした。'
+            return $empty
+        }
+        $ref = ConvertFrom-TeamsLink $link
+        # チャットの添付は本体ではなく SharePoint / OneDrive 上のファイルへの参照で、
+        # 別の権限 (Files.Read) が要る。ここでは一覧に出さず、本文中のリンクとして渡す。
+        return [pscustomobject]@{
+            ok = $true; kind = 'teams'
+            text = Limit-SourceText $t.text
+            attachments = @()
+            identifiers = @{
+                chatId    = $ref.chatId
+                messageId = $ref.messageId
+                permalink = $t.permalink
+            }
+            links = Get-LinksFromText $t.text
+            note = ''
+        }
+    }
+
     # ---- Slack
     if ($link -like 'slack://*') {
         if (-not ((Get-Command Test-SlackConfigured -ErrorAction SilentlyContinue) -and (Test-SlackConfigured))) {
@@ -346,6 +433,11 @@ function Get-SourceAttachment {
     if ($kind -eq 'gmail') {
         if ($parts.Count -lt 3) { throw "添付の指定が不正です: $AttachmentId" }
         $bytes = Get-GmailAttachmentBytes -MessageId $parts[1] -AttachmentId $parts[2]
+    }
+    elseif ($kind -eq 'outlook') {
+        if ($parts.Count -lt 3) { throw "添付の指定が不正です: $AttachmentId" }
+        if (-not (Get-Command Get-OutlookAttachmentBytes -ErrorAction SilentlyContinue)) { throw 'Microsoft 365 連携が未設定です。' }
+        $bytes = Get-OutlookAttachmentBytes -MessageId $parts[1] -AttachmentId $parts[2]
     }
     elseif ($kind -eq 'slack') {
         if (-not (Get-Command Get-SlackFileBytes -ErrorAction SilentlyContinue)) { throw 'Slack 連携が未設定です。' }

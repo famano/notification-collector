@@ -83,12 +83,25 @@ function Get-SubjectKey {
         return ''
     }
 
-    if ($source -eq 'gmail') {
+    if ($source -eq 'gmail' -or $source -eq 'outlook') {
         $from = Get-MailSender $body
         $stem = ConvertTo-SubjectStem $title
         if (-not $stem) { return '' }
         # 差出人を混ぜる。同じ件名でも別の相手なら別の件。
+        # 経路 (Gmail / Outlook) は混ぜない。同じ相手との同じ件は、
+        # どちらの受信箱に届いても利用者にとっては1件の用事である。
         return ('mail:{0}:{1}' -f $from, $stem)
+    }
+
+    # Teams: チャットが件。Slack がスレッド単位なのと同じ理由で、
+    # 会話の続きは同じカードに積み上がってほしい。
+    # チャットに thread は無いので、単位はチャットそのものになる。
+    if ($link -like 'msteams://*') {
+        if (Get-Command ConvertFrom-TeamsLink -ErrorAction SilentlyContinue) {
+            $ref = ConvertFrom-TeamsLink $link
+            if ($ref) { return ('teams-chat:{0}' -f $ref.chatId) }
+        }
+        return ''
     }
 
     # 通知は「アプリ名 + 件名」。件名が無い、あるいは正規化で消えてしまう

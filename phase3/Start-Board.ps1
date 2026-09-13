@@ -39,6 +39,7 @@ $script:Connectors = $false
 try {
     . "$PSScriptRoot\..\phase5\lib\SlackConnector.ps1"
     . "$PSScriptRoot\..\phase5\lib\GmailConnector.ps1"
+    . "$PSScriptRoot\..\phase5\lib\GraphConnector.ps1"
     # 資格情報の設定をカンバンから行うための層。設定カードの出口はここ。
     . "$PSScriptRoot\..\phase5\lib\ServiceSetup.ps1"
     . "$PSScriptRoot\lib\SetupFlow.ps1"
@@ -205,6 +206,8 @@ function Get-OpenLinkLabel {
     param([string] $Url, [string] $App)
     if ($Url -match '^https?://[^/]*slack\.com/' -or $Url -match '^slack:') { return 'Slack で開く' }
     if ($Url -match '^https?://mail\.google\.com/')                          { return 'Gmail で開く' }
+    if ($Url -match '^https?://outlook\.(office|office365|live)\.com/')      { return 'Outlook で開く' }
+    if ($Url -match '^https?://teams\.microsoft\.com/')                      { return 'Teams で開く' }
     if ($Url -match '^msteams:')                                             { return 'Teams で開く' }
     if ($Url -match '^mailto:')                                              { return 'メールを書く' }
     if ($App) { return "$App で開く" }
@@ -259,6 +262,20 @@ function Get-TaskOutlet {
         }
     }
 
+    if (([string] $Event['source']) -eq 'outlook' -and (Test-GraphConfigured)) {
+        $raw = $null
+        try { $raw = [string] $Event['raw_json'] | ConvertFrom-Json } catch { }
+        if (-not $raw -or -not $raw.from) { return $none }
+        $subject = [string] $raw.subject
+        if ($subject -notmatch '^\s*Re:') { $subject = "Re: $subject" }
+        return [pscustomobject]@{
+            kind    = 'outlook'
+            label   = ("{0} へメールを返信" -f $raw.from)
+            to      = [string] $raw.from
+            subject = $subject
+        }
+    }
+
     if (([string] $Event['link']) -like 'slack://*' -and (Test-SlackConfigured)) {
         try {
             $tg = Get-SlackTarget -Link ([string] $Event['link'])
@@ -272,6 +289,21 @@ function Get-TaskOutlet {
             }
         }
         catch { }   # 投稿先を引けないだけ。カードは「実施」として扱えばよい
+    }
+
+    if (([string] $Event['link']) -like 'msteams://*' -and (Test-GraphConfigured)) {
+        try {
+            $tg = Get-TeamsTarget -Link ([string] $Event['link'])
+            if ($tg) {
+                return [pscustomobject]@{
+                    kind    = 'teams'
+                    label   = ("{0} のチャットへ投稿" -f $tg.chatName)
+                    to      = $tg.chatName
+                    subject = ''
+                }
+            }
+        }
+        catch { }
     }
     return $none
 }
@@ -483,6 +515,51 @@ function Invoke-Route {
             $resumed = $done.resumed
         }
         Write-OAuthResultPage -Context $Context -Result $result -Resumed $resumed
+        return
+    }
+
+    # デバイスコードで繋ぐサービス (Microsoft)。
+    #
+    # Google のようにリダイレクトで戻ってこない代わりに、画面にコードを出して
+    # 「済んだか」を聞きに来てもらう。**サーバ側では待たない** ―― カンバンは
+    # 1本のループで要求を捌いているので、ここで同意を待つと画面ごと固まる。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/devicecode$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+
+        $b = Read-JsonBody $Context
+        $values = @{}
+        if ($b -and $b.values) {
+            foreach ($f in $svc.fields) { $values[$f.name] = [string] $b.values.($f.name) }
+        }
+        $r = Start-SetupDeviceCode -Key $svc.key -Values $values
+        if (-not $r.ok) { Write-JsonResponse $Context @{ ok = $false; error = $r.error } 400; return }
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true; userCode = $r.userCode; verificationUri = $r.verificationUri
+            interval = $r.interval; expiresInSec = $r.expiresInSec
+        })
+        return
+    }
+
+    # 同意が済んだかを1回だけ見る。画面がこれを数秒おきに叩く。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/poll$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+
+        $r = Test-SetupDeviceCode -Key $svc.key
+        if ($r.state -eq 'pending') { Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; state = 'pending' }); return }
+        if ($r.state -ne 'ok') {
+            Write-JsonResponse $Context ([pscustomobject]@{ ok = $false; state = 'error'; error = $r.error }) 400
+            return
+        }
+        # 入ったら、止まっていたカードをここで動かす (貼るだけのサービスと同じ後始末)。
+        $done = Invoke-SetupCompletion -Conn $Conn -Service $svc.key -Account $r.account
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true; state = 'ok'; account = $r.account; note = $r.note
+            resumed = $done.resumed; setupTaskId = $done.setupTaskId
+        })
         return
     }
 
@@ -839,6 +916,19 @@ function Invoke-Route {
                                 -ThreadId ([string] $raw.threadId) -InReplyTo ([string] $raw.messageId))
                         $sentTo = $outlet.to
                         $permalink = ''
+                    }
+                    elseif ($outlet.kind -eq 'outlook') {
+                        $raw = [string] $d.event['raw_json'] | ConvertFrom-Json
+                        [void] (Send-OutlookMail -To $outlet.to -Subject $outlet.subject -Body $text `
+                                -ReplyToMessageId ([string] $raw.id))
+                        $sentTo = $outlet.to
+                        $permalink = ''
+                    }
+                    elseif ($outlet.kind -eq 'teams') {
+                        $tg = Get-TeamsTarget -Link ([string] $d.event['link'])
+                        $r = Send-TeamsMessage -ChatId $tg.chatId -Text $text
+                        $sentTo = $tg.chatName
+                        $permalink = $r.permalink
                     }
                     else {
                         $tg = Get-SlackTarget -Link ([string] $d.event['link'])

@@ -15,6 +15,7 @@ Describe 'ホストから資格情報を決める' {
         Assert-Equal 'github' (Get-HostCredentialSpec -Url 'https://raw.githubusercontent.com/a/b').service
         Assert-Equal 'google' (Get-HostCredentialSpec -Url 'https://gmail.googleapis.com/gmail/v1/users/me/profile').service
         Assert-Equal 'slack'  (Get-HostCredentialSpec -Url 'https://api.slack.com/x').service
+        Assert-Equal 'microsoft' (Get-HostCredentialSpec -Url 'https://graph.microsoft.com/v1.0/me').service
     }
 
     It '似た名前の別ホストには何も付けない' {
@@ -32,6 +33,8 @@ Describe 'ホストから資格情報を決める' {
     It 'サービス名は正規化される (設定カードを言い回しで増やさないため)' {
         Assert-Equal 'github' (Get-ServiceKey -Url 'https://api.github.com/repos/x/y/invitations')
         Assert-Equal 'google' (Get-ServiceKey -Url 'https://www.googleapis.com/calendar/v3/x')
+        # Outlook も Teams も設定カードは1枚。サービス名はアプリ名ではなく microsoft
+        Assert-Equal 'microsoft' (Get-ServiceKey -Url 'https://graph.microsoft.com/v1.0/me/messages')
         # 知らないホストはホスト名そのもの。それでも件ごとにぶれない
         Assert-Equal 'zoom.us' (Get-ServiceKey -Url 'https://zoom.us/j/123')
         Assert-Equal '' (Get-ServiceKey -Url '')
@@ -51,10 +54,30 @@ Describe '人に届く送信の口は汎用ツールから叩けない' {
         Assert-True (Test-BoundOnlyEndpoint -Url 'https://www.googleapis.com/gmail/v1/users/me/drafts/send')
     }
 
+    It 'Outlook の送信系は塞ぐ' {
+        Assert-True (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/me/sendMail' -Method 'POST')
+        Assert-True (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/me/messages/AAMk123/send' -Method 'POST')
+        Assert-True (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/me/messages/AAMk123/reply' -Method 'POST')
+    }
+
+    It 'Teams の投稿は塞ぐが、同じ URL の読み取りは通す' {
+        # Graph は「読むのも投稿するのも同じ URL」。メソッドを見ないと、
+        # 塞いだ瞬間にチャットの本文が取れなくなる。
+        Assert-True  (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/chats/19:abc@thread.v2/messages' -Method 'POST')
+        Assert-False (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/chats/19:abc@thread.v2/messages' -Method 'GET')
+    }
+
+    It 'メソッドが分からないときは塞ぐ側に倒す (ここは壁なので)' {
+        Assert-True (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/chats/19:abc@thread.v2/messages')
+    }
+
     It '読み取りや他の操作は塞がない (できることは削らない)' {
         Assert-False (Test-BoundOnlyEndpoint -Url 'https://slack.com/api/conversations.history?channel=C1')
         Assert-False (Test-BoundOnlyEndpoint -Url 'https://gmail.googleapis.com/gmail/v1/users/me/messages/123')
         Assert-False (Test-BoundOnlyEndpoint -Url 'https://api.github.com/user/repository_invitations/1')
+        # 下書きの作成は外に出ない。宛先は利用者が下書きの上で直せる
+        Assert-False (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/me/messages' -Method 'POST')
+        Assert-False (Test-BoundOnlyEndpoint -Url 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages' -Method 'GET')
     }
 }
 

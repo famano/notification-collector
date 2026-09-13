@@ -50,6 +50,17 @@ $script:CredentialHosts = @(
         configured = 'Test-SlackConfigured'
         scheme   = 'Bearer'
         setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service slack)'
+    },
+    @{
+        # Outlook と Teams は同じ入口 (Graph)。設定カードも1枚に束ねるので、
+        # サービス名はアプリ名ではなく 'microsoft' にそろえる。
+        service  = 'microsoft'
+        match    = @('graph.microsoft.com')
+        label    = 'Microsoft トークン'
+        dynamic  = 'Get-GraphAccessToken'
+        configured = 'Test-GraphConfigured'
+        scheme   = 'Bearer'
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service microsoft)'
     }
 )
 
@@ -79,22 +90,44 @@ function Get-ServiceKey {
 # 紛れた指示で宛先がすり替わるのを防いでいる。汎用 HTTP で chat.postMessage を
 # 直接叩けるなら、その壁は素通りできてしまい、土台が無効になる。
 # 資格情報を注入しないことで塞ぐ (認証エラーで落ちる)。
+#
+# methods を書いた項目は、そのメソッドのときだけ塞ぐ。Graph のように
+# 「読むのも投稿するのも同じ URL」という API があるため
+# (GET /chats/{id}/messages は会話を読むだけで、塞ぐと本文が取れなくなる)。
+# 省略した項目は全メソッドを塞ぐ。
 $script:BoundOnlyEndpoints = @(
-    'slack\.com/api/chat\.postMessage',
-    'slack\.com/api/chat\.postEphemeral',
-    'slack\.com/api/chat\.scheduleMessage',
-    'slack\.com/api/chat\.update',
-    'slack\.com/api/files\.upload',
-    'slack\.com/api/files\.completeUploadExternal',
-    'googleapis\.com/gmail/v1/users/[^/]+/messages/send',
-    'googleapis\.com/gmail/v1/users/[^/]+/drafts/send',
-    'googleapis\.com/upload/gmail/v1/users/[^/]+/messages/send'
+    @{ pattern = 'slack\.com/api/chat\.postMessage' },
+    @{ pattern = 'slack\.com/api/chat\.postEphemeral' },
+    @{ pattern = 'slack\.com/api/chat\.scheduleMessage' },
+    @{ pattern = 'slack\.com/api/chat\.update' },
+    @{ pattern = 'slack\.com/api/files\.upload' },
+    @{ pattern = 'slack\.com/api/files\.completeUploadExternal' },
+    @{ pattern = 'googleapis\.com/gmail/v1/users/[^/]+/messages/send' },
+    @{ pattern = 'googleapis\.com/gmail/v1/users/[^/]+/drafts/send' },
+    @{ pattern = 'googleapis\.com/upload/gmail/v1/users/[^/]+/messages/send' },
+    # Outlook: 送信の口。下書きの作成 (POST /me/messages) は塞がない ――
+    # 外に出ないし、宛先は利用者が下書きの上で直せる。
+    @{ pattern = 'graph\.microsoft\.com/[^/]+/(me|users/[^/]+)/sendMail' },
+    @{ pattern = 'graph\.microsoft\.com/[^/]+/(me|users/[^/]+)/messages/[^/]+/(send|reply|replyAll|forward)' },
+    # Teams: チャットへの投稿。同じ URL の GET は会話を読むだけなので通す。
+    @{ pattern = 'graph\.microsoft\.com/[^/]+/chats/[^/]+/messages'; methods = @('POST') },
+    @{ pattern = 'graph\.microsoft\.com/[^/]+/teams/[^/]+/channels/[^/]+/messages'; methods = @('POST') }
 )
 
 function Test-BoundOnlyEndpoint {
-    param([Parameter(Mandatory)] [string] $Url)
+    <#
+      .PARAMETER Method
+        省略したときは「どのメソッドか分からない」とみなし、メソッド指定の
+        項目にも当てる。塞ぎ過ぎる側に倒すのは、ここが壁だからである。
+    #>
+    param([Parameter(Mandatory)] [string] $Url, [string] $Method)
+    $m = ''
+    if ($Method) { $m = $Method.ToUpper() }
     foreach ($p in $script:BoundOnlyEndpoints) {
-        if ($Url -match $p) { return $true }
+        if ($Url -notmatch $p.pattern) { continue }
+        if (-not $p.methods) { return $true }
+        if (-not $m) { return $true }
+        if ($p.methods -contains $m) { return $true }
     }
     return $false
 }
@@ -231,11 +264,12 @@ function Invoke-HttpAction {
         [int] $MaxChars = 20000
     )
 
-    if (Test-BoundOnlyEndpoint -Url $Url) {
+    if (Test-BoundOnlyEndpoint -Url $Url -Method $Method) {
         return [pscustomobject]@{
             isError = $true
             text = 'この宛先は汎用の http_request からは叩けません。人に届くメッセージの送信は、' +
-                   '宛先がカードから束縛される専用ツール (send_gmail / send_slack_message) を使ってください。'
+                   '宛先がカードから束縛される専用ツール (send_gmail / send_outlook_mail / ' +
+                   'send_slack_message / send_teams_message) を使ってください。'
         }
     }
 

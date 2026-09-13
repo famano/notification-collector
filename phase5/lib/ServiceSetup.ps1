@@ -30,6 +30,8 @@
 #              設定カードの subject_key が 'setup:<key>' になる。
 #   fields   … 画面に出す入力欄。secret=$true は伏せ字で受け取り、値は返さない。
 #   flow     … 'token' は貼るだけ。'oauth' はブラウザの同意画面を通る。
+#              'device' は画面にコードを出し、別のタブでサインインしてもらう
+#              (リダイレクト URI の登録が要らないぶん、事務所のテナントで通りやすい)。
 $script:SetupServices = @(
     @{
         key   = 'github'
@@ -74,6 +76,41 @@ Bot は招待されたチャンネルしか読めません。夜のあいだの 
         )
     },
     @{
+        key   = 'microsoft'
+        label = 'Microsoft 365 (Outlook / Teams)'
+        flow  = 'device'
+        why   = 'Outlook のメールと Teams のチャットの取得、下書き・送信・投稿。'
+        docUrl = 'https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade'
+        help  = @'
+Microsoft Entra ID (Azure AD) でアプリを1つ登録し、その「アプリケーション (クライアント) ID」を入れます。
+クライアント シークレットは要りません (公開クライアントとして使います)。
+
+  1. アプリの登録 → 新規登録。名前は何でもよい
+     サポートされるアカウントの種類は「この組織ディレクトリのみ」で足ります
+  2. 「認証」→ 詳細設定 → **パブリック クライアント フローを許可する: はい**
+     ここが「いいえ」のままだと AADSTS7000218 で失敗します
+  3. 「API のアクセス許可」→ Microsoft Graph → 委任されたアクセス許可に以下を追加
+       offline_access  User.Read
+       Mail.ReadWrite  Mail.Send        (Outlook のメールと下書き・送信)
+       Chat.Read       ChatMessage.Send (Teams のチャットと投稿)
+     テナントの設定によっては管理者の同意が要ります
+  4. 「概要」のアプリケーション (クライアント) ID をここに貼る
+
+テナント ID は空欄でかまいません (職場・学校アカウントとして organizations に繋ぎます)。
+複数のテナントに所属していて繋ぎ先を固定したいときだけ、ディレクトリ ID を入れてください。
+
+注意: Teams のチャットは職場・学校アカウント専用です。個人の Microsoft アカウントには
+API がありません (Outlook のメールは個人アカウントでも読めます)。
+'@
+        secrets = @('ms.clientId', 'ms.tenantId', 'ms.refreshToken', 'ms.selfUserId')
+        fields  = @(
+            @{ name = 'clientId'; label = 'アプリケーション (クライアント) ID'; secret = $false; required = $true
+               placeholder = '00000000-0000-0000-0000-000000000000' },
+            @{ name = 'tenantId'; label = 'テナント ID'; secret = $false; required = $false
+               placeholder = 'organizations'; hint = '空欄なら職場・学校アカウント (organizations) として繋ぎます' }
+        )
+    },
+    @{
         key   = 'google'
         label = 'Gmail / カレンダー'
         flow  = 'oauth'
@@ -98,7 +135,12 @@ OAuth クライアント (種類: デスクトップ アプリ) を作って ID 
 
 # 'gmail' と書かれても google に寄せる。設定カードの key は Get-ServiceKey が
 # 決める (= google) が、人間が書く名前は gmail のことが多い。
-$script:SetupAliases = @{ gmail = 'google'; googleapis = 'google'; 'github.com' = 'github' }
+$script:SetupAliases = @{
+    gmail = 'google'; googleapis = 'google'; 'github.com' = 'github'
+    # Outlook も Teams も入口は同じアプリ登録なので、設定カードは1枚に束ねる。
+    outlook = 'microsoft'; teams = 'microsoft'; ms = 'microsoft'
+    'graph.microsoft.com' = 'microsoft'; 'login.microsoftonline.com' = 'microsoft'
+}
 
 function Get-SetupService {
     param([string] $Key)
@@ -116,6 +158,7 @@ function Test-SetupConfigured {
         'github' { return [bool] (Get-Secret -Name 'github.token') }
         'slack'  { return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken')) }
         'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken') -and (Get-Secret -Name 'gmail.clientId')) }
+        'microsoft' { return [bool] ((Get-Secret -Name 'ms.refreshToken') -and (Get-Secret -Name 'ms.clientId')) }
     }
     return $false
 }
@@ -171,7 +214,8 @@ function Save-SetupCredential {
     $svc = Get-SetupService $Key
     if (-not $svc) { return [pscustomobject]@{ ok = $false; error = ("知らないサービスです: {0}" -f $Key) } }
     if ($svc.flow -ne 'token') {
-        return [pscustomobject]@{ ok = $false; error = ("{0} はブラウザでの同意が要ります。" -f $svc.label) }
+        $how = if ($svc.flow -eq 'device') { 'サインイン画面にコードを入れる必要があります' } else { 'ブラウザでの同意が要ります' }
+        return [pscustomobject]@{ ok = $false; error = ("{0} は貼るだけでは設定できません。{1}。" -f $svc.label, $how) }
     }
 
     # 入力が全部空なら何もしない (押し間違いで設定を消さない)
@@ -251,6 +295,21 @@ function Test-SetupConnection {
                 }
                 $m = Invoke-GmailApi -Path '/users/me/profile'
                 return [pscustomobject]@{ ok = $true; account = [string] $m.emailAddress; note = '' }
+            }
+            'microsoft' {
+                if (-not (Get-Command Get-GraphMe -ErrorAction SilentlyContinue)) {
+                    return [pscustomobject]@{ ok = $false; error = 'Microsoft 連携が読み込まれていません。' }
+                }
+                $me = Get-GraphMe
+                # 掃き寄せで「自分の発言」とメンションを見分けるのに要る。
+                # ここで分かるので、利用者に聞かない。
+                if ($me.id) { Set-Secret -Name 'ms.selfUserId' -Value $me.id }
+                $note = ''
+                if ((Get-Command Test-GraphScope -ErrorAction SilentlyContinue) -and
+                    -not (Test-GraphScope 'Chat.Read')) {
+                    $note = 'Teams のチャットは読めません (同意画面で Chat.Read が付きませんでした)。Outlook のメールだけを取り込みます。'
+                }
+                return [pscustomobject]@{ ok = $true; account = $me.account; note = $note }
             }
         }
     }
@@ -362,4 +421,65 @@ function Complete-GoogleAuth {
         $note = 'カレンダーの出欠は返せません (同意画面でカレンダーの権限が付きませんでした)。'
     }
     return [pscustomobject]@{ ok = $true; account = $check.account; note = $note }
+}
+
+# ---------------------------------------------------------------- デバイスコード (Microsoft)
+#
+# Google の同意画面と違い、戻り先 (リダイレクト URI) を1つも登録しなくてよい。
+# そのかわり「画面にコードを出して、済んだか聞きに行く」形になる。
+# カンバンは1本のループで要求を捌くので、**待つのはブラウザ側の仕事**にする。
+# サーバ側で待つと画面ごと固まる。
+
+function Start-SetupDeviceCode {
+    <#
+      .SYNOPSIS
+        コードを発行して画面に返す。ここではまだ何も保存しない。
+      .OUTPUTS
+        [pscustomobject] ok / userCode / verificationUri / interval / error
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Key,
+        [Parameter(Mandatory)] [hashtable] $Values
+    )
+    $svc = Get-SetupService $Key
+    if (-not $svc -or $svc.flow -ne 'device') {
+        return [pscustomobject]@{ ok = $false; error = 'このサービスはコードによる接続に対応していません。' }
+    }
+    if (-not (Get-Command Start-GraphDeviceCode -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ ok = $false; error = 'Microsoft 連携が読み込まれていません。' }
+    }
+    $cid = ([string] $Values['clientId']).Trim()
+    if (-not $cid) { return [pscustomobject]@{ ok = $false; error = 'アプリケーション (クライアント) ID を入力してください。' } }
+    return Start-GraphDeviceCode -ClientId $cid -TenantId ([string] $Values['tenantId']).Trim()
+}
+
+function Test-SetupDeviceCode {
+    <#
+      .SYNOPSIS
+        同意が済んだかを1回だけ見る。済んでいれば保存まで終わっている。
+      .OUTPUTS
+        [pscustomobject] state ('pending' | 'ok' | 'error') / account / note / error
+    #>
+    param([Parameter(Mandatory)] [string] $Key)
+    $svc = Get-SetupService $Key
+    if (-not $svc -or $svc.flow -ne 'device') {
+        return [pscustomobject]@{ state = 'error'; error = 'このサービスはコードによる接続に対応していません。'; account = ''; note = '' }
+    }
+    if (-not (Get-Command Test-GraphDeviceCode -ErrorAction SilentlyContinue)) {
+        return [pscustomobject]@{ state = 'error'; error = 'Microsoft 連携が読み込まれていません。'; account = ''; note = '' }
+    }
+
+    $r = Test-GraphDeviceCode
+    if ($r.state -ne 'ok') {
+        return [pscustomobject]@{ state = $r.state; error = [string] $r.error; account = ''; note = '' }
+    }
+
+    # 保存できていても、実際に叩けるとは限らない (スコープが付かなかった等)。
+    # 貼るだけのサービスと同じく、ここで一度確かめてから「接続済み」と言う。
+    $check = Test-SetupConnection -Key $svc.key
+    if (-not $check.ok) {
+        return [pscustomobject]@{ state = 'error'; error = $check.error; account = ''; note = '' }
+    }
+    Set-SetupAccount -Key $svc.key -Account $check.account
+    return [pscustomobject]@{ state = 'ok'; error = ''; account = $check.account; note = [string] $check.note }
 }

@@ -159,13 +159,16 @@ try {
     . "$PSScriptRoot\phase5\lib\SecretStore.ps1"
     . "$PSScriptRoot\phase5\lib\SlackConnector.ps1"
     . "$PSScriptRoot\phase5\lib\GmailConnector.ps1"
+    . "$PSScriptRoot\phase5\lib\GraphConnector.ps1"
     $slackOn  = Test-SlackConfigured
     $gmailOn  = Test-GmailConfigured
     $githubOn = [bool] (Get-Secret -Name 'github.token')
-    Write-Host ("連携: Slack={0} / Gmail={1} / GitHub={2}" -f `
+    $msOn     = Test-GraphConfigured
+    Write-Host ("連携: Slack={0} / Gmail={1} / GitHub={2} / Microsoft365={3}" -f `
         $(if ($slackOn) { '有効' } else { '未設定' }),
         $(if ($gmailOn) { '有効' } else { '未設定' }),
-        $(if ($githubOn) { '有効' } else { '未設定' })) -ForegroundColor DarkGray
+        $(if ($githubOn) { '有効' } else { '未設定' }),
+        $(if ($msOn) { '有効' } else { '未設定' })) -ForegroundColor DarkGray
     if (-not $githubOn) {
         Write-Host '  GitHub 未設定: 招待の承諾や非公開リポの調査は本人操作になります' -ForegroundColor DarkGray
         Write-Host '  設定する: .\phase5\Connect-Service.ps1 -Service github' -ForegroundColor DarkGray

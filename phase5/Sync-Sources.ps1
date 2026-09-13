@@ -21,6 +21,10 @@
     3. Gmail の取り込み — 前回の続き (sync.gmail.lastInternalDate) から after: で引く。
        何日 PC を落としていても、次に動かしたときに穴が埋まる。
 
+    4. Microsoft 365 — Teams のチャットを掃き寄せて補完し、Outlook の受信トレイを
+       取り込む。Slack / Gmail と同じ形 (掃き寄せ → 補完 → メール) にしてあるので、
+       後段 (判定・カード・ワーカー) は経路ごとの分岐を持たない。
+
     すべて冪等。同じものを何度取り込んでも events の UNIQUE 制約で弾かれる。
     watermark は「取り切れた」ときだけ進める。途中で失敗したら次回もう一度読み直す。
 
@@ -34,6 +38,7 @@
     .\Sync-Sources.ps1
     .\Sync-Sources.ps1 -Since (Get-Date).AddDays(-3)
     .\Sync-Sources.ps1 -GmailQuery 'in:inbox newer_than:7d' -SkipSlack
+    .\Sync-Sources.ps1 -SkipMicrosoft
 #>
 [CmdletBinding()]
 param(
@@ -42,14 +47,18 @@ param(
     [DateTime] $Since,
     [int]      $GmailMax = 200,
     [int]      $SlackMax = 30,
+    [int]      $OutlookMax = 200,
+    [int]      $TeamsMax = 30,
     [switch]   $SkipSlack,
-    [switch]   $SkipGmail
+    [switch]   $SkipGmail,
+    [switch]   $SkipMicrosoft
 )
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\lib\SlackConnector.ps1"
 . "$PSScriptRoot\lib\GmailConnector.ps1"
+. "$PSScriptRoot\lib\GraphConnector.ps1"
 
 # 初回や watermark が無いときにどこまで遡るか。
 # 長くすると初回に大量のカードが立つので、既定は控えめにする。
@@ -239,6 +248,160 @@ try {
                     if ($last -gt $mark) { $mark = $last }
                 }
                 Set-Setting -Conn $conn -Key 'sync.gmail.lastInternalDate' -Value $mark.ToString('o')
+            }
+        }
+    }
+
+    # ---------------- Teams: 前回の続きから拾う ----------------
+    if (-not $SkipMicrosoft) {
+        if (-not (Test-GraphConfigured)) {
+            Write-Host 'Microsoft 365: 未設定のため飛ばします' -ForegroundColor DarkGray
+        }
+        else {
+            $from = Get-StartPoint $conn 'sync.teams.lastTs'
+            Write-Host ("Teams: {0} 以降を掃き寄せ" -f $from.ToString('MM/dd HH:mm')) -ForegroundColor Cyan
+            $sweepStart = Get-Date
+            try {
+                $sweep = Get-TeamsUpdates -Since $from -MaxChats $TeamsMax
+                $new = 0
+                foreach ($m in $sweep.messages) {
+                    # 本文はここでは通知相当のものにしておく。会話の前後は次の補完段で足す
+                    # (同じ経路を二度書かないため)。
+                    $r = Add-Event -Conn $conn -Source 'teams' -SourceKey ("{0}|{1}" -f $m.chatId, $m.messageId) `
+                            -App 'Microsoft Teams' -AppId 'teams' -OccurredAt $m.createdAt.ToString('o') `
+                            -Title ("{0} / {1}" -f $m.chatName, $m.sender) `
+                            -Body $m.text `
+                            -Link (New-TeamsLink -ChatId $m.chatId -MessageId $m.messageId) `
+                            -RawJson ($m | ConvertTo-Json -Depth 6 -Compress) `
+                            -DedupKey (New-EventIdentity -Kind 'teams' -Parts @($m.sender, $m.text))
+                    if ($r.isNew) {
+                        $new++
+                        # カンバンの「元を開く」はここを使う。msteams:// と違い
+                        # ブラウザからそのまま開ける (返らないことがあるので、その時は据え置く)。
+                        if ($m.webUrl) {
+                            [void] $conn.NonQuery('UPDATE events SET permalink = ? WHERE id = ?',
+                                [object[]] @([string] $m.webUrl, $r.id))
+                        }
+                        Write-Host ("  新規[{0}]: {1} / {2}" -f $m.reason, $m.chatName, $m.sender) -ForegroundColor Green
+                    }
+                }
+                Write-Host ("Teams: {0} 件該当 / {1} 件が新規" -f $sweep.messages.Count, $new) -ForegroundColor Yellow
+
+                $retryable = @($sweep.errors | Where-Object { -not $_.permanent })
+                foreach ($e in $sweep.errors) {
+                    $color = if ($e.permanent) { 'DarkGray' } else { 'Yellow' }
+                    Write-Host ("  読めない会話: {0} ({1})" -f $e.chat, $e.message) -ForegroundColor $color
+                }
+                if ($retryable.Count -gt 0) {
+                    # Slack 側と同じ判断。一時的な失敗のまま watermark を進めると
+                    # その範囲が取りこぼしになり、恒久的な失敗で止め続けると
+                    # 読める会話の分まで永久に入らない。
+                    Write-Host ("  {0} 件を一時的な理由で読めなかったため、次回も同じ範囲を読み直します" -f $retryable.Count) -ForegroundColor Yellow
+                }
+                elseif (-not $Since) {
+                    Set-Setting -Conn $conn -Key 'sync.teams.lastTs' -Value $sweepStart.AddMinutes(-2).ToString('o')
+                }
+            }
+            catch {
+                Write-Host ("Teams: 掃き寄せに失敗しました: {0}" -f $_.Exception.Message) -ForegroundColor Red
+            }
+        }
+    }
+
+    # ---------------- Teams: イベントに会話の前後を足す ----------------
+    if (-not $SkipMicrosoft -and (Test-GraphConfigured)) {
+        $rows = @($conn.Query(
+            "SELECT id, link, body FROM events
+              WHERE link LIKE 'msteams://%' AND context_fetched IS NULL
+              ORDER BY occurred_at DESC LIMIT ?", [object[]] @($TeamsMax)))
+        Write-Host ("Teams: 補完対象 {0} 件" -f $rows.Count) -ForegroundColor Cyan
+
+        foreach ($r in $rows) {
+            $id = [string] $r['id']
+            try {
+                $t = Get-TeamsThread -Link ([string] $r['link'])
+                if (-not $t) {
+                    [void] $conn.NonQuery('UPDATE events SET context_fetched = ? WHERE id = ?',
+                        [object[]] @('unsupported', $id))
+                    continue
+                }
+                $newBody = ("{0}`n`n--- 会話 ({1} 件) ---`n{2}" -f $r['body'], $t.messageCount, $t.text)
+                # permalink が取れなかったときに既存の値を消さない
+                # (掃き寄せの時点で入っていることがある)。
+                if ($t.permalink) {
+                    [void] $conn.NonQuery(
+                        'UPDATE events SET body = ?, permalink = ?, context_fetched = ? WHERE id = ?',
+                        [object[]] @($newBody, $t.permalink, (Get-Date).ToString('o'), $id))
+                }
+                else {
+                    [void] $conn.NonQuery(
+                        'UPDATE events SET body = ?, context_fetched = ? WHERE id = ?',
+                        [object[]] @($newBody, (Get-Date).ToString('o'), $id))
+                }
+                Write-Host ("  補完: {0} ({1} 件のメッセージ)" -f $t.chat, $t.messageCount) -ForegroundColor Green
+            }
+            catch {
+                Write-Host ("  失敗: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+                [void] $conn.NonQuery('UPDATE events SET context_fetched = ? WHERE id = ?',
+                    [object[]] @('error', $id))
+            }
+        }
+    }
+
+    # ---------------- Outlook: メールをイベントにする ----------------
+    if (-not $SkipMicrosoft -and (Test-GraphConfigured)) {
+        $from = Get-StartPoint $conn 'sync.outlook.lastReceived'
+        Write-Host ("Outlook: {0} 以降の受信トレイ" -f $from.ToString('MM/dd HH:mm')) -ForegroundColor Cyan
+
+        $fetchStart = Get-Date
+        $msgs = @()
+        $failed = $false
+        try { $msgs = @(Get-OutlookRecent -Since $from -Max $OutlookMax) }
+        catch {
+            $failed = $true
+            Write-Host ("Outlook: 取り込みに失敗しました: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        }
+
+        if (-not $failed) {
+            $new = 0
+            $maxReceived = $null
+            foreach ($m in $msgs) {
+                # 本文の先頭は Gmail 側と同じ形にする。件のキー (Get-MailSender) が
+                # 「差出人:」の行を読むので、ここが揃っていないと同じ件がまとまらない。
+                $body = "差出人: $($m.from)`n宛先: $($m.to)"
+                if ($m.cc) { $body += "`nCc: $($m.cc)" }
+                $when = if ($m.receivedAt) { $m.receivedAt } else { Get-Date }
+                $body += "`n日時: $($when.ToString('yyyy-MM-dd HH:mm'))`n`n$($m.body)"
+
+                $link = $m.webLink
+                $r = Add-Event -Conn $conn -Source 'outlook' -SourceKey $m.id `
+                        -App 'Outlook' -AppId 'outlook' -OccurredAt $when.ToString('o') `
+                        -Title $m.subject -Body $body -Link $link `
+                        -RawJson ($m | ConvertTo-Json -Depth 6 -Compress) `
+                        -DedupKey (New-EventIdentity -Kind 'outlook' -Parts @($m.subject, (Get-MailDisplayName $m.from)))
+                if ($r.isNew) {
+                    $new++
+                    # 返信をスレッドにぶら下げる識別子は raw_json に入っている。
+                    # 取り直しは要らないので、補完済みとして印を付ける。
+                    [void] $conn.NonQuery('UPDATE events SET context_fetched = ?, permalink = ? WHERE id = ?',
+                        [object[]] @((Get-Date).ToString('o'), $link, $r.id))
+                    Write-Host ("  新規: {0}" -f $m.subject) -ForegroundColor Green
+                }
+                if (-not $maxReceived -or $when -gt $maxReceived) { $maxReceived = $when }
+            }
+            Write-Host ("Outlook: {0} 件中 {1} 件が新規" -f $msgs.Count, $new) -ForegroundColor Yellow
+
+            if ($msgs.Count -ge $OutlookMax) {
+                # 上限で切れている。進めると残りが飛ぶ。
+                Write-Host ("  上限 {0} 件に達しました。-OutlookMax を上げてもう一度実行してください" -f $OutlookMax) -ForegroundColor Yellow
+            }
+            elseif (-not $Since) {
+                # 取り切れたので watermark を進める。新着 0 件でも必ず書く
+                # (Gmail 側と同じ理由 ―― 静かな日が続くと watermark が生まれず、
+                #  丸一日以上 PC を落とした穴が二度と埋まらなくなる)。
+                $mark = $fetchStart.AddMinutes(-2)
+                if ($maxReceived -and $maxReceived -gt $mark) { $mark = $maxReceived }
+                Set-Setting -Conn $conn -Key 'sync.outlook.lastReceived' -Value $mark.ToString('o')
             }
         }
     }
