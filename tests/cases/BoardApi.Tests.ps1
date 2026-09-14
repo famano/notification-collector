@@ -250,7 +250,7 @@ Describe 'カードの出口' {
         Assert-Equal 200 $r.status
         $after = (Invoke-Board $board ("/api/tasks/$reviewId")).body.task
         Assert-Equal 'done' $after.board_column
-        Assert-Equal '電話で確認して対応済み' $after.user_edited
+        Assert-Equal '電話で確認して対応済み' $after.user_record
     }
 
     It '送り先の無いカードは送信できない' {
@@ -297,11 +297,10 @@ Describe '報告を承認して閉じる' {
         $t = (Invoke-Board $board ("/api/tasks/$doneId")).body.task
         $r = Invoke-Board $board ("/api/tasks/$doneId/approve") 'POST' @{ note = '妥当と判断'; version = $t.version }
         Assert-Equal 200 $r.status
-        Assert-Equal '妥当と判断' (Invoke-Board $board ("/api/tasks/$doneId")).body.task.user_edited
+        Assert-Equal '妥当と判断' (Invoke-Board $board ("/api/tasks/$doneId")).body.task.user_record
     }
 
-    # 送る文面と対応の記録は同じ列に入る。「送らずに完了」を選んだだけで
-    # 書きかけの文面が消えると取り返しがつかない。
+    # 「送らずに完了」を選んだだけで書きかけの文面が消えると取り返しがつかない。
     It '空のまま完了にしても、書きかけの文面は消えない' {
         $t = (Invoke-Board $board ("/api/tasks/$keepId")).body.task
         $r = Invoke-Board $board ("/api/tasks/$keepId/done") 'POST' @{ text = ''; version = $t.version }
@@ -309,6 +308,19 @@ Describe '報告を承認して閉じる' {
         $after = (Invoke-Board $board ("/api/tasks/$keepId")).body.task
         Assert-Equal 'done' $after.board_column
         Assert-Equal '書きかけの文面' $after.user_edited
+    }
+
+    # 以前は記録も user_edited に入れていたため、返信先のあるカードで
+    # 記録を残すと送る欄に出て、記録の欄からは消えて見えた。
+    It '対応の記録は送る文面とは別に残る (送る欄に出ない)' {
+        $t = (Invoke-Board $board ("/api/tasks/$mailId")).body.task
+        [void] (Invoke-Board $board ("/api/tasks/$mailId") 'PATCH' @{ user_edited = '返信の下書き'; version = $t.version })
+        $t = (Invoke-Board $board ("/api/tasks/$mailId")).body.task
+        $r = Invoke-Board $board ("/api/tasks/$mailId/done") 'POST' @{ text = '電話で伝えたので返信は不要'; version = $t.version }
+        Assert-Equal 200 $r.status
+        $after = (Invoke-Board $board ("/api/tasks/$mailId")).body.task
+        Assert-Equal '電話で伝えたので返信は不要' $after.user_record
+        Assert-Equal '返信の下書き' $after.user_edited
     }
 }
 
@@ -364,6 +376,15 @@ Describe '編集' {
         $r = Invoke-Board $board ("/api/tasks/$todoId") 'PATCH' @{ user_edited = 'あとで書き足す'; version = $t.version }
         Assert-Equal 200 $r.status
         Assert-Equal 'あとで書き足す' (Invoke-Board $board ("/api/tasks/$todoId")).body.task.user_edited
+    }
+
+    It '対応の記録だけを保存しても、送る文面は変わらない' {
+        $t = (Invoke-Board $board ("/api/tasks/$todoId")).body.task
+        $r = Invoke-Board $board ("/api/tasks/$todoId") 'PATCH' @{ user_record = '途中までやった'; version = $t.version }
+        Assert-Equal 200 $r.status
+        $after = (Invoke-Board $board ("/api/tasks/$todoId")).body.task
+        Assert-Equal '途中までやった' $after.user_record
+        Assert-Equal 'あとで書き足す' $after.user_edited
     }
 
     It '触れる列は決まっている (列の移動は move の仕事)' {

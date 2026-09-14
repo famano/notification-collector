@@ -48,7 +48,7 @@ function Invoke-SetupCompletion {
             $note += ("`n待っていたカード {0} 枚を要対応に戻しました。" -f $waiting.Count)
             foreach ($x in $titles) { $note += "`n- " + $x }
         }
-        [void] (Update-TaskFields -Conn $Conn -TaskId $setupId -Fields @{ user_edited = $note; human_step = $null })
+        [void] (Update-TaskFields -Conn $Conn -TaskId $setupId -Fields @{ user_record = $note; human_step = $null })
         Add-TaskActivity -Conn $Conn -TaskId $setupId -Kind 'done' -Message $note
         [void] (Set-TaskColumn -Conn $Conn -TaskId $setupId -Column 'done')
     }
@@ -58,6 +58,12 @@ function Invoke-SetupCompletion {
         [void] (Add-DossierNote -Conn $Conn -SubjectKey ('svc:' + $Service) -Kind 'credential' `
             -Note ("{0} の資格情報は設定済みです{1}。以前の「未設定」の記録は無効です。" -f `
                     $Service, $(if ($Account) { " ($Account)" } else { '' })))
+    }
+
+    # 一度繋いだものは「使っている」。あとで資格情報が消えたら、未接続として知らせる。
+    # 以前に「警告しない」を選んでいても、自分で繋いだ時点でその選択は古い。
+    if (Get-Command Set-SetupAttention -ErrorAction SilentlyContinue) {
+        try { Set-SetupAttention -Conn $Conn -Key $Service -Wanted $true -Muted $false } catch { }
     }
 
     return [pscustomobject]@{

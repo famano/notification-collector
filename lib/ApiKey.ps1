@@ -56,6 +56,42 @@ function Test-AnthropicConfigured {
     return [bool] (Get-AnthropicApiKey -SecretPath $SecretPath)
 }
 
+function Get-AnthropicOrganizationId {
+    <#
+      .SYNOPSIS
+        想定している組織の ID。無ければ $null (任意項目)。
+      .DESCRIPTION
+        API の呼び出しには使わない ―― キーそのものが組織に紐づいているので、
+        判定もワーカーもこれ無しで動く。配った先で「別の組織のキーを貼った」
+        (個人の組織で作ったキーで、会社の請求に乗っていない) を見分けるために持つ。
+        取得元は画面から入れた値 → 配布設定 の順。
+    #>
+    param([string] $SecretPath)
+    try {
+        $v = Get-Secret -Name 'anthropic.organizationId' -Path $SecretPath
+        if ($v) { return ([string] $v).Trim() }
+    }
+    catch { }
+    $c = Get-AppConfigValue -Path 'anthropic.organizationId'
+    if ($c) { return [string] $c }
+    return $null
+}
+
+# 接続の確認で分かった組織と、想定の組織を突き合わせる。
+#
+# **食い違っても失敗にはしない。** 組織 ID は動かすのに要らない値なので、
+# ここで止めると「動くキーなのに保存できない」になる。代わりに言葉で知らせる。
+# 応答に組織が載っていなければ何も言わない (確かめられないことを食い違いと呼ばない)。
+function Get-AnthropicOrganizationNote {
+    param([string] $Expected, [string] $Actual)
+    $e = ([string] $Expected).Trim()
+    $a = ([string] $Actual).Trim()
+    if (-not $e -or -not $a) { return '' }
+    if ($e -eq $a) { return '' }
+    return ("このキーは組織 {0} のものです。設定されている組織 ID ({1}) と違います。" -f $a, $e) +
+           '判定とワーカーはこのまま動きますが、請求先が想定と違う可能性があります。'
+}
+
 # 未設定のときに出す文言。端末でも画面でも同じ言い方をする。
 # 「環境変数を設定してください」と言い切らないこと ―― 配った先ではそれが最後の壁になる。
 function Get-AnthropicMissingMessage {

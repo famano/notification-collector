@@ -197,10 +197,12 @@ Microsoft Graph を1本通して、**Outlook のメールと Teams のチャッ�
 - カンバンを止めずに進められる。サーバは待たず、ブラウザ側が数秒おきに聞きに来る
 
 必要なのは Entra ID (Azure AD) のアプリ登録1つと、そのクライアント ID だけ。
+配る人が `config\app-config.json` の `microsoft` に入れておけば、利用者は押すだけで済む。
 
 | 設定 | 値 |
 |---|---|
 | 認証 → パブリック クライアント フローを許可する | **はい** (ここが「いいえ」だと `AADSTS7000218`) |
+| クライアント シークレット | 任意。上を「はい」にできないテナント (機密クライアントしか置けない) だけで使う。コードの引き換えとトークンの更新に `client_secret` を付けて送る |
 | API のアクセス許可 (委任) | `offline_access` `User.Read` `Mail.ReadWrite` `Mail.Send` `Chat.Read` `ChatMessage.Send` |
 | テナント | 空欄なら `organizations` (職場・学校アカウント) |
 
@@ -329,8 +331,9 @@ DPAPI (CurrentUser) で暗号化して `phase5/data/secrets.dat` に保存する
 
 ### 配る人が用意した分の取り込み
 
-利用者の権限では取れないもの ―― Google の OAuth クライアント、Slack アプリのトークン、
-Claude の API キー ―― は、配る人が `config\app-config.json` に入れておける。
+利用者の権限では取れないもの ―― Google の OAuth クライアント、Slack アプリ、
+Microsoft 365 のアプリ登録 (必要ならシークレット)、Claude の API キーと組織 ID ――
+は、配る人が `config\app-config.json` に入れておける。
 起動時に `Import-AppConfigSecrets` が保管庫へ取り込み、**すでにある項目は上書きしない**
 (画面から入れ直した値が次の起動で配布時の値に戻らないようにするため)。
 取り込まれていれば画面に入力欄は出ず、Google は「接続する」を押すだけになる。

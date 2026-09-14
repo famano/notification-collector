@@ -64,6 +64,8 @@ function Invoke-RestMethod {
     }
 
     $script:FakeTokenCalls++
+    # 何を送ったか (シークレットを付けたか) を後から見る
+    $script:LastTokenBody = $Body
     if ($script:FakeTokenError) { throw (New-FakeOAuthError $script:FakeTokenError) }
 
     if ([string] $Body.grant_type -eq 'urn:ietf:params:oauth:grant-type:device_code') {
@@ -335,6 +337,35 @@ Describe 'デバイスコード' {
         Assert-Null $script:FakeSecrets['ms.refreshToken']
         # 捨てたあとにもう一度聞かれても、途中経過が無いことを返す
         Assert-Equal 'error' (Test-GraphDeviceCode).state
+        $script:FakeDeviceState = 'pending'
+    }
+
+    It 'シークレットを渡したら、引き換えにも更新にも付けて送る (機密クライアントの登録)' {
+        $script:FakeSecrets = @{}
+        [void] (Start-GraphDeviceCode -ClientId 'cid' -TenantId '' -ClientSecret 's3cret')
+        $script:FakeDeviceState = 'ok'
+        Assert-Equal 'ok' (Test-GraphDeviceCode).state
+        Assert-Equal 's3cret' ([string] $script:LastTokenBody['client_secret'])
+        Assert-Equal 's3cret' $script:FakeSecrets['ms.clientSecret']
+
+        Clear-GraphAccessToken
+        [void] (Get-GraphAccessToken)
+        Assert-Equal 'refresh_token' ([string] $script:LastTokenBody['grant_type'])
+        Assert-Equal 's3cret' ([string] $script:LastTokenBody['client_secret'])
+        $script:FakeDeviceState = 'pending'
+    }
+
+    It 'シークレット無しで繋ぎ直したら、前のシークレットを消して送らない' {
+        # 残すと、別のアプリ登録にシークレットを送り続けて invalid_client で止まる
+        [void] (Start-GraphDeviceCode -ClientId 'public-cid' -TenantId '')
+        $script:FakeDeviceState = 'ok'
+        Assert-Equal 'ok' (Test-GraphDeviceCode).state
+        Assert-False $script:LastTokenBody.ContainsKey('client_secret')
+        Assert-Null $script:FakeSecrets['ms.clientSecret']
+
+        Clear-GraphAccessToken
+        [void] (Get-GraphAccessToken)
+        Assert-False $script:LastTokenBody.ContainsKey('client_secret')
         $script:FakeDeviceState = 'pending'
     }
 }

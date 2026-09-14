@@ -222,11 +222,12 @@ function Connect-Microsoft {
     Write-Host 'Microsoft 365 (Outlook / Teams) の設定' -ForegroundColor Cyan
     Write-Host @'
   事前に Microsoft Entra ID (Azure AD) でアプリを1つ登録してください。
-  クライアント シークレットは要りません (公開クライアントとして使います)。
+  配布設定 (config\app-config.json の microsoft) に入っていれば、ID は空欄のままで進めます。
 
   1. https://entra.microsoft.com/ → アプリの登録 → 新規登録
   2. 「認証」→ 詳細設定 → パブリック クライアント フローを許可する: はい
      ← ここが「いいえ」だと AADSTS7000218 で失敗します
+     「はい」にできないテナントでは、「証明書とシークレット」でシークレットを発行して使います
   3. 「API のアクセス許可」→ Microsoft Graph → 委任されたアクセス許可
        offline_access  User.Read
        Mail.ReadWrite  Mail.Send        (Outlook のメールと下書き・送信)
@@ -239,11 +240,21 @@ function Connect-Microsoft {
 
 '@ -ForegroundColor DarkGray
 
-    $cid = Read-Host '  アプリケーション (クライアント) ID'
-    if (-not $cid) { Write-Host '  入力がありません。中止します。' -ForegroundColor Yellow; return }
-    $tenant = Read-Host '  テナント ID (空欄なら organizations)'
+    $cid = Read-Host '  アプリケーション (クライアント) ID (配布時に設定済みなら空欄)'
+    $tenant = ''
+    $secret = ''
+    if ($cid) {
+        $tenant = Read-Host '  テナント ID (空欄なら organizations)'
+        $sec = Read-Host '  クライアント シークレット (パブリック クライアント フローを許可していれば空欄)' -AsSecureString
+        $secret = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    }
+    # 入力が空なら、保管庫 → 配布設定 の順で補う。
+    $c = Get-MicrosoftClientCredential -ClientId $cid -TenantId $tenant -ClientSecret $secret
+    if (-not $c.clientId) { Write-Host '  入力がありません。中止します。' -ForegroundColor Yellow; return }
+    if (-not $cid) { Write-Host ("  用意済みのアプリ登録を使います ({0})" -f $c.clientId) -ForegroundColor DarkGray }
 
-    $start = Start-GraphDeviceCode -ClientId $cid -TenantId $tenant
+    $start = Start-GraphDeviceCode -ClientId $c.clientId -TenantId $c.tenantId -ClientSecret $c.clientSecret
     if (-not $start.ok) { Write-Host ("  {0}" -f $start.error) -ForegroundColor Red; return }
 
     Write-Host ''

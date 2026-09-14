@@ -89,6 +89,14 @@ Describe '画面に返す一覧' {
         }
     }
 
+    It 'DB が無ければ、未接続を知らせるのは Claude だけ (使っていないだけかもしれない)' {
+        foreach ($s in @(Get-SetupStatusList)) {
+            if ($s.configured) { Assert-False $s.warn ("{0} は接続済みなのに警告しています" -f $s.key); continue }
+            if ($s.required) { Assert-True $s.warn ("{0} は必須なのに警告していません" -f $s.key) }
+            else { Assert-False $s.warn ("{0} を使うとは言っていないのに警告しています" -f $s.key) }
+        }
+    }
+
     It '取り方の案内と入口の URL を持っている (画面から出さずに済ませるため)' {
         foreach ($s in @(Get-SetupStatusList)) {
             Assert-NotNull $s.help  ("{0} に案内がありません" -f $s.key)
@@ -161,7 +169,37 @@ Describe 'Claude の API キー' {
         Assert-True ($json -notmatch 'sk-ant-good') 'API キーが一覧に含まれています'
     }
 
+    It '組織 ID は任意の欄として出る (必須にすると配った先で埋まらない)' {
+        $an = @(Get-SetupStatusList | Where-Object { $_.key -eq 'anthropic' })[0]
+        $org = @($an.fields | Where-Object { $_.name -eq 'organizationId' })[0]
+        Assert-NotNull $org '組織 ID の欄がありません'
+        Assert-False $org.required
+        Assert-False $org.secret
+    }
+
+    It '組織 ID を入れれば保存し、空欄なら前の値を消さない' {
+        $script:FakeConnection = [pscustomobject]@{ ok = $true; account = ''; note = '' }
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good'; organizationId = ' org-1 ' }
+        Assert-True $r.ok
+        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId')
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good2'; organizationId = '' }
+        Assert-True $r.ok
+        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId')
+        Assert-Equal 'org-1' (Get-AnthropicOrganizationId)
+    }
+
+    It '組織が違っても失敗にはしない。言葉で知らせるだけ (動かすのに要らない値なので)' {
+        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected 'org-1' -Actual 'org-1')
+        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected '' -Actual 'org-1')
+        # 応答に組織が載っていなければ、確かめられないだけで食い違いではない
+        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected 'org-1' -Actual '')
+        $n = Get-AnthropicOrganizationNote -Expected 'org-1' -Actual 'org-2'
+        Assert-Match 'org-2' $n
+        Assert-Match 'org-1' $n
+    }
+
     [void] (Remove-Secret -Name 'anthropic.apiKey')
+    [void] (Remove-Secret -Name 'anthropic.organizationId')
 }
 
 Describe '配る人が用意済みのもの' {
@@ -204,6 +242,46 @@ Describe '配る人が用意済みのもの' {
 
     [void] (Remove-Secret -Name 'gmail.clientId')
     [void] (Remove-Secret -Name 'gmail.clientSecret')
+
+    It 'Microsoft 365 は何も無ければ入力を求める' {
+        Assert-False (Test-SetupPreset -Key 'microsoft')
+        $r = Start-SetupDeviceCode -Key 'microsoft' -Values @{ clientId = ''; tenantId = ''; clientSecret = '' }
+        Assert-False $r.ok
+    }
+
+    It 'Microsoft 365 のアプリ登録が配布設定にあれば、押すだけにする (シークレットも使う)' {
+        $cfg = Join-Path (New-TestTempDir) 'app-config.json'
+        [IO.File]::WriteAllText($cfg,
+            '{ "microsoft": { "clientId": "ms-cid", "tenantId": "contoso", "clientSecret": "ms-sec" } }',
+            (New-Object Text.UTF8Encoding $false))
+        $saved = $env:NOTIFICATION_COLLECTOR_CONFIG
+        $env:NOTIFICATION_COLLECTOR_CONFIG = $cfg
+        try {
+            Assert-True (Test-SetupPreset -Key 'microsoft')
+            Assert-Match 'コード' (Get-SetupManagedNote -Key 'microsoft')
+            $c = Get-MicrosoftClientCredential
+            Assert-Equal 'ms-cid' $c.clientId
+            Assert-Equal 'contoso' $c.tenantId
+            Assert-Equal 'ms-sec' $c.clientSecret
+
+            # 自分のアプリ登録を入れたら、配布時のシークレットを混ぜない
+            # (混ぜると別の登録にシークレットを送って invalid_client になる)
+            $mine = Get-MicrosoftClientCredential -ClientId 'my-cid'
+            Assert-Equal 'my-cid' $mine.clientId
+            Assert-Equal '' $mine.clientSecret
+            Assert-Equal '' $mine.tenantId
+
+            # 保管庫にあれば (以前に繋いだ / 取り込み済み)、そちらを使う
+            Set-Secret -Name 'ms.clientId' -Value 'stored-cid'
+            $st = Get-MicrosoftClientCredential
+            Assert-Equal 'stored-cid' $st.clientId
+            Assert-Equal '' $st.clientSecret '保管庫の登録に配布設定のシークレットを混ぜています'
+        }
+        finally {
+            $env:NOTIFICATION_COLLECTOR_CONFIG = $saved
+            [void] (Remove-Secret -Name 'ms.clientId')
+        }
+    }
 }
 
 Describe 'Slack の同意画面 (中継ページ経由)' {
@@ -394,8 +472,8 @@ Describe '設定が入ったあとの後始末' {
     It '設定カード自体は完了に移る' {
         $t = @($conn.Query('SELECT * FROM tasks WHERE id = ?', [object[]] @($setupId)))[0]
         Assert-Equal 'done' $t['board_column']
-        Assert-Match 'octocat' ([string] $t['user_edited'])
-        Assert-Match '2 枚' ([string] $t['user_edited'])
+        Assert-Match 'octocat' ([string] $t['user_record'])
+        Assert-Match '2 枚' ([string] $t['user_record'])
     }
 
     It '台帳の「未設定」を打ち消す (ワーカーに渡り続けるため)' {
@@ -408,6 +486,90 @@ Describe '設定が入ったあとの後始末' {
         $r = Invoke-SetupCompletion -Conn $conn -Service 'slack' -Account 'team / bot'
         Assert-Equal 0 $r.resumed
         Assert-Equal 0 $r.setupTaskId
+    }
+
+    Close-TestStore $conn
+}
+
+Describe '未接続を知らせるか' {
+    # Claude 以外は「使っていないだけ」がありうる。知らせるのは、使うと選んだとき・
+    # 実際に通知が来ているとき・設定カードが立っているときだけ。黙らせることもできる。
+    $conn = New-TestStore
+    function Get-Att { param([string] $Key) return @(Get-SetupStatusList -Conn $conn | Where-Object { $_.key -eq $Key })[0] }
+
+    It '何も無ければ、Claude 以外は知らせない' {
+        Assert-True (Get-Att 'anthropic').warn
+        foreach ($k in @('slack', 'microsoft', 'chatwork', 'backlog', 'google')) {
+            Assert-False (Get-Att $k).warn ("{0} を知らせています" -f $k)
+        }
+    }
+
+    It 'そのアプリから通知が来ていれば知らせる (AUMID でしか分からないアプリも)' {
+        [void] (Add-Event -Conn $conn -Source 'notification' -SourceKey 'n1' -App '' -AppId 'com.squirrel.slack.slack' -Title 'x')
+        $s = Get-Att 'slack'
+        Assert-True $s.warn
+        Assert-Equal 'notification' $s.seen
+    }
+
+    It 'API で取り込んだイベントは根拠にしない (繋がっていないと入ってこない)' {
+        [void] (Add-Event -Conn $conn -Source 'outlook' -SourceKey 'm1' -App 'Outlook' -AppId 'outlook' -Title 'x')
+        Assert-False (Get-Att 'microsoft').warn
+    }
+
+    It '昔の通知だけなら知らせない (一度来ただけで、ずっと警告しない)' {
+        $r = Add-Event -Conn $conn -Source 'notification' -SourceKey 'n-old' -App 'Microsoft Teams' -AppId 'MSTeams_8wekyb3d8bbwe!MSTeams' -Title 'x'
+        [void] $conn.NonQuery('UPDATE events SET ingested_at = ? WHERE id = ?',
+            [object[]] @((Get-Date).AddDays(-60).ToString('o'), $r.id))
+        Assert-False (Get-Att 'microsoft').warn
+    }
+
+    It '設定カードが立っていれば知らせる' {
+        [void] (New-SetupTask -Conn $conn -What 'Chatwork トークン' -HowTo '入れてください' -ServiceKey 'chatwork')
+        $s = Get-Att 'chatwork'
+        Assert-True $s.warn
+        Assert-Equal 'card' $s.seen
+    }
+
+    It '「使う」を選べば、通知が無くても知らせる' {
+        Set-SetupAttention -Conn $conn -Key 'backlog' -Wanted $true
+        Assert-True (Get-Att 'backlog').warn
+        Set-SetupAttention -Conn $conn -Key 'backlog' -Wanted $false
+        Assert-False (Get-Att 'backlog').warn
+    }
+
+    It '「警告しない」を選べば、通知が来ていても黙る (あえて繋がないことはある)' {
+        Set-SetupAttention -Conn $conn -Key 'slack' -Muted $true
+        $s = Get-Att 'slack'
+        Assert-False $s.warn
+        Assert-True $s.muted
+        # 渡さなかった方は変えない
+        Set-SetupAttention -Conn $conn -Key 'slack' -Wanted $true
+        Assert-True (Get-Att 'slack').muted
+        Set-SetupAttention -Conn $conn -Key 'slack' -Muted $false
+        Assert-True (Get-Att 'slack').warn
+    }
+
+    It 'Claude は黙らせられない (黙らせると「静かな日」と見分けが付かない)' {
+        Assert-Throws { Set-SetupAttention -Conn $conn -Key 'anthropic' -Muted $true }
+        Assert-True (Get-Att 'anthropic').warn
+    }
+
+    It '接続済みなら、どの条件でも知らせない' {
+        # github.token は「保存」のケースで入ったまま
+        Set-SetupAttention -Conn $conn -Key 'github' -Wanted $true
+        Assert-False (Get-Att 'github').warn
+    }
+
+    It '自分で繋いだら「使う」になり、以前の「警告しない」は解ける' {
+        Set-SetupAttention -Conn $conn -Key 'google' -Muted $true
+        [void] (Invoke-SetupCompletion -Conn $conn -Service 'google' -Account 'me@example.com')
+        $g = Get-Att 'google'
+        Assert-True $g.wanted
+        Assert-False $g.muted
+    }
+
+    It '知らないサービスは受け付けない' {
+        Assert-Throws { Set-SetupAttention -Conn $conn -Key 'zoom' -Wanted $true }
     }
 
     Close-TestStore $conn

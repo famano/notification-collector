@@ -76,7 +76,10 @@ function Start-GraphDeviceCode {
     #>
     param(
         [Parameter(Mandatory)] [string] $ClientId,
-        [string] $TenantId
+        [string] $TenantId,
+        # 任意。パブリック クライアント フローを許可していない (機密クライアントの) 登録用。
+        # コードの発行には要らず、トークンへの引き換えにだけ使う。
+        [string] $ClientSecret
     )
     $tenant = $TenantId
     if (-not $tenant) { $tenant = 'organizations' }
@@ -101,6 +104,7 @@ function Start-GraphDeviceCode {
     $script:PendingGraphDevice = @{
         clientId   = $cid
         tenantId   = $tenant
+        clientSecret = ([string] $ClientSecret).Trim()
         deviceCode = [string] $resp.device_code
         interval   = $interval
         expiresAt  = (Get-Date).AddSeconds($expires)
@@ -136,14 +140,15 @@ function Test-GraphDeviceCode {
     }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $body = @{
+        grant_type  = 'urn:ietf:params:oauth:grant-type:device_code'
+        client_id   = $p.clientId
+        device_code = $p.deviceCode
+    }
+    if ($p.clientSecret) { $body['client_secret'] = $p.clientSecret }
     try {
         $resp = Invoke-RestMethod -Method Post -TimeoutSec 30 `
-            -Uri (Get-GraphTokenEndpoint $p.tenantId) `
-            -Body @{
-                grant_type  = 'urn:ietf:params:oauth:grant-type:device_code'
-                client_id   = $p.clientId
-                device_code = $p.deviceCode
-            }
+            -Uri (Get-GraphTokenEndpoint $p.tenantId) -Body $body
     }
     catch {
         $code = Get-GraphOAuthErrorCode $_
@@ -171,6 +176,10 @@ function Test-GraphDeviceCode {
     Set-Secret -Name 'ms.clientId'     -Value $p.clientId
     Set-Secret -Name 'ms.tenantId'     -Value $p.tenantId
     Set-Secret -Name 'ms.refreshToken' -Value ([string] $resp.refresh_token)
+    # シークレット無しで繋いだなら、前のアプリ登録のシークレットを残さない。
+    # 残すと更新のたびに別の登録のシークレットが送られ、invalid_client で止まる。
+    if ($p.clientSecret) { Set-Secret -Name 'ms.clientSecret' -Value $p.clientSecret }
+    else { [void] (Remove-Secret -Name 'ms.clientSecret') }
     $script:PendingGraphDevice = $null
 
     # 取り立てのアクセストークンをそのまま使う。ここで捨てて取り直す理由がない。
@@ -232,13 +241,17 @@ function Get-GraphAccessToken {
     }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $body = @{
+        client_id = (Get-Secret -Name 'ms.clientId')
+        refresh_token = $ref
+        grant_type = 'refresh_token'
+        scope = $script:GraphScopes
+    }
+    # 機密クライアントとして繋いだ場合は、更新にもシークレットが要る。
+    $sec = Get-Secret -Name 'ms.clientSecret'
+    if ($sec) { $body['client_secret'] = $sec }
     try {
-        $resp = Invoke-RestMethod -Method Post -TimeoutSec 30 -Uri (Get-GraphTokenEndpoint) -Body @{
-            client_id = (Get-Secret -Name 'ms.clientId')
-            refresh_token = $ref
-            grant_type = 'refresh_token'
-            scope = $script:GraphScopes
-        }
+        $resp = Invoke-RestMethod -Method Post -TimeoutSec 30 -Uri (Get-GraphTokenEndpoint) -Body $body
     }
     catch {
         Clear-GraphAccessToken
@@ -327,7 +340,11 @@ function Get-GraphTokenErrorMessage {
     # 番号のまま返しても利用者には読めないので、ここで日本語に落とす。
     $advice = ''
     if ($why -match 'AADSTS7000218') {
-        $advice = 'アプリ登録で「パブリック クライアント フローを許可する」を「はい」にしてください。'
+        $advice = 'アプリ登録で「パブリック クライアント フローを許可する」を「はい」にしてください。' +
+                  '「はい」にできない場合は、クライアント シークレットを発行して入れてください。'
+    }
+    elseif ($why -match 'AADSTS7000215' -or $why -match 'AADSTS7000222') {
+        $advice = 'クライアント シークレットが正しくないか、期限切れです。アプリ登録の「証明書とシークレット」で発行し直してください。'
     }
     elseif ($why -match 'AADSTS700016' -or $code -eq 'unauthorized_client') {
         $advice = 'クライアント ID かテナントが正しくありません。アプリ登録の「アプリケーション (クライアント) ID」を確認してください。'
