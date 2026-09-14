@@ -54,6 +54,12 @@ $gmailLib = Join-Path $PSScriptRoot '..\phase5\lib\GmailConnector.ps1'
 if (Test-Path $gmailLib) { . $gmailLib }
 $slackLib = Join-Path $PSScriptRoot '..\phase5\lib\SlackConnector.ps1'
 if (Test-Path $slackLib) { . $slackLib }
+$graphLib = Join-Path $PSScriptRoot '..\phase5\lib\GraphConnector.ps1'
+if (Test-Path $graphLib) { . $graphLib }
+foreach ($lib in @('ChatworkConnector.ps1', 'BacklogConnector.ps1')) {
+    $libPath = Join-Path $PSScriptRoot ('..\phase5\lib\' + $lib)
+    if (Test-Path $libPath) { . $libPath }
+}
 
 $VerifyResults = (-not $NoVerify)
 
@@ -177,9 +183,72 @@ function Invoke-WorkItem {
     }
     $gmailThreadLabel = if ($gmailThreadId) { '元のスレッドへの返信として送信' } else { '新規メールとして送信' }
 
+    # Outlook 由来なら、返信をスレッドにぶら下げるための識別子を取り出しておく。
+    # Graph は createReply が元メッセージから件名も conversationId も引き継ぐので、
+    # 持ち回るのはメッセージ ID 1つでよい。
+    $outlookMessageId = ''
+    if ($evt -and [string] $evt['source'] -eq 'outlook' -and $evt['raw_json']) {
+        try { $outlookMessageId = [string] ([string] $evt['raw_json'] | ConvertFrom-Json).id } catch { }
+    }
+    $outlookThreadLabel = if ($outlookMessageId) { '元のスレッドへの返信として送信' } else { '新規メールとして送信' }
+
+    # Teams 由来なら、投稿先のチャットを取り出しておく。
+    # Slack と同じ理由でモデルには決めさせない。取り違えると無関係な相手に届く。
+    $teamsChatId = ''
+    $teamsChatName = ''
+    if ($evt -and ([string] $evt['link']) -like 'msteams://*' -and
+        (Get-Command Test-GraphConfigured -ErrorAction SilentlyContinue) -and (Test-GraphConfigured)) {
+        try {
+            $tg = Get-TeamsTarget -Link ([string] $evt['link'])
+            if ($tg) { $teamsChatId = $tg.chatId; $teamsChatName = $tg.chatName }
+        }
+        catch {
+            # 投稿先が引けなくても作業自体は続けられる。投稿ツールが出ないだけ。
+            Write-Step $id 'step' ("Teams の投稿先を確認できませんでした: " + $_.Exception.Message) 'Yellow'
+        }
+    }
+
+    # Chatwork 由来なら、投稿先の部屋と返信先の発言を取り出しておく。
+    $chatworkRoomId = ''
+    $chatworkRoomName = ''
+    $chatworkMessageId = ''
+    $chatworkAccountId = ''
+    if ($evt -and [string] $evt['source'] -eq 'chatwork' -and
+        (Get-Command Test-ChatworkConfigured -ErrorAction SilentlyContinue) -and (Test-ChatworkConfigured)) {
+        try {
+            $tg = Get-ChatworkTarget -Link ([string] $evt['link'])
+            if ($tg) {
+                $chatworkRoomId = $tg.roomId
+                $chatworkRoomName = $tg.roomName
+                $chatworkMessageId = $tg.messageId
+            }
+            # 返信記法に要る「誰への返信か」は取り込み時の記録から取る
+            if ($evt['raw_json']) {
+                $chatworkAccountId = [string] ([string] $evt['raw_json'] | ConvertFrom-Json).accountId
+            }
+        }
+        catch {
+            Write-Step $id 'step' ("Chatwork の投稿先を確認できませんでした: " + $_.Exception.Message) 'Yellow'
+        }
+    }
+
+    # Backlog 由来なら、コメント先の課題を取り出しておく。
+    $backlogIssueKey = ''
+    if ($evt -and [string] $evt['source'] -eq 'backlog') {
+        if ($evt['raw_json']) {
+            try { $backlogIssueKey = [string] ([string] $evt['raw_json'] | ConvertFrom-Json).issueKey } catch { }
+        }
+        if (-not $backlogIssueKey -and (Get-Command ConvertFrom-BacklogLink -ErrorAction SilentlyContinue)) {
+            $ref = ConvertFrom-BacklogLink ([string] $evt['link'])
+            if ($ref) { $backlogIssueKey = $ref.issueKey }
+        }
+    }
+
     # このカードに「返信先」があるか。あるなら出口は送信、無いなら自分で実施して終わる。
     # 送り先の無いカードに返信ツールを見せると、宛先の無い返信を書き始める。
-    $hasOutlet = [bool] $slackChannel -or ($evt -and ([string] $evt['source']) -eq 'gmail')
+    $hasOutlet = [bool] $slackChannel -or [bool] $teamsChatId -or [bool] $chatworkRoomId -or
+                 [bool] $backlogIssueKey -or
+                 ($evt -and (@('gmail', 'outlook') -contains [string] $evt['source']))
 
     # この件の台帳。同じ件の前回までの知見を recall で引けるようにする。
     $subjectKey = [string] $Task['subject_key']
@@ -211,7 +280,10 @@ function Invoke-WorkItem {
     if ($evt) {
         $src = [string] $evt['source']
         $ap  = [string] $evt['app']
-        $sourceUnavailable = -not ($src -eq 'gmail' -or ([string] $evt['link']) -like 'slack://*' -or $ap -like 'Claude*')
+        $sourceUnavailable = -not (@('gmail', 'outlook', 'chatwork', 'backlog') -contains $src -or
+                                   ([string] $evt['link']) -like 'slack://*' -or
+                                   ([string] $evt['link']) -like 'msteams://*' -or
+                                   $ap -like 'Claude*')
     }
 
     # 人間送りの結論は DB の human_step 列から読む。
@@ -321,7 +393,12 @@ function Invoke-WorkItem {
             'record_finding'     { '分かったことを台帳に残しています' }
             'require_human_step' { '利用者本人の操作が要るか判断しています' }
             'send_slack_message' { "Slack に投稿しようとしています: $slackChannelName" }
+            'send_teams_message' { "Teams に投稿しようとしています: $teamsChatName" }
+            'send_chatwork_message' { "Chatwork に投稿しようとしています: $chatworkRoomName" }
+            'add_backlog_comment' { "Backlog の課題にコメントしようとしています: $backlogIssueKey" }
             'send_gmail'         { "メールを送信しようとしています: $($toolInput.to)" }
+            'send_outlook_mail'  { "Outlook からメールを送信しようとしています: $($toolInput.to)" }
+            'create_outlook_draft' { "Outlook に下書きを作成しています: $($toolInput.subject)" }
             'propose_reply'      { '返信案をカードに載せています' }
             default              { "実行中: $toolName" }
         }
@@ -441,7 +518,9 @@ function Invoke-WorkItem {
         # 危険なツールは承認を取ってから実行する。
         # 拒否は例外にせずモデルに返す。理由が伝われば別の手を考えられる。
         $risk = Get-ToolRisk -Name $toolName -ToolInput $toolInput -Workspace $workspace `
-                    -SlackChannelName $slackChannelName -GmailThreadLabel $gmailThreadLabel
+                    -SlackChannelName $slackChannelName -GmailThreadLabel $gmailThreadLabel `
+                    -TeamsChatName $teamsChatName -OutlookThreadLabel $outlookThreadLabel `
+                    -ChatworkRoomName $chatworkRoomName -BacklogIssueKey $backlogIssueKey
         if ($risk.risky) {
             $decision = Wait-ToolApproval -TaskId $id -Tool $toolName -Risk $risk
             if ($decision -ne 'approved') {
@@ -467,6 +546,9 @@ function Invoke-WorkItem {
                 -CommandTimeoutSec $CommandTimeoutSec `
                 -GmailThreadId $gmailThreadId -GmailInReplyTo $gmailInReplyTo `
                 -SlackChannel $slackChannel -SlackThreadTs $slackThreadTs `
+                -OutlookMessageId $outlookMessageId -TeamsChatId $teamsChatId `
+                -ChatworkRoomId $chatworkRoomId -ChatworkMessageId $chatworkMessageId `
+                -ChatworkAccountId $chatworkAccountId -BacklogIssueKey $backlogIssueKey `
                 -SourceEvent $evt -SourceAttachments $sourceAttachments -DossierText $dossierText
 
         # 「実際に何を叩いて何が返ったか」を残す。require_human_step の妥当性は
@@ -502,7 +584,10 @@ function Invoke-WorkItem {
 
     while ($true) {
         $res = Invoke-ClaudeWork -Task $Task -Evt $evt -Policy $policy -Instructions $instructions `
-            -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel) -HasOutlet:$hasOutlet) `
+            -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel) `
+                        -HasTeamsTarget:([bool] $teamsChatId) `
+                        -HasChatworkTarget:([bool] $chatworkRoomId) `
+                        -HasBacklogTarget:([bool] $backlogIssueKey) -HasOutlet:$hasOutlet) `
             -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
             -RepairIssues $issues -Occurrence $occurrence -Dossier $dossierText `
             -SourceText $sourceText -SourceNote $sourceNote
@@ -622,9 +707,15 @@ Write-Host '(送信・投稿は承認を取ってから行います。生成物�
 function Test-Connected { param([string] $Fn) return ((Get-Command $Fn -ErrorAction SilentlyContinue) -and (& $Fn)) }
 $gmailOn = Test-Connected 'Test-GmailConfigured'
 $slackOn = Test-Connected 'Test-SlackConfigured'
-Write-Host ('連携: Gmail={0} / Slack={1}' -f
+$msOn    = Test-Connected 'Test-GraphConfigured'
+$cwOn    = Test-Connected 'Test-ChatworkConfigured'
+$blOn    = Test-Connected 'Test-BacklogConfigured'
+Write-Host ('連携: Gmail={0} / Slack={1} / Microsoft365={2} / Chatwork={3} / Backlog={4}' -f
     $(if ($gmailOn) { '有効 (下書き・送信)' } else { '無効' }),
-    $(if ($slackOn) { '有効 (Slack 由来のカードに投稿)' } else { '無効' })) -ForegroundColor DarkGray
+    $(if ($slackOn) { '有効 (Slack 由来のカードに投稿)' } else { '無効' }),
+    $(if ($msOn) { '有効 (Outlook の下書き・送信 / Teams 由来のカードに投稿)' } else { '無効' }),
+    $(if ($cwOn) { '有効 (Chatwork 由来のカードに投稿)' } else { '無効' }),
+    $(if ($blOn) { '有効 (Backlog 由来のカードにコメント)' } else { '無効' })) -ForegroundColor DarkGray
 
 try {
     while ($true) {

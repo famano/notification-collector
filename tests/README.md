@@ -22,6 +22,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `WorkTools.Tests.ps1` | 危険度の判定 (承認の要否) と人間送りのゲート |
 | `HttpAction.Tests.ps1` | 資格情報をホストから決めること、送信の口を汎用ツールから塞ぐこと |
 | `GoogleToken.Tests.ps1` | 再認可した新しいトークンを、別プロセス (ワーカー・収集) が期限を待たずに使うこと |
+| `Graph.Tests.ps1` | Microsoft 365。デバイスコード、入れ替わるリフレッシュトークンの保存、掃き寄せの取捨、投稿先の束縛 |
+| `ChatworkBacklog.Tests.ps1` | Chatwork / Backlog。掃き寄せの取捨、上限に当たったときの据え置き、資格情報の載せ方 |
 | `SourceAccess.Tests.ps1` | 本文からのリンク抽出と切り詰め |
 | `BoardApi.Tests.ps1` | **実際にボードを起動して** HTTP API を外から叩く |
 | `AppConfig.Tests.ps1` | 配布設定の読み込みと、API キーの取得元の優先順位 |

@@ -74,6 +74,80 @@ Describe '同一性の組み立て' {
         }
         Assert-Equal (New-EventIdentity -Kind 'mail' -Parts @('Run failed', 'GitHub')) (Get-EventIdentityFromRow -Row $row)
     }
+
+    It 'Outlook の通知は件名の行 (2行目) で鍵を作る' {
+        # トーストは [差出人, 件名, 本文の頭] の順。body は2行目以降を繋いだものなので、
+        # そのまま使うと本文まで混ざって API 側の件名と一致しない。
+        $n = [pscustomobject]@{
+            aumid = 'Microsoft.OutlookForWindows_8wekyb3d8bbwe!Microsoft.OutlookforWindows'
+            title = '山田 太郎'; body = '見積の件 / 明日までにご確認ください'
+            lines = @('山田 太郎', '見積の件', '明日までにご確認ください')
+        }
+        Assert-Equal (New-EventIdentity -Kind 'outlook' -Parts @('見積の件', '山田 太郎')) (Get-NotificationIdentity $n)
+    }
+
+    It 'Outlook と Gmail は別の種類にする (同期どうしを束ねない)' {
+        $o = New-EventIdentity -Kind 'outlook' -Parts @('見積の件', '山田 太郎')
+        $g = New-EventIdentity -Kind 'mail'    -Parts @('見積の件', '山田 太郎')
+        Assert-NotEqual $o $g
+    }
+
+    It 'Outlook の同期側の行からも同じ鍵が計算できる' {
+        $row = @{
+            source = 'outlook'
+            raw_json = (@{ subject = '見積の件'; from = '山田 太郎 <taro@example.com>' } | ConvertTo-Json -Compress)
+        }
+        Assert-Equal (New-EventIdentity -Kind 'outlook' -Parts @('見積の件', '山田 太郎')) (Get-EventIdentityFromRow -Row $row)
+    }
+
+    It 'Teams の通知は送信者と本文の頭で鍵を作る (主キーが載らないため)' {
+        $long = 'お疲れさまです。明日の打ち合わせですが、開始時刻を30分うしろに倒せないでしょうか。'
+        $n = [pscustomobject]@{
+            aumid = 'MSTeams_8wekyb3d8bbwe!MSTeams'
+            title = '鈴木 花子 (営業部)'; body = $long
+            lines = @('鈴木 花子 (営業部)', $long)
+        }
+        $row = @{
+            source = 'teams'
+            raw_json = (@{ sender = '鈴木 花子'; text = $long } | ConvertTo-Json -Compress)
+        }
+        Assert-NotNull (Get-NotificationIdentity $n)
+        Assert-Equal (Get-EventIdentityFromRow -Row $row) (Get-NotificationIdentity $n)
+    }
+
+    It 'Teams はトーストが本文を切っていても頭が同じなら同じ鍵になる' {
+        # 長さは種類ごとに決まる。呼び出し側が渡す形にすると、通知側と同期側で
+        # 値がずれて永久に突き合わなくなる (症状はカードが2枚立つだけなので気付きにくい)。
+        $full = 'お疲れさまです。明日の打ち合わせですが、開始時刻を30分うしろに倒せないでしょうか。折り返しご連絡ください。'
+        $cut  = 'お疲れさまです。明日の打ち合わせですが、開始時刻を30分うしろに倒せないでしょ…'
+        Assert-Equal (New-EventIdentity -Kind 'teams' -Parts @('鈴木 花子', $full)) `
+                     (New-EventIdentity -Kind 'teams' -Parts @('鈴木 花子', $cut))
+    }
+
+    It 'メールの鍵は頭 80 文字まで見る (Teams の 24 文字と混ぜない)' {
+        $a = New-EventIdentity -Kind 'mail' -Parts @(('x' * 100), 'GitHub')
+        $b = New-EventIdentity -Kind 'mail' -Parts @(('x' * 80), 'GitHub')
+        Assert-Equal $a $b
+        Assert-NotEqual $a (New-EventIdentity -Kind 'mail' -Parts @(('x' * 24), 'GitHub'))
+    }
+
+    It 'Chatwork の通知も送信者と本文の頭で鍵を作る' {
+        $body = 'お世話になります。先ほどの見積について1点だけ確認させてください。'
+        $n = [pscustomobject]@{
+            aumid = 'jp.co.chatwork.desktop'; title = '山田 太郎'; body = $body
+            lines = @('山田 太郎', $body)
+        }
+        $row = @{
+            source = 'chatwork'
+            raw_json = (@{ sender = '山田 太郎'; text = $body } | ConvertTo-Json -Compress)
+        }
+        Assert-NotNull (Get-NotificationIdentity $n)
+        Assert-Equal (Get-EventIdentityFromRow -Row $row) (Get-NotificationIdentity $n)
+    }
+
+    It '関係のないアプリの通知では鍵を作らない' {
+        Assert-Null (Get-NotificationIdentity ([pscustomobject]@{ aumid = 'Chrome'; title = 'x'; body = 'y' }))
+    }
 }
 
 Describe '通知と同期の突き合わせ' {

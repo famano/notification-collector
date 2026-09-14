@@ -32,9 +32,15 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\TaskStore.ps1"
 . "$PSScriptRoot\lib\ClaudeClient.ps1"
 . "$PSScriptRoot\lib\Dossier.ps1"
-# Slack のリンクから件のキーを作るのに使う (未設定なら無くても動く)
+# Slack / Teams のリンクから件のキーを作るのに使う (未設定なら無くても動く)
 $slackLibPath = Join-Path $PSScriptRoot '..\phase5\lib\SlackConnector.ps1'
 if (Test-Path $slackLibPath) { . $slackLibPath }
+$graphLibPath = Join-Path $PSScriptRoot '..\phase5\lib\GraphConnector.ps1'
+if (Test-Path $graphLibPath) { . $graphLibPath }
+foreach ($lib in @('ChatworkConnector.ps1', 'BacklogConnector.ps1')) {
+    $libPath = Join-Path $PSScriptRoot ('..\phase5\lib\' + $lib)
+    if (Test-Path $libPath) { . $libPath }
+}
 
 if (-not $JsonlPath)  { $JsonlPath  = Join-Path $PSScriptRoot '..\phase1\data\notifications.jsonl' }
 if (-not $PolicyPath) { $PolicyPath = Join-Path $PSScriptRoot 'config\policy.json' }
@@ -95,6 +101,9 @@ $conn = Open-TaskStore -Path $DbPath
 $Covered = @()
 if (Get-Setting -Conn $conn -Key 'sync.slack.lastTs')          { $Covered += 'slack:' }
 if (Get-Setting -Conn $conn -Key 'sync.gmail.lastInternalDate') { $Covered += 'mail:' }
+if (Get-Setting -Conn $conn -Key 'sync.teams.lastTs')           { $Covered += 'teams:' }
+if (Get-Setting -Conn $conn -Key 'sync.outlook.lastReceived')   { $Covered += 'outlook:' }
+if (Get-Setting -Conn $conn -Key 'sync.chatwork.lastTs')        { $Covered += 'chatwork:' }
 
 # 同期が拾うはずの通知は、同期版が来るまで少し待つ。
 # 先に通知でカードを立てると、表示用テキストだけで判定したカードができ、

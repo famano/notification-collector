@@ -48,6 +48,13 @@ Describe 'サービスの名寄せ' {
         Assert-Equal 'google' (Get-SetupService 'gmail').key
     }
 
+    It 'Outlook と Teams は同じ1枚に寄せる (入口は同じアプリ登録なので)' {
+        Assert-Equal 'microsoft' (Get-SetupService 'outlook').key
+        Assert-Equal 'microsoft' (Get-SetupService 'teams').key
+        Assert-Equal 'microsoft' (Get-SetupService 'graph.microsoft.com').key
+        Assert-Equal 'microsoft' (Get-SetupService 'setup:microsoft').key
+    }
+
     It '知らないサービスは null' {
         Assert-Null (Get-SetupService 'zoom.us')
         Assert-Null (Get-SetupService '')
@@ -141,6 +148,14 @@ Describe 'Claude の API キー' {
         Assert-Equal 'sk-ant-good' (Get-Secret -Name 'anthropic.apiKey')
     }
 
+    It 'コードでサインインするサービスも、貼るだけでは受け付けない' {
+        # ここで保存できてしまうと「クライアント ID だけ入った未接続の状態」が
+        # 設定済みに見える。何が足りないのかを画面に出すほうが早い。
+        $r = Save-SetupCredential -Key 'microsoft' -Values @{ clientId = 'cid' }
+        Assert-False $r.ok
+        Assert-Match 'コード' $r.error
+        Assert-Null (Get-Secret -Name 'ms.clientId')
+    }
     It '値は画面に返らない' {
         $json = @(Get-SetupStatusList) | ConvertTo-Json -Depth 6
         Assert-True ($json -notmatch 'sk-ant-good') 'API キーが一覧に含まれています'

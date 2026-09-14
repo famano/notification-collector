@@ -13,7 +13,7 @@
 
     2. 実データの同期 (phase5) — 既定 180 秒ごと。**起動直後に必ず一度走る。**
        watermark で「前回どこまで取ったか」を持っているので、電源を落としていた間の
-       メールや Slack はここで埋まる。起動時に一度走ることが穴埋めの本体。
+       メールや Slack / Teams はここで埋まる。起動時に一度走ることが穴埋めの本体。
 
     3. トリアージ (phase2) — 同期の直後。未判定のイベントをカードにする。
 
@@ -36,7 +36,7 @@ param(
     [string] $DbPath,
     # 通知ポーリングの間隔。長くすると Windows 側で消える前に拾えない。
     [int]    $NotifyIntervalSeconds = 5,
-    # Slack / Gmail を叩く間隔。API のレート制限があるので通知ほど短くできない。
+    # Slack / Gmail / Microsoft 365 を叩く間隔。API のレート制限があるので通知ほど短くできない。
     [int]    $SyncIntervalSeconds = 180,
     [switch] $NoNotifications,
     [switch] $NoSync,

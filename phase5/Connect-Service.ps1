@@ -9,11 +9,12 @@
 .EXAMPLE
     .\Connect-Service.ps1 -Service slack
     .\Connect-Service.ps1 -Service gmail
+    .\Connect-Service.ps1 -Service microsoft
     .\Connect-Service.ps1 -Status
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('slack', 'gmail', 'github', 'anthropic')] [string] $Service,
+    [ValidateSet('slack', 'gmail', 'github', 'anthropic', 'microsoft', 'chatwork', 'backlog')] [string] $Service,
     [switch] $Status,
     [switch] $Test
 )
@@ -22,6 +23,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\SecretStore.ps1"
 . "$PSScriptRoot\lib\SlackConnector.ps1"
 . "$PSScriptRoot\lib\GmailConnector.ps1"
+. "$PSScriptRoot\lib\GraphConnector.ps1"
+. "$PSScriptRoot\lib\ChatworkConnector.ps1"
+. "$PSScriptRoot\lib\BacklogConnector.ps1"
 # 画面と同じ保存・確認の経路を使う (端末と画面で挙動が割れると原因が読めなくなる)
 . "$PSScriptRoot\lib\ServiceSetup.ps1"
 
@@ -35,6 +39,9 @@ function Show-Status {
     Write-Host ("  Slack : {0}" -f $(if (Test-SlackConfigured) { '設定済み' } else { '未設定' }))
     Write-Host ("  Gmail : {0}" -f $(if (Test-GmailConfigured) { '設定済み' } else { '未設定' }))
     Write-Host ("  GitHub: {0}" -f $(if (Get-Secret -Name 'github.token') { '設定済み' } else { '未設定' }))
+    Write-Host ("  Microsoft 365 (Outlook / Teams): {0}" -f $(if (Test-GraphConfigured) { '設定済み' } else { '未設定' }))
+    Write-Host ("  Chatwork: {0}" -f $(if (Test-ChatworkConfigured) { '設定済み' } else { '未設定' }))
+    Write-Host ("  Backlog : {0}" -f $(if (Test-BacklogConfigured) { ('設定済み (' + (Get-BacklogSpace) + ')') } else { '未設定' }))
     if (Test-GmailConfigured) {
         # Calendar は後から足したスコープなので、古いトークンには入っていない。
         # 「Gmail は設定済みなのに出欠が返せない」理由がここで分かるようにする。
@@ -204,6 +211,140 @@ function Connect-Gmail {
     }
 }
 
+function Connect-Microsoft {
+    <#
+      .DESCRIPTION
+        デバイスコードフロー。リダイレクト URI もクライアント シークレットも要らない。
+        必要なのはアプリ登録の「アプリケーション (クライアント) ID」1つだけで、
+        そのぶん事務所のテナントでも通しやすい。
+    #>
+    Write-Host ''
+    Write-Host 'Microsoft 365 (Outlook / Teams) の設定' -ForegroundColor Cyan
+    Write-Host @'
+  事前に Microsoft Entra ID (Azure AD) でアプリを1つ登録してください。
+  クライアント シークレットは要りません (公開クライアントとして使います)。
+
+  1. https://entra.microsoft.com/ → アプリの登録 → 新規登録
+  2. 「認証」→ 詳細設定 → パブリック クライアント フローを許可する: はい
+     ← ここが「いいえ」だと AADSTS7000218 で失敗します
+  3. 「API のアクセス許可」→ Microsoft Graph → 委任されたアクセス許可
+       offline_access  User.Read
+       Mail.ReadWrite  Mail.Send        (Outlook のメールと下書き・送信)
+       Chat.Read       ChatMessage.Send (Teams のチャットと投稿)
+     テナントによっては管理者の同意が要ります
+  4. 「概要」のアプリケーション (クライアント) ID を控える
+
+  注意: Teams のチャットは職場・学校アカウント専用です。個人の Microsoft
+        アカウントには API がありません (Outlook のメールは読めます)。
+
+'@ -ForegroundColor DarkGray
+
+    $cid = Read-Host '  アプリケーション (クライアント) ID'
+    if (-not $cid) { Write-Host '  入力がありません。中止します。' -ForegroundColor Yellow; return }
+    $tenant = Read-Host '  テナント ID (空欄なら organizations)'
+
+    $start = Start-GraphDeviceCode -ClientId $cid -TenantId $tenant
+    if (-not $start.ok) { Write-Host ("  {0}" -f $start.error) -ForegroundColor Red; return }
+
+    Write-Host ''
+    Write-Host ("  {0} を開き、次のコードを入力してサインインしてください:" -f $start.verificationUri) -ForegroundColor Cyan
+    Write-Host ("      {0}" -f $start.userCode) -ForegroundColor Green
+    Write-Host ''
+    try { Start-Process $start.verificationUri } catch { }
+    Write-Host '  サインインの完了を待っています…' -ForegroundColor DarkGray
+
+    $r = Wait-GraphDeviceCode -TimeoutSec $start.expiresInSec
+    if ($r.state -ne 'ok') { Write-Host ("  {0}" -f $r.error) -ForegroundColor Red; return }
+    Write-Host ("  OK: {0} として接続できました" -f $r.account) -ForegroundColor Green
+
+    # 掃き寄せで「自分の発言」とメンションを見分けるのに要る。ここで確定させておく。
+    try {
+        $me = Get-GraphMe
+        if ($me.id) { Set-Secret -Name 'ms.selfUserId' -Value $me.id }
+    } catch { }
+
+    if (-not (Test-GraphScope 'Chat.Read')) {
+        Write-Host '  注意: Chat.Read が付いていないため、Teams のチャットは取り込めません。' -ForegroundColor Yellow
+        Write-Host '        アプリ登録のアクセス許可を確認して、もう一度接続してください。' -ForegroundColor DarkGray
+    }
+}
+
+function Connect-Chatwork {
+    Write-Host ''
+    Write-Host 'Chatwork の設定' -ForegroundColor Cyan
+    Write-Host @'
+  個人設定から API トークンを発行して貼るだけです。
+
+  1. 右上のアカウント名 →「サービス連携」→「API Token」
+  2. パスワードを入れて表示されたトークンを控える
+
+  拾うのは「ダイレクトチャット」と「[To:自分] などで名指しされたもの」の2つだけです。
+  グループの流量そのものはカードにしません ([toall] も拾いません)。
+
+  注意: Chatwork のメール通知を併用していると、同じ用件でメールのカードと
+        Chatwork のカードが2枚立ちます。繋いだらメール通知は切るのが早いです。
+
+'@ -ForegroundColor DarkGray
+
+    $sec = Read-Host '  API トークン' -AsSecureString
+    $tok = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    if (-not $tok) { Write-Host '  入力がありませんでした。' -ForegroundColor Yellow; return }
+
+    $backup = Get-Secret -Name 'chatwork.token'
+    Set-Secret -Name 'chatwork.token' -Value $tok.Trim()
+    try {
+        $me = Get-ChatworkMe
+        if ($me.id) { Set-Secret -Name 'chatwork.selfAccountId' -Value $me.id }
+        Write-Host ("  OK: {0} として接続できました" -f $me.name) -ForegroundColor Green
+    }
+    catch {
+        # 貼り間違いを残すと「設定済みなのに全部 401」という一番分かりにくい状態になる
+        if ($backup) { Set-Secret -Name 'chatwork.token' -Value $backup }
+        else { [void] (Remove-Secret -Name 'chatwork.token') }
+        Write-Host ("  接続できませんでした: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    }
+}
+
+function Connect-Backlog {
+    Write-Host ''
+    Write-Host 'Backlog の設定' -ForegroundColor Cyan
+    Write-Host @'
+  個人設定から API キーを発行し、スペースのアドレスと一緒に入れてください。
+
+  1. 右上のアイコン →「個人設定」→「API」→「登録」で API キーを発行
+  2. スペースのアドレス (example.backlog.jp) を控える
+
+  「自分宛のお知らせ」の API があるので、掃き寄せも選別も要りません。
+  既読にはしません (同期が利用者の画面からお知らせを消すべきではないため)。
+
+  注意: Backlog のメール通知を併用していると、同じ用件でメールのカードと
+        Backlog のカードが2枚立ちます。繋いだらメール通知は切るのが早いです。
+
+'@ -ForegroundColor DarkGray
+
+    $space = Read-Host '  スペースのアドレス (example.backlog.jp)'
+    if (-not $space) { Write-Host '  入力がありません。中止します。' -ForegroundColor Yellow; return }
+    $sec = Read-Host '  API キー' -AsSecureString
+    $key = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+             [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))
+    if (-not $key) { Write-Host '  入力がありません。中止します。' -ForegroundColor Yellow; return }
+
+    $backupSpace = Get-Secret -Name 'backlog.space'
+    $backupKey   = Get-Secret -Name 'backlog.apiKey'
+    Set-Secret -Name 'backlog.space'  -Value (Get-BacklogSpace $space)
+    Set-Secret -Name 'backlog.apiKey' -Value $key.Trim()
+    try {
+        $me = Get-BacklogMe
+        Write-Host ("  OK: {0} / {1} として接続できました" -f (Get-BacklogSpace), $me.name) -ForegroundColor Green
+    }
+    catch {
+        if ($backupSpace) { Set-Secret -Name 'backlog.space' -Value $backupSpace } else { [void] (Remove-Secret -Name 'backlog.space') }
+        if ($backupKey)   { Set-Secret -Name 'backlog.apiKey' -Value $backupKey }  else { [void] (Remove-Secret -Name 'backlog.apiKey') }
+        Write-Host ("  接続できませんでした: {0}" -f $_.Exception.Message) -ForegroundColor Red
+    }
+}
+
 function Connect-GitHub {
     <#
       .DESCRIPTION
@@ -302,6 +443,25 @@ function Test-Connections {
         try { $m = Invoke-GmailApi -Path '/users/me/profile'; Write-Host ("Gmail OK: {0}" -f $m.emailAddress) -ForegroundColor Green }
         catch { Write-Host ("Gmail NG: {0}" -f $_.Exception.Message) -ForegroundColor Red }
     } else { Write-Host 'Gmail: 未設定' -ForegroundColor DarkGray }
+
+    if (Test-ChatworkConfigured) {
+        try { $me = Get-ChatworkMe; Write-Host ("Chatwork OK: {0}" -f $me.name) -ForegroundColor Green }
+        catch { Write-Host ("Chatwork NG: {0}" -f $_.Exception.Message) -ForegroundColor Red }
+    } else { Write-Host 'Chatwork: 未設定' -ForegroundColor DarkGray }
+
+    if (Test-BacklogConfigured) {
+        try { $me = Get-BacklogMe; Write-Host ("Backlog OK: {0} / {1}" -f (Get-BacklogSpace), $me.name) -ForegroundColor Green }
+        catch { Write-Host ("Backlog NG: {0}" -f $_.Exception.Message) -ForegroundColor Red }
+    } else { Write-Host 'Backlog: 未設定' -ForegroundColor DarkGray }
+
+    if (Test-GraphConfigured) {
+        try {
+            $me = Get-GraphMe
+            $chat = if (Test-GraphScope 'Chat.Read') { 'Teams 可' } else { 'Teams 不可 (Chat.Read が無い)' }
+            Write-Host ("Microsoft OK: {0} / {1}" -f $me.account, $chat) -ForegroundColor Green
+        }
+        catch { Write-Host ("Microsoft NG: {0}" -f $_.Exception.Message) -ForegroundColor Red }
+    } else { Write-Host 'Microsoft: 未設定' -ForegroundColor DarkGray }
     Write-Host ''
 }
 
@@ -313,12 +473,18 @@ switch ($Service) {
     'gmail'     { Connect-Gmail }
     'github'    { Connect-GitHub }
     'anthropic' { Connect-Anthropic }
+    'microsoft' { Connect-Microsoft }
+    'chatwork'  { Connect-Chatwork }
+    'backlog'   { Connect-Backlog }
     default {
         Show-Status
         Write-Host '使い方:' -ForegroundColor Cyan
         Write-Host '  .\Connect-Service.ps1 -Service anthropic'
         Write-Host '  .\Connect-Service.ps1 -Service slack'
         Write-Host '  .\Connect-Service.ps1 -Service gmail'
+        Write-Host '  .\Connect-Service.ps1 -Service microsoft'
+        Write-Host '  .\Connect-Service.ps1 -Service chatwork'
+        Write-Host '  .\Connect-Service.ps1 -Service backlog'
         Write-Host '  .\Connect-Service.ps1 -Test     接続確認'
         Write-Host ''
         Write-Host '  同じことはカンバンのヘッダの「接続」からもできます。' -ForegroundColor DarkGray

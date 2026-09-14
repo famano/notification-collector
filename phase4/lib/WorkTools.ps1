@@ -299,6 +299,75 @@ $script:GmailDraftTool = @{
     }
 }
 
+# Outlook / Teams。Gmail・Slack と同じ形にそろえてある ――
+# 送信は承認つき、下書きは外に出ないが利用者の受信箱に物が残るので承認つき、
+# 宛先と投稿先はカードの元通知からワーカーが束縛する。
+$script:OutlookDraftTool = @{
+    name        = 'create_outlook_draft'
+    description = 'Outlook に本物の下書きを作成する。Outlook から来たカードへの返信なら元のスレッドにぶら下がる。送信は行わない。ローカルの .eml ではなく実際のメールボックスに作る場合はこちらを使う。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            to      = @{ type = 'string'; description = '宛先。返信なら元の差出人。' }
+            cc      = @{ type = 'string' }
+            subject = @{ type = 'string' }
+            body    = @{ type = 'string' }
+        }
+        required = @('subject', 'body')
+    }
+}
+
+$script:OutlookSendTool = @{
+    name        = 'send_outlook_mail'
+    description = 'Outlook からメールを実際に送信する。実行前に必ず利用者の承認を求める。Outlook から来たカードへの返信なら元のスレッドにぶら下がる。一度送ると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ create_outlook_draft で下書きに留める。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            to      = @{ type = 'string'; description = '宛先。返信なら元の差出人。空欄では送信できない。' }
+            cc      = @{ type = 'string' }
+            subject = @{ type = 'string' }
+            body    = @{ type = 'string' }
+        }
+        required = @('to', 'subject', 'body')
+    }
+}
+
+$script:TeamsSendTool = @{
+    name        = 'send_teams_message'
+    description = '元の Teams のチャットに投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。一度投稿すると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ文面を報告に載せるだけにする。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text = @{ type = 'string'; description = '投稿する本文。そのまま投稿される。' }
+        }
+        required = @('text')
+    }
+}
+
+$script:ChatworkSendTool = @{
+    name        = 'send_chatwork_message'
+    description = '元の Chatwork の部屋に投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。元の発言への返信として投稿される。一度投稿すると取り消せないので、利用者が送信を求めている場合にだけ使う。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text = @{ type = 'string'; description = '投稿する本文。そのまま投稿される。' }
+        }
+        required = @('text')
+    }
+}
+
+$script:BacklogCommentTool = @{
+    name        = 'add_backlog_comment'
+    description = '元の Backlog の課題にコメントを投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。通知先は課題の既定の関係者だけで、追加の宛先は指定できない。一度投稿すると取り消せない。'
+    input_schema = @{
+        type       = 'object'
+        properties = [ordered]@{
+            text = @{ type = 'string'; description = 'コメント本文。そのまま投稿される。' }
+        }
+        required = @('text')
+    }
+}
+
 # 人間にしかできない1手でカードを閉じる。
 #
 # これは「失敗」ではなく正式な出口。ホテルの本人確認リンク、Windows Hello での
@@ -352,6 +421,9 @@ blocker は次から選ぶ:
 function Get-WorkTools {
     param(
         [switch] $HasSlackTarget,
+        [switch] $HasTeamsTarget,
+        [switch] $HasChatworkTarget,
+        [switch] $HasBacklogTarget,
         [switch] $HasOutlet
     )
     $tools = @($script:WorkTools)
@@ -364,6 +436,18 @@ function Get-WorkTools {
     }
     if ($HasSlackTarget -and (Get-Command Test-SlackConfigured -ErrorAction SilentlyContinue) -and (Test-SlackConfigured)) {
         $tools += $script:SlackSendTool
+    }
+    if ((Get-Command Test-GraphConfigured -ErrorAction SilentlyContinue) -and (Test-GraphConfigured)) {
+        $tools += $script:OutlookDraftTool
+        $tools += $script:OutlookSendTool
+        # Teams の投稿は投稿先が要る。カードの元通知が Teams でなければ出さない。
+        if ($HasTeamsTarget) { $tools += $script:TeamsSendTool }
+    }
+    if ($HasChatworkTarget -and (Get-Command Test-ChatworkConfigured -ErrorAction SilentlyContinue) -and (Test-ChatworkConfigured)) {
+        $tools += $script:ChatworkSendTool
+    }
+    if ($HasBacklogTarget -and (Get-Command Test-BacklogConfigured -ErrorAction SilentlyContinue) -and (Test-BacklogConfigured)) {
+        $tools += $script:BacklogCommentTool
     }
     # 人間送りの出口は常に見せる。ただし呼べるかどうかは別で、
     # 実際に手を動かした証跡が無ければワーカーが呼び出し時に差し戻す
@@ -454,7 +538,8 @@ function Get-HumanStepHeadline {
 # 呼び出し側は「もう一度やらせる」判断の前にこれを見る。
 function Test-IrreversibleTool {
     param([Parameter(Mandatory)] [string] $Name, $ToolInput)
-    if (@('send_gmail', 'send_slack_message') -contains $Name) { return $true }
+    if (@('send_gmail', 'send_slack_message', 'send_outlook_mail', 'send_teams_message',
+          'send_chatwork_message', 'add_backlog_comment') -contains $Name) { return $true }
     # 書き込みメソッドの http_request も戻せない。承諾した招待は取り消せないし、
     # 送った出欠は相手に見えている。修正ラウンドで同じ POST をもう一度
     # 投げないよう、送信と同じ扱いにする。
@@ -479,7 +564,11 @@ function Get-ToolRisk {
         # 送信先はモデルの入力ではなくワーカーが束縛したものを出す。
         # 承認画面に「モデルが言った宛先」を出しては壁にならない。
         [string] $SlackChannelName,
-        [string] $GmailThreadLabel
+        [string] $GmailThreadLabel,
+        [string] $TeamsChatName,
+        [string] $OutlookThreadLabel,
+        [string] $ChatworkRoomName,
+        [string] $BacklogIssueKey
     )
 
     switch ($Name) {
@@ -501,6 +590,51 @@ function Get-ToolRisk {
                 risky   = $true
                 summary = "メールを送信します: $($ToolInput.subject)"
                 detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。相手に届きます。"
+            }
+        }
+        'send_teams_message' {
+            # 投稿は取り消せない。全文をそのまま出す。
+            $where = if ($TeamsChatName) { $TeamsChatName } else { '(元の通知のチャット)' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Teams に投稿します: $where"
+                detail  = "投稿先: $where`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+            }
+        }
+        'send_chatwork_message' {
+            $where = if ($ChatworkRoomName) { $ChatworkRoomName } else { '(元の通知の部屋)' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Chatwork に投稿します: $where"
+                detail  = "投稿先: $where`n形式: 元の発言への返信として`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+            }
+        }
+        'add_backlog_comment' {
+            $where = if ($BacklogIssueKey) { $BacklogIssueKey } else { '(元の通知の課題)' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Backlog の課題にコメントします: $where"
+                detail  = "投稿先: 課題 $where`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。課題の関係者に通知が飛びます。"
+            }
+        }
+        'send_outlook_mail' {
+            $to = if ($ToolInput.to) { $ToolInput.to } else { '(宛先未指定)' }
+            $how = if ($OutlookThreadLabel) { $OutlookThreadLabel } else { '新規メールとして送信' }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Outlook からメールを送信します: $($ToolInput.subject)"
+                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。相手に届きます。"
+            }
+        }
+        'create_outlook_draft' {
+            # 送信はしないが、利用者本人のメールボックスに物が残る。
+            $to = if ($ToolInput.to) { $ToolInput.to } else { '(宛先未指定)' }
+            $preview = [string] $ToolInput.body
+            if ($preview.Length -gt 2000) { $preview = $preview.Substring(0, 2000) + "`n…(以下省略)" }
+            return [pscustomobject]@{
+                risky   = $true
+                summary = "Outlook に下書きを作成します: $($ToolInput.subject)"
+                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n`n--- 本文 ---`n$preview`n`n※作成されるのは下書きだけで、送信はされません。"
             }
         }
         'run_command' {
@@ -644,6 +778,16 @@ function Invoke-WorkTool {
         # Slack から来たカードの場合の投稿先。同じ理由でワーカーが束縛する。
         [string] $SlackChannel,
         [string] $SlackThreadTs,
+        # Outlook から来たカードの場合、返信をスレッドにぶら下げるための識別子。
+        [string] $OutlookMessageId,
+        # Teams から来たカードの場合の投稿先。
+        [string] $TeamsChatId,
+        # Chatwork から来たカードの場合の投稿先と、返信先の発言。
+        [string] $ChatworkRoomId,
+        [string] $ChatworkMessageId,
+        [string] $ChatworkAccountId,
+        # Backlog から来たカードの場合のコメント先。
+        [string] $BacklogIssueKey,
         # open_source が取り直す対象。モデルは「どのカードの出自か」を
         # 指定できない。指定できるようにすると、別のカードの中身を
         # 読ませる指示が通ってしまう。
@@ -682,6 +826,72 @@ function Invoke-WorkTool {
                 $where = if ($GmailThreadId) { '元のスレッドへの返信として' } else { '新規メールとして' }
                 return [pscustomobject]@{
                     text     = ("メールを送信しました ({0})。取り消しはできません。宛先: {1}" -f $where, $ToolInput.to)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'send_teams_message' {
+                if (-not (Get-Command Send-TeamsMessage -ErrorAction SilentlyContinue)) {
+                    throw 'Microsoft 365 連携が設定されていません。'
+                }
+                if (-not $TeamsChatId) { throw 'このカードには Teams の投稿先がありません。' }
+                $r = Send-TeamsMessage -ChatId $TeamsChatId -Text ([string] $ToolInput.text)
+                $link = if ($r.permalink) { " {0}" -f $r.permalink } else { '' }
+                return [pscustomobject]@{
+                    text     = ("Teams のチャットに投稿しました。取り消しはできません。{0}" -f $link)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'send_chatwork_message' {
+                if (-not (Get-Command Send-ChatworkMessage -ErrorAction SilentlyContinue)) {
+                    throw 'Chatwork 連携が設定されていません。'
+                }
+                if (-not $ChatworkRoomId) { throw 'このカードには Chatwork の投稿先がありません。' }
+                $r = Send-ChatworkMessage -RoomId $ChatworkRoomId -Text ([string] $ToolInput.text) `
+                        -ReplyToAccountId $ChatworkAccountId -ReplyToMessageId $ChatworkMessageId
+                return [pscustomobject]@{
+                    text     = ("Chatwork に投稿しました。取り消しはできません。{0}" -f $r.permalink)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'add_backlog_comment' {
+                if (-not (Get-Command Add-BacklogComment -ErrorAction SilentlyContinue)) {
+                    throw 'Backlog 連携が設定されていません。'
+                }
+                if (-not $BacklogIssueKey) { throw 'このカードには Backlog の課題がありません。' }
+                $r = Add-BacklogComment -IssueKey $BacklogIssueKey -Content ([string] $ToolInput.text)
+                return [pscustomobject]@{
+                    text     = ("Backlog の課題 {0} にコメントしました。取り消しはできません。{1}" -f $BacklogIssueKey, $r.permalink)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'send_outlook_mail' {
+                if (-not (Get-Command Send-OutlookMail -ErrorAction SilentlyContinue)) {
+                    throw 'Microsoft 365 連携が設定されていません。'
+                }
+                [void] (Send-OutlookMail -To ([string] $ToolInput.to) -Cc ([string] $ToolInput.cc) `
+                        -Subject ([string] $ToolInput.subject) -Body ([string] $ToolInput.body) `
+                        -ReplyToMessageId $OutlookMessageId)
+                $where = if ($OutlookMessageId) { '元のスレッドへの返信として' } else { '新規メールとして' }
+                return [pscustomobject]@{
+                    text     = ("Outlook からメールを送信しました ({0})。取り消しはできません。宛先: {1}" -f $where, $ToolInput.to)
+                    artifact = $null
+                    isError  = $false
+                }
+            }
+            'create_outlook_draft' {
+                if (-not (Get-Command New-OutlookDraft -ErrorAction SilentlyContinue)) {
+                    throw 'Microsoft 365 連携が設定されていません。'
+                }
+                $d = New-OutlookDraft -To ([string] $ToolInput.to) -Cc ([string] $ToolInput.cc) `
+                        -Subject ([string] $ToolInput.subject) -Body ([string] $ToolInput.body) `
+                        -ReplyToMessageId $OutlookMessageId
+                $where = if ($OutlookMessageId) { '元のスレッドへの返信として' } else { '新規メールとして' }
+                return [pscustomobject]@{
+                    text     = ("Outlook に下書きを作成しました ({0})。下書きID: {1}" -f $where, $d.id)
                     artifact = $null
                     isError  = $false
                 }

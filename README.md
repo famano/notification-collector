@@ -6,8 +6,10 @@ Windows の通知とメールを起点に、対応の要否を判断し、実際
 ```
 [収集]              [判断]           [実行]              [操作]
 通知DB (Phase 1) ─┐
-Slack API ────────┼→ トリアージ ──→ ワーカー ──────→ カンバン
-Gmail API ────────┘   (Phase 2)      (Phase 4)         (Phase 3)
+Slack / Teams ────┤
+Chatwork ─────────┼→ トリアージ ──→ ワーカー ──────→ カンバン
+Gmail / Outlook ──┤   (Phase 2)      (Phase 4)         (Phase 3)
+Backlog / GitHub ─┘
                                          ↑                 │
                                          └── 承認・指示・割り込み ─┘
 ```
@@ -23,7 +25,7 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 | [phase2](phase2/README.md) | 判断層とタスクストア。ルールで足切りしてから Claude で判定 |
 | [phase3](phase3/README.md) | カンバン UI。承認・割り込み・修正・アーカイブ |
 | [phase4](phase4/README.md) | ワーカー。出自を取り直し、API で実際に操作し、自己検証する |
-| [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub |
+| [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub / Microsoft 365 (Outlook・Teams) / Chatwork / Backlog |
 | [tests](tests/README.md) | テスト。追加インストールもキーも要らない |
 | [docs/配布手順.md](docs/配布手順.md) | 配る側と使う側の手順。`Install.cmd` と `config\app-config.json` |
 
@@ -39,6 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1
 ```
 
 **API キーも外部サービスも、カンバンのヘッダの「接続」から入れる。**
+繋げるのは Slack / Gmail / GitHub / Microsoft 365 (Outlook・Teams) / Chatwork / Backlog。
 キーが無くても起動する ―― 取り込みとカンバンだけ先に立ち上がり、
 入力した瞬間に判定とワーカーが動き始める (起動し直さなくてよい)。
 環境変数 `ANTHROPIC_API_KEY` があればそちらが優先される (開発機向け)。
@@ -87,7 +90,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1
 **同じものが両方の経路から来る。カードは1枚、正は同期側。**
 Slack のメンションも受信メールも、通知と API の両方に現れる。イベントの主キーは
 経路ごとに別物なので、そのままではカードが2枚立つ。`events.dedup_key` に
-「何を指しているか」（Slack はチャンネル ID と ts、メールは件名と差出人）を持たせて
+「何を指しているか」（Slack はチャンネル ID と ts、メールは件名と差出人、
+Teams は送信者と本文の頭）を持たせて
 経路をまたいで突き合わせ、**本文もスレッドも返信先も持っている同期側を正にする。**
 通知で先にカードが立っていたら、増やさずに土台のイベントだけ差し替える。
 
@@ -138,7 +142,7 @@ API 側から穴を埋める。通知は低遅延のトリガに徹する。
 同期が保存した本文は取り込み時点のもので、HTML メールの本文が抜けていたり、
 スレッドの経緯が入っていなかったりする。それを渡すと「Gmail を開いて
 ご確認ください」で終わる報告が出る ―― このアプリの目的と正面から反する。
-そこでワーカーは作業を始める前に、Gmail のスレッド全文・Slack のスレッドと
+そこでワーカーは作業を始める前に、メールのスレッド全文・Slack / Teams の会話と
 添付・Claude セッションの待機中の問いかけを取り直し、それを渡す。
 **「まず取り直せ」とモデルに指示する形では守られなかったので、構造で担保している。**
 
@@ -209,7 +213,7 @@ Bot は招待されたチャンネルしか読めず、DM に至っては Bot �
 別の件で同じサービスを触るときにも効く。
 
 **外向きの送信は、承認を通してから行う。**
-メールの送信と Slack への投稿はできるが、実行前に必ずカンバンで止まり、
+メールの送信と Slack / Teams / Chatwork への投稿はできるが、実行前に必ずカンバンで止まり、
 宛先と本文が全文出る。既定は下書きまでで、送信するのは利用者がそう指示したときだけ。
 投稿先・返信先はモデルに決めさせず、カードの元通知から束縛して渡す。
 利用者がカンバンから直接送る場合も同じで、**宛先はサーバがカードから決め、

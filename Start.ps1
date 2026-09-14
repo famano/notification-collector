@@ -194,14 +194,23 @@ try {
     . "$PSScriptRoot\phase5\lib\SecretStore.ps1"
     . "$PSScriptRoot\phase5\lib\SlackConnector.ps1"
     . "$PSScriptRoot\phase5\lib\GmailConnector.ps1"
+    . "$PSScriptRoot\phase5\lib\GraphConnector.ps1"
+    . "$PSScriptRoot\phase5\lib\ChatworkConnector.ps1"
+    . "$PSScriptRoot\phase5\lib\BacklogConnector.ps1"
     $slackOn  = Test-SlackConfigured
     $gmailOn  = Test-GmailConfigured
     $githubOn = [bool] (Get-Secret -Name 'github.token')
-    Write-Host ("接続: Claude={0} / Slack={1} / Gmail={2} / GitHub={3}" -f `
+    $msOn     = Test-GraphConfigured
+    $cwOn     = Test-ChatworkConfigured
+    $blOn     = Test-BacklogConfigured
+    Write-Host ("接続: Claude={0} / Slack={1} / Gmail={2} / GitHub={3} / Microsoft365={4} / Chatwork={5} / Backlog={6}" -f `
         $(if ($script:TriageOn) { '有効' } elseif ($NoTriage) { '使わない' } else { '未設定' }),
         $(if ($slackOn) { '有効' } else { '未設定' }),
         $(if ($gmailOn) { '有効' } else { '未設定' }),
-        $(if ($githubOn) { '有効' } else { '未設定' })) -ForegroundColor DarkGray
+        $(if ($githubOn) { '有効' } else { '未設定' }),
+        $(if ($msOn) { '有効' } else { '未設定' }),
+        $(if ($cwOn) { '有効' } else { '未設定' }),
+        $(if ($blOn) { '有効' } else { '未設定' })) -ForegroundColor DarkGray
     if (-not $githubOn) {
         Write-Host '  GitHub 未設定: 招待の承諾や非公開リポの調査は本人操作になります' -ForegroundColor DarkGray
         Write-Host '  設定する: カンバンのヘッダの「接続」から' -ForegroundColor DarkGray

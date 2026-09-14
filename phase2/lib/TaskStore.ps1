@@ -290,22 +290,44 @@ function ConvertTo-IdentityText {
     param([string] $Value, [int] $Max = 80)
     if (-not $Value) { return '' }
     $t = ($Value -replace '\s+', ' ').Trim().ToLowerInvariant()
+    # トーストは長い文面を切って「…」を付けて出す。これが残っていると、
+    # 頭が同じでも末尾の1文字で鍵が変わり、通知と同期が結ばれない。
+    $t = ($t -replace '(…|\.\.\.)+$', '').Trim()
     if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max) }
     return $t
 }
 
 # 通知側と同期側が同じ文字列を作れるように、組み立てはここに集約する。
-#   slack … チャンネル ID と ts。通知の launch (slack://) にも API にも同じものが入っている
-#   mail  … 件名と差出人の表示名。メール通知にメッセージ ID は載らないので内容で突き合わせる
+#   slack   … チャンネル ID と ts。通知の launch (slack://) にも API にも同じものが入っている
+#   mail    … 件名と差出人の表示名。メール通知にメッセージ ID は載らないので内容で突き合わせる
+#   outlook … 同上。ただし **mail とは別の種類にする**。
+#             束ねてよいのは「通知1件と同期1件」だけで、Gmail と Outlook のように
+#             同期どうしを突き合わせると、両方の受信箱に届いた同じメールが
+#             片方だけ消える (どちらが正かを決める材料がこちらに無い)。
+#   chatwork… 送信者と本文の頭。Teams と同じ理由 (トーストに主キーが載らない)。
+#   teams   … 送信者と本文の頭。Teams のトーストにはチャットIDもメッセージIDも載らないので、
+#             Slack のように主キーでは結べない。内容の一致で見るほかない。
+#             頭だけを短く (24文字) 見るのは、トーストが文面を途中で切ってくるため。
+#             短くするほど「別のメッセージを同じものとみなす」側に倒れるが、
+#             束ねる相手は通知1件だけで、本体は同期側が別に取り込んでいる。
+#             取り違えても失うのは通知1件で、カードが二重に立つより害が小さい。
 function New-EventIdentity {
     param(
-        [Parameter(Mandatory)] [ValidateSet('slack', 'mail')] [string] $Kind,
+        [Parameter(Mandatory)] [ValidateSet('slack', 'mail', 'outlook', 'teams', 'chatwork')] [string] $Kind,
         # Mandatory を付けないこと。件名の無いメールのように材料が空のものがあり、
         # 必須にすると束縛エラーで同期ごと止まる。空は「突き合わせない」であって異常ではない。
-        [AllowNull()] [AllowEmptyCollection()] [string[]] $Parts
+        [AllowNull()] [AllowEmptyCollection()] [string[]] $Parts,
+        # 突き合わせに使う文字数。**種類ごとの既定から外れる理由が無いなら渡さないこと。**
+        # 通知側と同期側で違う値を渡すと、鍵が食い違って永久に突き合わない
+        # (しかも症状はカードが2枚立つだけなので、原因に気付きにくい)。
+        [int] $Max = 0
     )
     if (-not $Parts) { return $null }
-    $norm = @($Parts | ForEach-Object { ConvertTo-IdentityText $_ })
+    if ($Max -le 0) {
+        # Teams と Chatwork だけ短い。トーストが本文を途中で切ってくるので、頭だけを見る。
+        $Max = $(if (@('teams', 'chatwork') -contains $Kind) { 24 } else { 80 })
+    }
+    $norm = @($Parts | ForEach-Object { ConvertTo-IdentityText $_ $Max })
     # 材料が欠けているものは突き合わせない。空文字どうしが一致してしまう。
     if (@($norm | Where-Object { $_ }).Count -ne $norm.Count) { return $null }
     return ($Kind + ':' + ($norm -join '|'))
@@ -356,7 +378,45 @@ function Get-NotificationIdentity {
     if (([string] $N.attribution -like '*mail.google.com*') -or ($launch -like '*mail.google.com*')) {
         return New-EventIdentity -Kind 'mail' -Parts @($N.body, $N.title)
     }
+
+    # Outlook のデスクトップ通知。行は [差出人, 件名, 本文の頭] の順に並ぶので、
+    # 件名は body (2行目以降を ' / ' で繋いだもの) ではなく lines[1] から取る。
+    # body を使うと本文の頭まで混ざり、API 側の件名と一致しない。
+    if ((Test-NotificationApp $N @('outlook')) -or ($launch -like '*outlook.office.com*') -or ($launch -like '*outlook.live.com*')) {
+        $subject = ''
+        $lines = @($N.lines)
+        if ($lines.Count -ge 2) { $subject = [string] $lines[1] } else { $subject = [string] $N.body }
+        return New-EventIdentity -Kind 'outlook' -Parts @($subject, $N.title)
+    }
+
+    # Chatwork のデスクトップ通知。title は送信者、body が本文。
+    # メッセージ ID は載らないので、Teams と同じく内容で突き合わせる。
+    if (Test-NotificationApp $N @('chatwork')) {
+        return New-EventIdentity -Kind 'chatwork' -Parts @($N.title, $N.body)
+    }
+
+    # Teams のデスクトップ通知。title は送信者 (グループなら「送信者 (グループ名)」)、
+    # body が本文。チャットIDもメッセージIDも載らないので内容で突き合わせる。
+    # トーストは長い本文を切って出すので、頭だけを見る。
+    if (Test-NotificationApp $N @('teams')) {
+        $sender = [string] $N.title
+        $i = $sender.IndexOf('(')
+        if ($i -gt 0) { $sender = $sender.Substring(0, $i) }
+        return New-EventIdentity -Kind 'teams' -Parts @($sender, $N.body)
+    }
     return $null
+}
+
+# 通知がどのアプリから出たか。AUMID (Aumid) と表示名 (app) の両方を見る。
+# AUMID はバージョンで変わる (新しい Outlook / Teams は別物になった) ので、
+# 完全一致ではなく部分一致で見る。
+function Test-NotificationApp {
+    param($N, [string[]] $Needles)
+    $hay = (('{0} {1} {2}' -f [string] $N.aumid, [string] $N.app, [string] $N.attribution)).ToLowerInvariant()
+    foreach ($n in @($Needles)) {
+        if ($n -and $hay.Contains($n.ToLowerInvariant())) { return $true }
+    }
+    return $false
 }
 
 # 保存済みの events の行から同一性を計算し直す。
@@ -372,6 +432,9 @@ function Get-EventIdentityFromRow {
         'notification' { return Get-NotificationIdentity $raw }
         'slack'        { return New-EventIdentity -Kind 'slack' -Parts @($raw.channel, $raw.ts) }
         'gmail'        { return New-EventIdentity -Kind 'mail'  -Parts @($raw.subject, (Get-MailDisplayName $raw.from)) }
+        'outlook'      { return New-EventIdentity -Kind 'outlook' -Parts @($raw.subject, (Get-MailDisplayName $raw.from)) }
+        'teams'        { return New-EventIdentity -Kind 'teams' -Parts @($raw.sender, $raw.text) }
+        'chatwork'     { return New-EventIdentity -Kind 'chatwork' -Parts @($raw.sender, $raw.text) }
     }
     return $null
 }

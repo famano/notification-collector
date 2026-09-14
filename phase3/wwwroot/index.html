@@ -422,6 +422,14 @@
     margin: 6px 0 0; font-size: 11.5px; background: var(--soft); padding: 8px;
     border-radius: 5px; white-space: pre-wrap; word-break: break-word;
   }
+  .setup .devicecode {
+    margin-top: 11px; padding: 11px 13px; border: 1px dashed var(--accent);
+    border-radius: 7px; background: var(--soft);
+  }
+  .setup .devicecode .code {
+    font-family: ui-monospace, Consolas, monospace; font-size: 25px; font-weight: 700;
+    letter-spacing: 3px; margin: 7px 0; user-select: all;
+  }
   .setup .doc { font-size: 11.5px; color: var(--accent); text-decoration: none; }
   .setup .doc:hover { text-decoration: underline; }
   #conn .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -1740,7 +1748,72 @@
     }
 
     var row = el('div', 'row');
-    if (svc.flow === 'oauth') {
+    // コードを出す枠。device の流れでだけ使う。
+    var codeBox = el('div', 'devicecode');
+    codeBox.hidden = true;
+    var pollTimer = null;
+
+    // 「済んだか」をサーバに聞きに行く。待つのはこちら側の仕事
+    // (カンバンは1本のループで要求を捌くので、サーバ側で待つと画面ごと固まる)。
+    function pollDevice(key, intervalSec, deadline) {
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = setTimeout(function () {
+        api('/api/setup/' + key + '/poll', 'POST', {}).then(function (r) {
+          if (r.status === 200 && r.body.state === 'pending') {
+            if (Date.now() > deadline) {
+              codeBox.hidden = true;
+              toast('時間内にサインインが確認できませんでした', 'err');
+              return;
+            }
+            pollDevice(key, intervalSec, deadline);
+            return;
+          }
+          codeBox.hidden = true;
+          if (r.status !== 200 || !r.body.ok) {
+            toast('接続できませんでした: ' + (r.body.error || r.status), 'err');
+            return;
+          }
+          var msg = svc.label + ' に接続しました' + (r.body.account ? '（' + r.body.account + '）' : '');
+          if (r.body.resumed > 0) msg += '。止まっていた ' + r.body.resumed + ' 枚を要対応に戻しました';
+          toast(msg, 'ok');
+          if (r.body.note) setTimeout(function () { toast(r.body.note, 'err'); }, 3400);
+          if (onDone) onDone();
+        });
+      }, intervalSec * 1000);
+    }
+
+    if (svc.flow === 'device') {
+      row.appendChild(actionButton('コードを出してサインイン', 'primary', '準備中…', function () {
+        if (!anyValue()) { toast('入力が空です', 'err'); return; }
+        return api('/api/setup/' + svc.key + '/devicecode', 'POST', { values: values() })
+          .then(function (r) {
+            if (r.status !== 200 || !r.body.ok) {
+              toast('コードを取得できませんでした: ' + (r.body.error || r.status), 'err');
+              return;
+            }
+            clearInputs();
+            // サインイン先は応答から来る。ここでも https だけに絞る
+            // (ボード上の href は常に自前で検めるのがこの画面の約束)。
+            var vuri = String(r.body.verificationUri || '');
+            if (vuri.indexOf('https://') !== 0) vuri = '';
+            codeBox.innerHTML = '';
+            codeBox.hidden = false;
+            codeBox.appendChild(el('div', 'cap', '別のタブで開いたサインイン画面に、このコードを入れてください'));
+            codeBox.appendChild(el('div', 'code', r.body.userCode || ''));
+            if (vuri) {
+              var a = el('a', 'doc', 'サインイン画面を開く ↗');
+              a.href = vuri; a.target = '_blank'; a.rel = 'noopener noreferrer';
+              codeBox.appendChild(a);
+            }
+            codeBox.appendChild(el('div', 'hint', 'サインインが終わると、この画面に自動で反映されます。'));
+            if (vuri) window.open(vuri, '_blank', 'noopener');
+            var iv = Number(r.body.interval) || 5;
+            var life = (Number(r.body.expiresInSec) || 900) * 1000;
+            pollDevice(svc.key, iv, Date.now() + life);
+          });
+      }));
+    }
+    else if (svc.flow === 'oauth') {
       row.appendChild(actionButton(preset ? (svc.label + ' に接続する') : '保存して同意画面へ',
           'primary', '準備中…', function () {
         // 用意済みなら空のまま押せる。サーバが配布時のクライアントを使う。
@@ -1806,6 +1879,8 @@
     else {
       box.appendChild(row);
     }
+    // コードは押したあとに出る。行のあとに置いておく (device のときだけ見える)。
+    box.appendChild(codeBox);
 
     if (svc.help) {
       var d = document.createElement('details');

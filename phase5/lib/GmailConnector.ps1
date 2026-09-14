@@ -6,6 +6,8 @@
 # リフレッシュトークンは DPAPI で暗号化して保存する。
 
 . "$PSScriptRoot\SecretStore.ps1"
+# 本文が HTML にしか無いメールがある。落とし方は Outlook / Teams と共通。
+. "$PSScriptRoot\HtmlText.ps1"
 
 $script:GmailApi   = 'https://gmail.googleapis.com/gmail/v1'
 $script:GoogleAuth = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -280,16 +282,6 @@ function Get-GmailHeader {
     param($Payload, [string] $Name)
     foreach ($h in @($Payload.headers)) { if ($h.name -ieq $Name) { return [string] $h.value } }
     return ''
-}
-
-function ConvertFrom-HtmlToText {
-    param([string] $Html)
-    $txt = $Html -replace '(?s)<(script|style).*?</\1>', ''
-    $txt = $txt -replace '<br\s*/?>', "`n" -replace '</p>', "`n" -replace '</tr>', "`n" -replace '</div>', "`n"
-    $txt = $txt -replace '<[^>]+>', ''
-    $txt = $txt -replace '&nbsp;', ' ' -replace '&amp;', '&' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&quot;', '"' -replace '&#39;', "'"
-    # タグを落とすと空行が大量に残る。3行以上の連続は2行に畳む。
-    return ($txt -replace '[ \t]+\n', "`n" -replace '(\r?\n){3,}', "`n`n").Trim()
 }
 
 # 本文を取り出す。
