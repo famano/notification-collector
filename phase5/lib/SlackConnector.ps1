@@ -13,6 +13,9 @@
 # 投稿 (chat.postMessage) も持つ。読み取りと違い取り消しがきかないので、
 # 呼ぶ前に必ずカンバンで承認を取る (判定は phase4/lib/WorkTools.ps1)。
 # 投稿先はモデルに決めさせず、カードの元通知のリンクから束縛して渡す。
+# 投稿も本人のトークンで行う ―― **返信は本人名義で出る。** ここが Bot 名義だと、
+# 受け取った相手には「誰かのアプリが代わりに喋っている」ように見え、
+# 会話の続きとして読めない (相手はスレッドの相手に返事をしているつもりである)。
 
 . "$PSScriptRoot\SecretStore.ps1"
 
@@ -22,14 +25,13 @@ $script:SlackToken = 'https://slack.com/api/oauth.v2.access'
 
 # 同意画面で求めるユーザー権限。
 #
-# **Bot トークンは求めない。** このアプリが要るのは「本人に届いたもの」で、
-# それは本人のトークンでしか見えない ―― Bot は招待されたチャンネルしか読めず、
-# DM に至っては Bot 自身宛のものしか見えない。夜のあいだに来た DM を拾えるか
-# どうかがここで決まる。
+# **Bot トークンは使わない。** 読むのも書くのも本人のトークン1本である。
+# 読む側の理由: このアプリが要るのは「本人に届いたもの」で、それは本人の
+# トークンでしか見えない ―― Bot は招待されたチャンネルしか読めず、DM に至っては
+# Bot 自身宛のものしか見えない。夜のあいだに来た DM を拾えるかどうかがここで決まる。
+# 書く側の理由: 返信は会話の続きなので、本人名義で出なければ相手に通じない。
 #
 # Bot を使わないことで運用も1つ消える: **チャンネルへの招待が要らなくなる。**
-# 返信も本人名義になる (Bot 名義のままにしたい場合だけ、端末から Bot トークンを
-# 足す。その場合は投稿だけがそちらを使う)。
 #
 # 足すときは「何が読めるようになるか」を考えること。ここは「その人に見えるもの
 # 全部」への鍵になるので、要るものだけに絞る。
@@ -40,23 +42,20 @@ $script:SlackUserScopes = @(
 )
 
 function Test-SlackConfigured {
-    return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken'))
+    return [bool] (Get-Secret -Name 'slack.userToken')
 }
 
-# 読み取りはユーザートークン (xoxp) があればそちらを優先する。
-# Bot トークンは招待されたチャンネルしか見えず、DM は Bot 自身宛のものに限られる。
-# 「寝ているあいだに来た DM」まで拾えるかどうかは、ここで決まる。
-function Get-SlackReadToken {
-    $t = Get-Secret -Name 'slack.userToken'
-    if ($t) { return $t }
-    return Get-Secret -Name 'slack.botToken'
-}
-
-# 投稿は Bot 名義を既定にする。ユーザートークンしか無い場合だけ自分名義になる。
-function Get-SlackWriteToken {
-    $t = Get-Secret -Name 'slack.botToken'
-    if ($t) { return $t }
+# 読み取りも投稿も同じ本人のトークン (xoxp)。分ける理由が無い ――
+# 見える範囲は本人が見える範囲で、出る名義は本人である。
+function Get-SlackToken {
     return Get-Secret -Name 'slack.userToken'
+}
+
+# 古い構成で保管庫に入った Bot トークン (xoxb) を捨てる。
+# もう読まないので残しても効かないが、**ワークスペース共有の鍵**が本人の
+# 保管庫に残り続けるのは望ましくない。起動時に一度呼ぶ。
+function Remove-SlackBotToken {
+    return [bool] (Remove-Secret -Name 'slack.botToken')
 }
 
 # slack://channel?id=C123&message=169...&team=T123&thread_ts=169...
@@ -85,7 +84,7 @@ function ConvertFrom-SlackLink {
 
 function Invoke-SlackApi {
     param([Parameter(Mandatory)] [string] $Method, [hashtable] $Query)
-    $token = Get-SlackReadToken
+    $token = Get-SlackToken
     if (-not $token) { throw 'Slack が未設定です。カンバンのヘッダの「接続」から繋いでください。' }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -107,7 +106,7 @@ function Invoke-SlackApi {
 # 書き込み系。GET と違い引数は JSON ボディで送る。
 function Invoke-SlackApiPost {
     param([Parameter(Mandatory)] [string] $Method, [Parameter(Mandatory)] [hashtable] $Body)
-    $token = Get-SlackWriteToken
+    $token = Get-SlackToken
     if (-not $token) { throw 'Slack が未設定です。カンバンのヘッダの「接続」から繋いでください。' }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -158,7 +157,7 @@ function Get-SlackFileBytes {
         ログイン用の HTML が返ってきて、中身を取り違えるので必ずヘッダを付ける。
     #>
     param([Parameter(Mandatory)] [string] $FileId)
-    $token = Get-SlackReadToken
+    $token = Get-SlackToken
     if (-not $token) { throw 'Slack のトークンが設定されていません。' }
     $info = Invoke-SlackApi -Method 'files.info' -Query @{ file = $FileId }
     $url = [string] $info.file.url_private_download
@@ -275,13 +274,13 @@ function Get-SlackSelfUserId {
       .SYNOPSIS
         「自分」の Slack ユーザーID。メンション判定に使う。
       .DESCRIPTION
-        ユーザートークンなら auth.test の user_id が本人なので自動で分かる。
-        Bot トークンだと auth.test は Bot 自身を返すため、設定済みの値が要る。
+        本人のトークンなので auth.test の user_id がそのまま本人である。
+        保管庫の値は同意した時点で入れたもので、毎回 auth.test を叩かないための控え。
     #>
     if ($script:SlackSelfId) { return $script:SlackSelfId }
     $stored = Get-Secret -Name 'slack.selfUserId'
     if ($stored) { $script:SlackSelfId = $stored; return $stored }
-    if (Get-Secret -Name 'slack.userToken') {
+    if (Test-SlackConfigured) {
         try { $script:SlackSelfId = [string] (Invoke-SlackApi -Method 'auth.test').user_id } catch { }
     }
     return $script:SlackSelfId
@@ -311,45 +310,6 @@ function ConvertTo-SlackThreadKey {
     return "slack:${Channel}:${ThreadTs}"
 }
 
-function Find-SlackUserId {
-    <#
-      .SYNOPSIS
-        メールアドレスか表示名からユーザーIDを引く。設定時に「自分」を特定するために使う。
-      .OUTPUTS
-        [pscustomobject[]] id / name / realName / email。見つからなければ空。
-    #>
-    param([Parameter(Mandatory)] [string] $Query)
-
-    if ($Query -match '^[^@\s]+@[^@\s]+$') {
-        # users:read.email があればこれが一番確実
-        try {
-            $u = (Invoke-SlackApi -Method 'users.lookupByEmail' -Query @{ email = $Query }).user
-            return @([pscustomobject]@{ id = $u.id; name = $u.name; realName = $u.profile.real_name; email = $u.profile.email })
-        } catch { }
-    }
-
-    $hits = @()
-    $cursor = ''
-    do {
-        $q = @{ limit = 200 }
-        if ($cursor) { $q['cursor'] = $cursor }
-        $r = Invoke-SlackApi -Method 'users.list' -Query $q
-        foreach ($u in @($r.members)) {
-            if ($u.deleted -or $u.is_bot) { continue }
-            $fields = @($u.name, $u.real_name, $u.profile.display_name, $u.profile.real_name, $u.profile.email)
-            foreach ($f in $fields) {
-                if ($f -and ([string] $f) -like "*$Query*") {
-                    $hits += [pscustomobject]@{ id = $u.id; name = $u.name; realName = $u.profile.real_name; email = $u.profile.email }
-                    break
-                }
-            }
-        }
-        $cursor = ''
-        if ($r.response_metadata -and $r.response_metadata.next_cursor) { $cursor = [string] $r.response_metadata.next_cursor }
-    } while ($cursor)
-    return $hits
-}
-
 # 何度読み直しても結果が変わらない失敗かどうか。
 # 権限やチャンネル構成の問題は待っても直らないので、これで watermark を止めると
 # 「読める会話の分まで永久に取り込まれない」状態になる。逆に一時的な失敗
@@ -366,8 +326,7 @@ function Test-SlackPermanentError {
 function Get-SlackConversations {
     <#
       .SYNOPSIS
-        トークンの持ち主が入っている会話の一覧。
-        Bot トークンなら「Bot が招待されたチャンネル」、ユーザートークンなら自分の全会話。
+        自分が入っている会話の一覧 (DM とグループ DM を含む)。
     #>
     param([int] $Max = 200)
     $out = @()
@@ -504,6 +463,8 @@ function Send-SlackMessage {
     <#
       .SYNOPSIS
         Slack に投稿する。取り消せないので、呼び出し側は必ず承認を取ってから呼ぶこと。
+      .DESCRIPTION
+        本人のトークンで投稿するので、**相手には本人の発言として見える。**
       .PARAMETER ThreadTs
         指定するとスレッドへの返信になる。省略するとチャンネルへの新規投稿。
       .OUTPUTS

@@ -350,7 +350,7 @@ Describe 'Slack の同意画面 (中継ページ経由)' {
             Assert-Equal 'xoxp-granted' (Get-Secret -Name 'slack.userToken')
             Assert-Equal 'U123' (Get-Secret -Name 'slack.selfUserId')
             Assert-Equal 'cid' (Get-Secret -Name 'slack.clientId')
-            # Bot トークンは増やさない (求めていないので返ってこない)
+            # Bot トークンは使わない (求めていないので返ってこない)
             Assert-Null (Get-Secret -Name 'slack.botToken')
         }
         finally { Remove-Item -Path Function:\Invoke-RestMethod -ErrorAction SilentlyContinue }

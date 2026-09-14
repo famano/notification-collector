@@ -110,9 +110,8 @@ Redirect URLs には中継ページの URL を登録します (Slack は HTTPS �
 そのまま公開したもので、転送以外は何もしません。
 
 「Slack に接続する」を押すと同意画面が開き、許可すると戻ってきます。
-読み書きは自分の権限で行われ、返信も自分の名義になります。
-Bot 名義で投稿したい場合だけ、端末から Bot トークンを足せます:
-  .\phase5\Connect-Service.ps1 -Service slack
+読み書きはどちらも自分の権限で行われ、**返信は自分の名義で投稿されます。**
+Bot は増えないので、チャンネルへの招待も要りません。
 '@
         secrets = @('slack.clientId', 'slack.clientSecret', 'slack.userToken', 'slack.selfUserId')
         fields  = @(
@@ -262,7 +261,7 @@ function Test-SetupConfigured {
         # キーは保管庫以外 (環境変数・配布設定) にも居られるので、置き場所ごと判定する。
         'anthropic' { return [bool] (Test-AnthropicConfigured) }
         'github' { return [bool] (Get-Secret -Name 'github.token') }
-        'slack'  { return [bool] ((Get-Secret -Name 'slack.botToken') -or (Get-Secret -Name 'slack.userToken')) }
+        'slack'  { return [bool] (Get-Secret -Name 'slack.userToken') }
         'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken') -and (Get-Secret -Name 'gmail.clientId')) }
         'microsoft' { return [bool] ((Get-Secret -Name 'ms.refreshToken') -and (Get-Secret -Name 'ms.clientId')) }
         'chatwork'  { return [bool] (Get-Secret -Name 'chatwork.token') }
@@ -494,7 +493,7 @@ function Set-SetupAccount {
 
 # ---------------------------------------------------------------- 保存
 
-# 貼るだけのサービス (GitHub / Slack) の保存と疎通確認。
+# 貼るだけのサービス (GitHub / Chatwork / Backlog など) の保存と疎通確認。
 #
 # 確認に失敗したら**元の値に戻す**。貼り間違えたトークンをそのまま残すと、
 # 「設定済みなのに全部 401」という一番分かりにくい状態になる。
@@ -544,12 +543,6 @@ function Save-SetupCredential {
                 }
                 Set-Secret -Name 'backlog.space'  -Value (Get-BacklogSpace ([string] $Values['space']))
                 Set-Secret -Name 'backlog.apiKey' -Value ([string] $Values['apiKey']).Trim()
-            }
-            'slack'  {
-                foreach ($pair in @(@('botToken', 'slack.botToken'), @('userToken', 'slack.userToken'))) {
-                    $v = ([string] $Values[$pair[0]]).Trim()
-                    if ($v) { Set-Secret -Name $pair[1] -Value $v }
-                }
             }
         }
         $check = Test-SetupConnection -Key $svc.key
@@ -613,16 +606,10 @@ function Test-SetupConnection {
                     return [pscustomobject]@{ ok = $false; error = 'Slack 連携が読み込まれていません。' }
                 }
                 $r = Invoke-SlackApi -Method 'auth.test'
-                $note = ''
-                # 掃き寄せのメンション判定に使う「自分」。User Token があれば本人が確定する。
-                if ((Get-Secret -Name 'slack.userToken') -and $r.user_id) {
-                    Set-Secret -Name 'slack.selfUserId' -Value ([string] $r.user_id)
-                }
-                elseif (-not (Get-Secret -Name 'slack.selfUserId')) {
-                    $note = 'メンションを拾うには自分のユーザーIDが要ります。「Slack に接続する」から' +
-                            '同意画面を通すと自動で入ります。'
-                }
-                return [pscustomobject]@{ ok = $true; account = ("{0} / {1}" -f $r.team, $r.user); note = $note }
+                # 掃き寄せのメンション判定に使う「自分」。本人のトークンなので
+                # auth.test がそのまま本人を返す ―― 別途聞く必要はない。
+                if ($r.user_id) { Set-Secret -Name 'slack.selfUserId' -Value ([string] $r.user_id) }
+                return [pscustomobject]@{ ok = $true; account = ("{0} / {1}" -f $r.team, $r.user); note = '' }
             }
             'google' {
                 if (-not (Get-Command Invoke-GmailApi -ErrorAction SilentlyContinue)) {
@@ -889,8 +876,7 @@ function Complete-SlackAuth {
     Set-Secret -Name 'slack.clientId'     -Value $p.clientId
     Set-Secret -Name 'slack.clientSecret' -Value $p.clientSecret
     Set-Secret -Name 'slack.userToken'    -Value $userToken
-    # 掃き寄せのメンション判定に使う「自分」。同意した本人なので、ここで確定する
-    # (Bot トークンの頃は auth.test が Bot を返すため、別途聞く必要があった)。
+    # 掃き寄せのメンション判定に使う「自分」。同意した本人なので、ここで確定する。
     if ($resp.authed_user.id) { Set-Secret -Name 'slack.selfUserId' -Value ([string] $resp.authed_user.id) }
     $script:PendingSlackAuth = $null
     $script:SlackSelfId = $null

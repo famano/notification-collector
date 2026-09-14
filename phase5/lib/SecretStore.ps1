@@ -87,7 +87,7 @@ function Write-SecretStore {
     [void] (Set-PrivateFileAcl -Path $p)
 }
 
-# 1件取り出す。$Name は 'slack.botToken' のようなドット区切り。
+# 1件取り出す。$Name は 'slack.userToken' のようなドット区切り。
 function Get-Secret {
     param([Parameter(Mandatory)] [string] $Name, [string] $Path)
     $s = Read-SecretStore -Path $Path

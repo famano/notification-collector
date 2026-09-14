@@ -14,11 +14,10 @@
   },
 
   "slack": {
-    "_comment": "Slack アプリ (User Token Scopes のみ) を作れる人が用意する。利用者はカンバンの「接続」から同意画面を通り、自分のトークンを自分で取る。redirectUrl は Slack が HTTPS の戻り先しか受け付けないための中継ページで、docs/slack-oauth-redirect.html をそのまま公開したもの (GitHub Pages で可)。Slack アプリの Redirect URLs にも同じ URL を登録すること。botToken は Bot 名義で投稿したい場合だけの任意項目。",
+    "_comment": "Slack アプリ (User Token Scopes のみ) を作れる人が用意する。利用者はカンバンの「接続」から同意画面を通り、自分のトークンを自分で取る。redirectUrl は Slack が HTTPS の戻り先しか受け付けないための中継ページで、docs/slack-oauth-redirect.html をそのまま公開したもの (GitHub Pages で可)。Slack アプリの Redirect URLs にも同じ URL を登録すること。Bot トークンは使わない (読み取りも返信も本人のトークン1本で、返信は本人名義で出る)。",
     "clientId": "",
     "clientSecret": "",
-    "redirectUrl": "",
-    "botToken": ""
+    "redirectUrl": ""
   },
 
   "microsoft": {

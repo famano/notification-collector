@@ -242,7 +242,7 @@ HTML メールの本文が抜けていたり、スレッドの経緯が入って
 # 「使える状態か」だけでなく「返す先が分かっているか」でも出し分ける。
 $script:SlackSendTool = @{
     name        = 'send_slack_message'
-    description = '元の Slack スレッドに返信を投稿する。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。一度投稿すると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ文面を報告に載せるだけにする。'
+    description = '元の Slack スレッドに返信を投稿する。投稿は利用者本人の名義で出るので、本人が書いたものとして読まれる文面にする。実行前に必ず利用者の承認を求める。投稿先はこのカードの元通知から決まっており、指定はできない。一度投稿すると取り消せないので、利用者が送信を求めている場合にだけ使う。求められていなければ文面を報告に載せるだけにする。'
     input_schema = @{
         type       = 'object'
         properties = [ordered]@{
@@ -580,7 +580,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Slack に投稿します: $where"
-                detail  = "投稿先: $where`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+                detail  = "投稿先: $where`n形式: $how`n名義: あなた自身 (Bot ではありません)`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。あなたの発言として相手に届きます。"
             }
         }
         'send_gmail' {
@@ -811,7 +811,7 @@ function Invoke-WorkTool {
                 $where = if ($inThread) { 'スレッドへの返信として' } else { 'チャンネルへの新規投稿として' }
                 $link = if ($r.permalink) { " {0}" -f $r.permalink } else { '' }
                 return [pscustomobject]@{
-                    text     = ("Slack に投稿しました ({0})。取り消しはできません。{1}" -f $where, $link)
+                    text     = ("Slack に投稿しました ({0}、利用者本人の名義)。取り消しはできません。{1}" -f $where, $link)
                     artifact = $null
                     isError  = $false
                 }
