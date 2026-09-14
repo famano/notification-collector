@@ -92,6 +92,26 @@ Describe '配布設定から保管庫への取り込み' {
         Assert-Equal 'sk-ant-from-screen' (Get-Secret -Name 'anthropic.apiKey' -Path $store)
     }
 
+    It 'Microsoft 365 のアプリ登録と Claude の組織 ID も取り込む (配った先で押すだけにする)' {
+        $store = Join-Path (New-TestTempDir) 'secrets.dat'
+        [void] (Set-TestConfig '{ "anthropic": { "organizationId": "org-1" }, "microsoft": { "clientId": "ms-cid", "tenantId": "contoso.onmicrosoft.com", "clientSecret": "ms-sec" } }')
+        $names = @(Import-AppConfigSecrets -Path $store)
+        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId' -Path $store)
+        Assert-Equal 'ms-cid' (Get-Secret -Name 'ms.clientId' -Path $store)
+        Assert-Equal 'contoso.onmicrosoft.com' (Get-Secret -Name 'ms.tenantId' -Path $store)
+        Assert-Equal 'ms-sec' (Get-Secret -Name 'ms.clientSecret' -Path $store)
+        Assert-Equal 4 $names.Count
+    }
+
+    It '組織 ID は API キーの代わりにはならない (無くても動き、あっても鍵ではない)' {
+        $store = Join-Path (New-TestTempDir) 'secrets.dat'
+        [void] (Set-TestConfig '{ "anthropic": { "organizationId": "org-1" } }')
+        Assert-Null (Get-AnthropicApiKey -SecretPath $store)
+        Assert-Equal 'org-1' (Get-AnthropicOrganizationId -SecretPath $store)
+        [void] (Set-TestConfig '{ }')
+        Assert-Null (Get-AnthropicOrganizationId -SecretPath $store)
+    }
+
     It '知らない項目は取り込まない (書き間違いで保管庫が汚れない)' {
         $store = Join-Path (New-TestTempDir) 'secrets.dat'
         [void] (Set-TestConfig '{ "zoom": { "token": "x" }, "anthropic": { "nope": "y" } }')
@@ -110,6 +130,16 @@ Describe '平文で残った資格情報' {
     It '資格情報以外しか書かれていなければ黙る' {
         [void] (Set-TestConfig '{ "startup": { "port": 8787 } }')
         Assert-False (Test-AppConfigHasPlainSecrets)
+    }
+
+    It '組織 ID やテナント ID は秘密ではないので黙る' {
+        [void] (Set-TestConfig '{ "anthropic": { "organizationId": "org-1" }, "microsoft": { "tenantId": "contoso" } }')
+        Assert-False (Test-AppConfigHasPlainSecrets)
+    }
+
+    It 'Microsoft のシークレットが残っていれば気付ける' {
+        [void] (Set-TestConfig '{ "microsoft": { "clientSecret": "ms-sec" } }')
+        Assert-True (Test-AppConfigHasPlainSecrets)
     }
 
     It 'ファイルが無ければ黙る' {

@@ -407,6 +407,8 @@
   .setup .why { font-size: 12px; color: var(--muted); margin-top: 2px; }
   .setup .state { font-size: 12px; margin-top: 6px; }
   .setup .state.on { color: var(--ok); font-weight: 600; }
+  .setup .state.off { color: var(--high); font-weight: 600; }
+  .setup .state.quiet { color: var(--faint); }
   .setup label { display: block; font-size: 11.5px; color: var(--muted); margin: 9px 0 3px; }
   .setup input {
     width: 100%; font: inherit; font-size: 12.5px; padding: 6px 8px;
@@ -1701,11 +1703,56 @@
     var box = el('div', 'setup');
     box.appendChild(el('div', 'cap', svc.label + ' との接続'));
     if (svc.why) box.appendChild(el('div', 'why', svc.why));
-    var state = el('div', 'state' + (svc.configured ? ' on' : ''),
-      svc.configured
-        ? ('接続済み' + (svc.account ? '（' + svc.account + '）' : ''))
-        : '未接続。止まっているカードはここで設定すれば進みます。');
-    box.appendChild(state);
+    // 未接続でも、知らせるのは「要る」と分かっているときだけ (svc.warn)。
+    // Claude 以外は使っていないだけのことが多く、全部を赤く出すと警告が読まれなくなる。
+    var stateText, stateCls;
+    if (svc.configured) {
+      stateText = '接続済み' + (svc.account ? '（' + svc.account + '）' : '');
+      stateCls = ' on';
+    } else if (svc.required) {
+      stateText = '未接続。これが無いと、通知は取り込まれてもカードになりません。';
+      stateCls = ' off';
+    } else if (svc.muted) {
+      stateText = '未接続（警告しない設定です）。';
+      stateCls = ' quiet';
+    } else if (svc.warn) {
+      stateText = '未接続。'
+        + (svc.seen === 'card' ? 'この設定を待っているカードがあります。'
+          : svc.seen === 'notification' ? 'このサービスから通知が届いています。'
+          : '使う設定になっています。')
+        + '止まっているカードはここで設定すれば進みます。';
+      stateCls = ' off';
+    } else {
+      stateText = '未接続。使っていなければ、このままで構いません。';
+      stateCls = ' quiet';
+    }
+    box.appendChild(el('div', 'state' + stateCls, stateText));
+
+    // 「使う」「警告しない」の選択。Claude は無いと動かないので出さない。
+    if (!svc.configured && !svc.required) {
+      var att = el('div', 'row');
+      var setAttention = function (label, body) {
+        return actionButton(label, 'quiet', '保存中…', function () {
+          return api('/api/setup/' + svc.key + '/attention', 'POST', body).then(function (r) {
+            if (r.status !== 200 || !r.body.ok) {
+              toast('保存できませんでした: ' + (r.body.error || r.status), 'err');
+              return;
+            }
+            refreshConnBadge();
+            if (onDone) onDone();
+          });
+        });
+      };
+      if (svc.muted) {
+        att.appendChild(setAttention('警告を戻す', { muted: false }));
+      } else {
+        att.appendChild(svc.wanted
+          ? setAttention('使う予定から外す', { wanted: false })
+          : setAttention('使う（未接続なら知らせる）', { wanted: true }));
+        if (svc.warn) att.appendChild(setAttention('このサービスは警告しない', { muted: true }));
+      }
+      box.appendChild(att);
+    }
     // ワーカーが書いた指示は捨てずに残す。ただし主役はこの入力欄なので、
     // 「端末で実行してください」を上に置かない。
     if (note) box.appendChild(el('div', 'hint', 'ワーカーからの申し送り: ' + note));
@@ -1783,8 +1830,10 @@
     }
 
     if (svc.flow === 'device') {
-      row.appendChild(actionButton('コードを出してサインイン', 'primary', '準備中…', function () {
-        if (!anyValue()) { toast('入力が空です', 'err'); return; }
+      row.appendChild(actionButton(preset ? (svc.label + ' に接続する') : 'コードを出してサインイン',
+          'primary', '準備中…', function () {
+        // 用意済みなら空のまま押せる。サーバが配布時のアプリ登録を使う。
+        if (!preset && !anyValue()) { toast('入力が空です', 'err'); return; }
         return api('/api/setup/' + svc.key + '/devicecode', 'POST', { values: values() })
           .then(function (r) {
             if (r.status !== 200 || !r.body.ok) {
@@ -1861,14 +1910,16 @@
     if (preset) {
       // 用意済みのときは、入力欄を「別の値を使う」の中に畳む。
       // 自分のキーやクライアントに差し替えたい人だけが開けばよい。
-      // 同意が要るサービス (Google) はボタンだけが表に出る ―― 押すだけで終わる。
-      if (svc.flow === 'oauth') box.appendChild(row);
+      // 同意やサインインが要るサービス (Google / Slack / Microsoft) はボタンだけが表に出る
+      // ―― 押すだけで終わる。
+      var buttonOutside = (svc.flow === 'oauth' || svc.flow === 'device');
+      if (buttonOutside) box.appendChild(row);
       var dd = document.createElement('details');
       var ds = document.createElement('summary');
       ds.textContent = '別の値を使う';
       dd.appendChild(ds);
       dd.appendChild(fieldBox);
-      if (svc.flow !== 'oauth') dd.appendChild(row);
+      if (!buttonOutside) dd.appendChild(row);
       if (svc.docUrl) {
         var da = el('a', 'doc', '取り方 ↗');
         da.href = svc.docUrl; da.target = '_blank'; da.rel = 'noopener noreferrer';
@@ -1913,9 +1964,11 @@
         box.appendChild(el('div', 'why', '連携ライブラリを読み込めていないため、ここからは設定できません。'));
         return;
       }
-      // 無いと動かないものを先頭に。設定の順番は「まずこれ」が分かる形にする。
+      // 無いと動かないもの → 知らせているもの → その他 の順。
+      // 設定の順番は「まずこれ」が分かる形にする。
+      var rank = function (s) { return (s.required ? 2 : 0) + (s.warn ? 1 : 0); };
       var list = (r.body.services || []).slice().sort(function (a, b) {
-        return (b.required ? 1 : 0) - (a.required ? 1 : 0);
+        return rank(b) - rank(a);
       });
       list.forEach(function (svc) {
         box.appendChild(setupForm(svc, function () {
@@ -1926,12 +1979,13 @@
     });
   }
 
-  // 未接続があればヘッダのボタンで気付けるようにする。
+  // 知らせるべき未接続があればヘッダのボタンで気付けるようにする。
   // 「設定さえすれば進むカード」が溜まっているのに気付かない、が一番もったいない。
+  // 数えるのは warn だけ ―― 使っていないだけのサービスまで数えると、数字が常に出て読まれなくなる。
   function refreshConnBadge() {
     api('/api/setup').then(function (r) {
       if (r.status !== 200 || !r.body.available) return;
-      var off = (r.body.services || []).filter(function (s) { return !s.configured; });
+      var off = (r.body.services || []).filter(function (s) { return s.warn; });
       var btn = document.getElementById('connBtn');
       btn.className = off.length ? 'quiet warn' : 'quiet';
       btn.textContent = off.length ? ('接続 ' + off.length) : '接続';

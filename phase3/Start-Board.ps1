@@ -483,13 +483,14 @@ function Add-HumanStepObject {
 # 「端末でコマンドを打つ」ではなく「この欄に貼って押す」であるべきで、
 # そのためには画面がどの欄を出せばよいかを知っている必要がある。
 function Get-CardSetupService {
-    param($Row)
+    # $Conn は「未接続を知らせるか」の判定用。一覧で有無だけ見るときは要らない。
+    param($Row, $Conn)
     if (-not $script:Connectors -or -not $Row) { return $null }
     $key = [string] $Row['subject_key']
     if (-not $key -or -not $key.StartsWith('setup:')) { return $null }
     $svc = Get-SetupService $key
     if (-not $svc) { return $null }
-    return @(Get-SetupStatusList | Where-Object { $_.key -eq $svc.key })[0]
+    return @(Get-SetupStatusList -Conn $Conn | Where-Object { $_.key -eq $svc.key })[0]
 }
 
 function Get-BoardPayload {
@@ -578,7 +579,35 @@ function Invoke-Route {
         }
         Write-JsonResponse $Context ([pscustomobject]@{
             available = $true
-            services  = @(Get-SetupStatusList)
+            # Conn を渡すと、通知の有無と「使う / 警告しない」の選択まで見て warn を決める。
+            services  = @(Get-SetupStatusList -Conn $Conn)
+        })
+        return
+    }
+
+    # 未接続を知らせるかどうかの選択。Claude 以外は「使っていないだけ」がありうるので、
+    # 「使う」(未接続なら知らせる) と「警告しない」(あえて繋がない) を利用者が決める。
+    # 値は資格情報ではないので保管庫ではなく DB の settings に置く。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/attention$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+
+        $b = Read-JsonBody $Context
+        $wanted = $null
+        $muted = $null
+        if ($b -and $b.PSObject.Properties['wanted'] -and $null -ne $b.wanted) { $wanted = [bool] $b.wanted }
+        if ($b -and $b.PSObject.Properties['muted'] -and $null -ne $b.muted) { $muted = [bool] $b.muted }
+        if ($null -eq $wanted -and $null -eq $muted) {
+            Write-JsonResponse $Context @{ ok = $false; error = 'wanted か muted を指定してください' } 400
+            return
+        }
+        try { Set-SetupAttention -Conn $Conn -Key $svc.key -Wanted $wanted -Muted $muted }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400; return }
+
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true
+            service = @(Get-SetupStatusList -Conn $Conn | Where-Object { $_.key -eq $svc.key })[0]
         })
         return
     }
@@ -941,7 +970,7 @@ function Invoke-Route {
             Write-JsonResponse $Context ([pscustomobject]@{
                 task     = $taskObj
                 # 設定カードなら入力欄一式。画面はこれを見て設定フォームを出す。
-                setup    = (Get-CardSetupService $d.task)
+                setup    = (Get-CardSetupService -Row $d.task -Conn $Conn)
                 comments = @($d.comments | ForEach-Object { ConvertTo-PlainObject $_ })
                 event    = (ConvertTo-PlainObject $d.event)
                 openLink = $openLink

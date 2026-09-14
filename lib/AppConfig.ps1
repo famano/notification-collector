@@ -131,6 +131,9 @@ function Get-AppConfigBool {
 # (保管庫に写して古い値が残ると、合わなくなった理由が分からなくなる)。
 $script:AppConfigSecretMap = [ordered]@{
     'anthropic.apiKey'    = 'anthropic.apiKey'
+    # 組織 ID は判定にもワーカーにも要らない。キーがどの組織のものかを
+    # 接続の確認で突き合わせるためだけに持つ (任意)。
+    'anthropic.organizationId' = 'anthropic.organizationId'
     'google.clientId'     = 'gmail.clientId'
     'google.clientSecret' = 'gmail.clientSecret'
     'slack.clientId'      = 'slack.clientId'
@@ -139,7 +142,17 @@ $script:AppConfigSecretMap = [ordered]@{
     'slack.botToken'      = 'slack.botToken'
     'slack.userToken'     = 'slack.userToken'
     'github.token'        = 'github.token'
+    # Microsoft 365 のアプリ登録。Google / Slack と同じく、利用者の権限では作れないことが多い。
+    # clientSecret は任意 ―― 「パブリック クライアント フローを許可する」を
+    # 「はい」にできない (テナントの方針で機密クライアントしか置けない) 登録で使う。
+    'microsoft.clientId'     = 'ms.clientId'
+    'microsoft.tenantId'     = 'ms.tenantId'
+    'microsoft.clientSecret' = 'ms.clientSecret'
 }
+
+# 取り込みはするが、秘密ではない識別子。平文で残っていても「消してよい」とは言わない
+# (消すと、保管庫の値を失ったときに配布時の値へ戻れなくなるだけで、隠す意味が無い)。
+$script:AppConfigNonSecret = @('anthropic.organizationId', 'microsoft.tenantId')
 
 function Import-AppConfigSecrets {
     <#
@@ -184,6 +197,7 @@ function Test-AppConfigHasPlainSecrets {
         「もう消してよい」ことは言わないと伝わらないので、起動時に一度出す。
     #>
     foreach ($cfgName in $script:AppConfigSecretMap.Keys) {
+        if ($script:AppConfigNonSecret -contains $cfgName) { continue }
         if (Get-AppConfigValue -Path $cfgName) { return $true }
     }
     return $false

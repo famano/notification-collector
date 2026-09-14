@@ -60,6 +60,12 @@ function Invoke-SetupCompletion {
                     $Service, $(if ($Account) { " ($Account)" } else { '' })))
     }
 
+    # 一度繋いだものは「使っている」。あとで資格情報が消えたら、未接続として知らせる。
+    # 以前に「警告しない」を選んでいても、自分で繋いだ時点でその選択は古い。
+    if (Get-Command Set-SetupAttention -ErrorAction SilentlyContinue) {
+        try { Set-SetupAttention -Conn $Conn -Key $Service -Wanted $true -Muted $false } catch { }
+    }
+
     return [pscustomobject]@{
         resumed = $waiting.Count
         setupTaskId = $setupId

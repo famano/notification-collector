@@ -53,11 +53,19 @@ console.anthropic.com にサインインし、Settings → API keys で
 このアプリは支払いの設定された組織のキーを使います。
 会社で配られている場合は、配った人に聞いてください
 (配る人が config\app-config.json に入れておけば、この欄は空のままで繋がります)。
+
+組織 ID は任意です。動かすのには要りません。入れておくと、接続の確認のときに
+「貼ったキーがその組織のものか」を突き合わせ、違えば知らせます
+(個人の組織で作ったキーを貼ってしまい、請求先が違う、を見つけるためのものです)。
+console.anthropic.com の Settings → Organization で確認できます。
 '@
-        secrets = @('anthropic.apiKey')
+        secrets = @('anthropic.apiKey', 'anthropic.organizationId')
         fields  = @(
             @{ name = 'apiKey'; label = 'API キー'; secret = $true; required = $true
-               placeholder = 'sk-ant-...' }
+               placeholder = 'sk-ant-...' },
+            @{ name = 'organizationId'; label = '組織 ID'; secret = $false; required = $false
+               placeholder = '00000000-0000-0000-0000-000000000000'
+               hint = '空欄でも動きます。入れると、キーがこの組織のものかを確認します' }
         )
     },
     @{
@@ -173,12 +181,14 @@ Backlog のカードが2枚立ちます。繋いだらメール通知は切る�
         docUrl = 'https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade'
         help  = @'
 Microsoft Entra ID (Azure AD) でアプリを1つ登録し、その「アプリケーション (クライアント) ID」を入れます。
-クライアント シークレットは要りません (公開クライアントとして使います)。
+配る人が config\app-config.json の microsoft 欄に入れておけば、利用者は押すだけで済みます。
 
   1. アプリの登録 → 新規登録。名前は何でもよい
      サポートされるアカウントの種類は「この組織ディレクトリのみ」で足ります
   2. 「認証」→ 詳細設定 → **パブリック クライアント フローを許可する: はい**
      ここが「いいえ」のままだと AADSTS7000218 で失敗します
+     テナントの方針で「はい」にできない場合は、代わりに「証明書とシークレット」で
+     クライアント シークレットを発行し、シークレットの欄に入れてください
   3. 「API のアクセス許可」→ Microsoft Graph → 委任されたアクセス許可に以下を追加
        offline_access  User.Read
        Mail.ReadWrite  Mail.Send        (Outlook のメールと下書き・送信)
@@ -192,12 +202,14 @@ Microsoft Entra ID (Azure AD) でアプリを1つ登録し、その「アプリ�
 注意: Teams のチャットは職場・学校アカウント専用です。個人の Microsoft アカウントには
 API がありません (Outlook のメールは個人アカウントでも読めます)。
 '@
-        secrets = @('ms.clientId', 'ms.tenantId', 'ms.refreshToken', 'ms.selfUserId')
+        secrets = @('ms.clientId', 'ms.tenantId', 'ms.clientSecret', 'ms.refreshToken', 'ms.selfUserId')
         fields  = @(
             @{ name = 'clientId'; label = 'アプリケーション (クライアント) ID'; secret = $false; required = $true
                placeholder = '00000000-0000-0000-0000-000000000000' },
             @{ name = 'tenantId'; label = 'テナント ID'; secret = $false; required = $false
-               placeholder = 'organizations'; hint = '空欄なら職場・学校アカウント (organizations) として繋ぎます' }
+               placeholder = 'organizations'; hint = '空欄なら職場・学校アカウント (organizations) として繋ぎます' },
+            @{ name = 'clientSecret'; label = 'クライアント シークレット'; secret = $true; required = $false
+               hint = 'パブリック クライアント フローを許可していない登録のときだけ入れます' }
         )
     },
     @{
@@ -260,9 +272,17 @@ function Test-SetupConfigured {
 }
 
 # 画面に渡す一覧。**トークンは含めない。**
+#
+# -Conn を渡すと「未接続を警告すべきか」まで判定する (カードの DB を見るため)。
+# 渡さなければ、警告するのは無いと動かないもの (Claude) だけになる。
 function Get-SetupStatusList {
+    param($Conn)
+    $apps = @(Get-SetupNotificationApps -Conn $Conn)
     $out = @()
     foreach ($s in $script:SetupServices) {
+        $configured = (Test-SetupConfigured -Key $s.key)
+        $att = Get-SetupAttention -Conn $Conn -Key $s.key -Configured $configured `
+                    -Required ([bool] $s.required) -NotificationApps $apps
         $out += [pscustomobject]@{
             key        = $s.key
             label      = $s.label
@@ -270,10 +290,16 @@ function Get-SetupStatusList {
             why        = $s.why
             help       = $s.help
             docUrl     = $s.docUrl
-            configured = (Test-SetupConfigured -Key $s.key)
+            configured = $configured
             account    = (Get-SetupAccount -Key $s.key)
             # これが無いとアプリが成立しないもの。画面はこれを先頭に出す。
             required   = [bool] $s.required
+            # 未接続を知らせるべきか。warn だけを見ればよい。
+            # 残りは画面が「なぜ知らせているか」「どう黙らせるか」を出すための材料。
+            warn       = $att.warn
+            wanted     = $att.wanted
+            muted      = $att.muted
+            seen       = $att.seen
             # 配る人が用意済みで、利用者は押すだけでよいもの。
             # 入力欄を出すと「自分で取ってこい」に見えるので、画面から隠す判断に使う。
             preset     = (Test-SetupPreset -Key $s.key)
@@ -288,6 +314,120 @@ function Get-SetupStatusList {
         }
     }
     return $out
+}
+
+# ---------------------------------------------------------------- 未接続を知らせるか
+#
+# 以前は未接続のサービスを全部数えてヘッダに出していた。だが Claude 以外は
+# **使っていないだけ**のことが多い ―― Backlog を使わない職場で「Backlog が未接続」と
+# 出し続けると、警告そのものが読まれなくなり、本当に要る警告まで埋もれる。
+#
+# そこで、未接続を知らせるのは次のどれかに当たるときだけにする。
+#   required     … 無いと動かないもの (Claude)。黙らせることもできない
+#   wanted       … 利用者が「使う」と選んだ (一度繋いだものも含む)
+#   seen         … 実際にそのサービスから通知が来ている / 設定カードが立っている
+# ただし muted (「このサービスは警告しない」) が立っていれば、required 以外は黙る。
+# **あえて繋がない**ことはありうる (会社の方針、個人アカウントに繋ぎたくない等)。
+
+# 通知 (トースト) の送り主から、どのサービスかを当てる。AUMID と表示名の両方を見る
+# (Slack のように表示名が空で AUMID でしか分からないアプリがある)。
+$script:SetupNotificationApps = @{
+    slack     = @('*slack*')
+    microsoft = @('*teams*', '*outlook*')
+    chatwork  = @('*chatwork*')
+    backlog   = @('*backlog*')
+    github    = @('*github*')
+    google    = @('*gmail*')
+}
+
+# 「通知が来ている」と見なす期間。昔一度だけ来た通知で、ずっと警告し続けない。
+$script:SetupEvidenceDays = 30
+
+function Get-SetupNotificationApps {
+    <#
+      .SYNOPSIS
+        最近通知を出したアプリ (AUMID と表示名) を小文字で返す。DB が無ければ空。
+      .DESCRIPTION
+        見るのは source = 'notification' だけ。API で掃き寄せたイベントは
+        繋がっていないと入ってこないので、未接続の根拠にならない。
+    #>
+    param($Conn)
+    if (-not $Conn) { return @() }
+    try {
+        $since = (Get-Date).AddDays(-$script:SetupEvidenceDays).ToString('o')
+        $rows = @($Conn.Query(
+            "SELECT DISTINCT lower(COALESCE(app_id, '')) AS a, lower(COALESCE(app, '')) AS b
+               FROM events WHERE source = 'notification' AND ingested_at >= ?", [object[]] @($since)))
+    }
+    catch { return @() }
+    $out = @()
+    foreach ($r in $rows) {
+        foreach ($v in @([string] $r['a'], [string] $r['b'])) { if ($v) { $out += $v } }
+    }
+    return $out
+}
+
+function Get-SetupAttention {
+    <#
+      .OUTPUTS
+        [pscustomobject] warn / wanted / muted / seen ('' | 'notification' | 'card')
+    #>
+    param(
+        $Conn,
+        [Parameter(Mandatory)] [string] $Key,
+        [bool] $Configured,
+        [bool] $Required,
+        [string[]] $NotificationApps = @()
+    )
+    $wanted = $false; $muted = $false; $seen = ''
+    if ($Conn -and (Get-Command Get-Setting -ErrorAction SilentlyContinue)) {
+        try {
+            $wanted = ((Get-Setting -Conn $Conn -Key ("setup.attention.{0}.wanted" -f $Key) -Default '0') -eq '1')
+            $muted  = ((Get-Setting -Conn $Conn -Key ("setup.attention.{0}.muted"  -f $Key) -Default '0') -eq '1')
+        } catch { }
+    }
+    # 無いと動かないものは黙らせない。黙らせた結果「カードが1枚も増えない静かな日」に見える。
+    if ($Required) { $muted = $false }
+
+    if (-not $Configured -and -not $Required) {
+        # 設定カードが立っている = ワーカーが実際にそのサービスの権限不足で止まった
+        if ($Conn -and (Get-Command Get-OpenSetupTask -ErrorAction SilentlyContinue)) {
+            try { if (Get-OpenSetupTask -Conn $Conn -Service $Key) { $seen = 'card' } } catch { }
+        }
+        if (-not $seen -and $script:SetupNotificationApps.ContainsKey($Key)) {
+            foreach ($app in $NotificationApps) {
+                foreach ($pat in $script:SetupNotificationApps[$Key]) {
+                    if ($app -like $pat) { $seen = 'notification'; break }
+                }
+                if ($seen) { break }
+            }
+        }
+    }
+
+    $warn = (-not $Configured) -and ($Required -or ((-not $muted) -and ($wanted -or [bool] $seen)))
+    return [pscustomobject]@{ warn = [bool] $warn; wanted = $wanted; muted = $muted; seen = $seen }
+}
+
+function Set-SetupAttention {
+    <#
+      .SYNOPSIS
+        「使う」「警告しない」を保存する。渡したものだけを変える。
+    #>
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [string] $Key,
+        [Nullable[bool]] $Wanted,
+        [Nullable[bool]] $Muted
+    )
+    $svc = Get-SetupService $Key
+    if (-not $svc) { throw ("知らないサービスです: {0}" -f $Key) }
+    if ($null -ne $Wanted) {
+        Set-Setting -Conn $Conn -Key ("setup.attention.{0}.wanted" -f $svc.key) -Value $(if ($Wanted) { '1' } else { '0' })
+    }
+    if ($null -ne $Muted) {
+        if ($Muted -and $svc.required) { throw ("{0} は無いと動かないため、警告を止められません。" -f $svc.label) }
+        Set-Setting -Conn $Conn -Key ("setup.attention.{0}.muted" -f $svc.key) -Value $(if ($Muted) { '1' } else { '0' })
+    }
 }
 
 # 配る人が用意した値が既にあるか。
@@ -315,6 +455,10 @@ function Test-SetupPreset {
             $c = Get-SlackClientCredential
             return [bool] ($c.clientId -and $c.clientSecret -and $c.redirectUri)
         }
+        'microsoft' {
+            # デバイスコードはシークレット無しでも通る。クライアント ID があれば押すだけにできる。
+            return [bool] (Get-MicrosoftClientCredential).clientId
+        }
     }
     return $false
 }
@@ -331,6 +475,7 @@ function Get-SetupManagedNote {
         }
         'google' { return '接続に使う情報は配布時に設定されています。ボタンを押して Google の画面で許可してください。' }
         'slack'  { return '接続に使う情報は配布時に設定されています。ボタンを押して Slack の画面で許可してください。' }
+        'microsoft' { return '接続に使う情報は配布時に設定されています。ボタンを押し、表示されたコードで Microsoft にサインインしてください。' }
     }
     return ''
 }
@@ -381,7 +526,12 @@ function Save-SetupCredential {
 
     try {
         switch ($svc.key) {
-            'anthropic' { Set-Secret -Name 'anthropic.apiKey' -Value ([string] $Values['apiKey']).Trim() }
+            'anthropic' {
+                Set-Secret -Name 'anthropic.apiKey' -Value ([string] $Values['apiKey']).Trim()
+                # 空欄のときは触らない。キーだけ差し替えた人の組織 ID (配布時の値) を消さない。
+                $org = ([string] $Values['organizationId']).Trim()
+                if ($org) { Set-Secret -Name 'anthropic.organizationId' -Value $org }
+            }
             'github' { Set-Secret -Name 'github.token' -Value ([string] $Values['token']).Trim() }
             'chatwork' { Set-Secret -Name 'chatwork.token' -Value ([string] $Values['token']).Trim() }
             'backlog' {
@@ -432,14 +582,23 @@ function Test-SetupConnection {
                 $key = Get-AnthropicApiKey
                 if (-not $key) { return [pscustomobject]@{ ok = $false; error = '未設定です。' } }
                 try {
-                    [void] (Invoke-RestMethod -Uri 'https://api.anthropic.com/v1/models?limit=1' -TimeoutSec 20 `
-                        -Headers @{ 'x-api-key' = $key; 'anthropic-version' = '2023-06-01' })
+                    $resp = Invoke-WebRequest -Uri 'https://api.anthropic.com/v1/models?limit=1' -TimeoutSec 20 `
+                        -UseBasicParsing -Headers @{ 'x-api-key' = $key; 'anthropic-version' = '2023-06-01' }
                 }
                 catch {
                     return [pscustomobject]@{ ok = $false; error = (Get-AnthropicErrorMessage $_) }
                 }
-                # アカウント名は API から取れない。キーそのものは決して画面に返さない。
-                return [pscustomobject]@{ ok = $true; account = ''; note = '' }
+                # アカウント名は API から取れないが、応答ヘッダにキーの組織が載る。
+                # 載っていなければ突き合わせない (確かめられないことを食い違いとは言わない)。
+                $actualOrg = ''
+                try { $actualOrg = [string] $resp.Headers['anthropic-organization-id'] } catch { }
+                $expectedOrg = Get-AnthropicOrganizationId
+                $account = if ($actualOrg) { "組織 $actualOrg" } else { '' }
+                # キーそのものは決して画面に返さない。
+                return [pscustomobject]@{
+                    ok = $true; account = $account
+                    note = (Get-AnthropicOrganizationNote -Expected $expectedOrg -Actual $actualOrg)
+                }
             }
             'github' {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -829,9 +988,42 @@ function Start-SetupDeviceCode {
     if (-not (Get-Command Start-GraphDeviceCode -ErrorAction SilentlyContinue)) {
         return [pscustomobject]@{ ok = $false; error = 'Microsoft 連携が読み込まれていません。' }
     }
-    $cid = ([string] $Values['clientId']).Trim()
-    if (-not $cid) { return [pscustomobject]@{ ok = $false; error = 'アプリケーション (クライアント) ID を入力してください。' } }
-    return Start-GraphDeviceCode -ClientId $cid -TenantId ([string] $Values['tenantId']).Trim()
+    # 入力が空でも、配る人が用意したアプリ登録があればそれで進む。
+    $c = Get-MicrosoftClientCredential -ClientId ([string] $Values['clientId']) `
+            -TenantId ([string] $Values['tenantId']) -ClientSecret ([string] $Values['clientSecret'])
+    if (-not $c.clientId) { return [pscustomobject]@{ ok = $false; error = 'アプリケーション (クライアント) ID を入力してください。' } }
+    return Start-GraphDeviceCode -ClientId $c.clientId -TenantId $c.tenantId -ClientSecret $c.clientSecret
+}
+
+function Get-MicrosoftClientCredential {
+    <#
+      .SYNOPSIS
+        デバイスコードに使うアプリ登録を決める。画面の入力 → 保管庫 → 配布設定 の順。
+      .DESCRIPTION
+        クライアント ID を入力した場合は、テナントとシークレットも**その入力だけ**から取る。
+        別のアプリ登録に切り替えた人に、配布時のシークレットを混ぜて送ると
+        AADSTS7000215 (シークレットが違う) で落ち、原因が画面から見えない。
+      .OUTPUTS
+        [pscustomobject] clientId / tenantId / clientSecret
+    #>
+    param([string] $ClientId, [string] $TenantId, [string] $ClientSecret)
+    $cid = ([string] $ClientId).Trim()
+    $ten = ([string] $TenantId).Trim()
+    $sec = ([string] $ClientSecret).Trim()
+    if ($cid) {
+        return [pscustomobject]@{ clientId = $cid; tenantId = $ten; clientSecret = $sec }
+    }
+    $cid = [string] (Get-Secret -Name 'ms.clientId')
+    if ($cid) {
+        if (-not $ten) { $ten = [string] (Get-Secret -Name 'ms.tenantId') }
+        if (-not $sec) { $sec = [string] (Get-Secret -Name 'ms.clientSecret') }
+    }
+    else {
+        $cid = [string] (Get-AppConfigValue -Path 'microsoft.clientId')
+        if (-not $ten) { $ten = [string] (Get-AppConfigValue -Path 'microsoft.tenantId') }
+        if (-not $sec) { $sec = [string] (Get-AppConfigValue -Path 'microsoft.clientSecret') }
+    }
+    return [pscustomobject]@{ clientId = $cid; tenantId = $ten; clientSecret = $sec }
 }
 
 function Test-SetupDeviceCode {
