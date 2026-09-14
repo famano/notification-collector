@@ -1143,8 +1143,12 @@
   }
 
   // 「まだ閉じない」ときの逃げ道。出口のボタンとは別に、下書きだけ残す。
+  // 対応の記録は送る文面とは別の列に入れる。同じ列だと、記録を保存したとたん
+  // 送る欄に出てしまい、記録の欄からは消えて見える。
   function saveDraft(t, text, key) {
-    return api('/api/tasks/' + t.id, 'PATCH', { user_edited: text, version: t.version })
+    var body = { version: t.version };
+    body[key === 'record' ? 'user_record' : 'user_edited'] = text;
+    return api('/api/tasks/' + t.id, 'PATCH', body)
       .then(function (r) {
         if (r.status === 409) { toast('他で更新されていたため保存できませんでした', 'err'); }
         else {
@@ -1523,7 +1527,10 @@
         panel.appendChild(el('div', 'note', sendable
           ? '送らずに、自分で対応して終わらせます。やったこと・決めたことを残してください。'
           : 'やったこと・決めたことを残して完了にします。'));
-        var rec = bindArea(t.id, 'record', (sendable ? '' : (t.user_edited || t.draft_text || '')),
+        // 記録は user_record。返信先の無いカードで以前 user_edited に残した記録や
+        // ワーカーの案は、まだ記録が無いときの叩き台として出す。
+        var rec = bindArea(t.id, 'record',
+          t.user_record || (sendable ? '' : (t.user_edited || t.draft_text || '')),
           '対応の記録（空のままでも完了にできます）', 6);
         panel.appendChild(rec);
         var dr = el('div', 'row'); dr.style.marginTop = '8px';
@@ -2163,7 +2170,7 @@
       ['成果物 n', 'ワーカーが実際に作ったファイルの数'],
       ['元を開く ↗', '元のメッセージを別タブで開く。Slack は補完済みなら permalink、それ以外は通知のリンク'],
       ['送る文面', '返信先があるカードで出る。この欄の内容がそのまま送られる。宛先はカードの元通知から決まり、変更できない'],
-      ['対応の記録', '返信先が無いカードで出る。「これで完了にする」で保存して完了に移る。空でもよい'],
+      ['対応の記録', '「自分で対応して終了」で出る。「これで完了にする」で保存して完了に移る。空でもよい。送る文面とは別に残る'],
       ['着手対象外', '中止要求が残っており、ワーカーが飛ばす'],
       ['版', '更新のたびに増える番号。同時編集の衝突検出に使う']
     ]));

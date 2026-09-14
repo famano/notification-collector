@@ -1104,12 +1104,11 @@ function Invoke-Route {
             'done' {
                 if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
                 $text = [string] $b.text
-                # 空で押されたときに user_edited を空で上書きしない。
-                # 送る文面と対応の記録は同じ列に入るので、「送らずに完了」を
-                # 選んだだけで書きかけの文面が消えると取り返しがつかない。
+                # 記録は user_record に入れる。user_edited は送る文面の箱なので、
+                # ここに書くと「送らずに完了」した記録が送る欄に出てしまう。
                 if ($text.Trim()) {
                     $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
-                            -Fields @{ user_edited = $text } -ExpectedVersion $expected
+                            -Fields @{ user_record = $text } -ExpectedVersion $expected
                     if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
                     [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
                     Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'done' `
@@ -1131,7 +1130,7 @@ function Invoke-Route {
                 if ($b -and $null -ne $b.note) { $note = [string] $b.note }
                 if ($note.Trim()) {
                     $ok = Update-TaskFields -Conn $Conn -TaskId $taskId `
-                            -Fields @{ user_edited = $note } -ExpectedVersion $expected
+                            -Fields @{ user_record = $note } -ExpectedVersion $expected
                     if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
                     [void] (Set-TaskColumn -Conn $Conn -TaskId $taskId -Column 'done')
                 }
@@ -1262,7 +1261,7 @@ function Invoke-Route {
                 if ($method -eq 'PATCH' -or $method -eq 'POST') {
                     if (-not $b) { Write-JsonResponse $Context @{ error = 'body required' } 400; return }
                     $fields = @{}
-                    foreach ($k in @('title', 'summary', 'urgency', 'user_edited')) {
+                    foreach ($k in @('title', 'summary', 'urgency', 'user_edited', 'user_record')) {
                         if ($null -ne $b.$k) { $fields[$k] = $b.$k }
                     }
                     $ok = Update-TaskFields -Conn $Conn -TaskId $taskId -Fields $fields -ExpectedVersion $expected

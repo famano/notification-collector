@@ -48,7 +48,7 @@ function Invoke-SetupCompletion {
             $note += ("`n待っていたカード {0} 枚を要対応に戻しました。" -f $waiting.Count)
             foreach ($x in $titles) { $note += "`n- " + $x }
         }
-        [void] (Update-TaskFields -Conn $Conn -TaskId $setupId -Fields @{ user_edited = $note; human_step = $null })
+        [void] (Update-TaskFields -Conn $Conn -TaskId $setupId -Fields @{ user_record = $note; human_step = $null })
         Add-TaskActivity -Conn $Conn -TaskId $setupId -Kind 'done' -Message $note
         [void] (Set-TaskColumn -Conn $Conn -TaskId $setupId -Column 'done')
     }

@@ -156,6 +156,13 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'draft_text') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN draft_text TEXT')
     }
+    # 対応の記録 (「自分で対応して終了」「承認」で残す、なぜ完了にしたか)。
+    # 以前は user_edited に入れていたが、そこは送る文面の箱でもある。
+    # 返信先のあるカードで記録を保存すると、それが送る欄に出て
+    # 記録の欄からは消えて見えた。役割が違うので列を分ける。
+    if ($cols -notcontains 'user_record') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN user_record TEXT')
+    }
     # 正規 API で本文を取り直したかの印 (Phase 5)
     $ecols = @($Conn.Query('PRAGMA table_info(events)')) | ForEach-Object { $_['name'] }
     if ($ecols -notcontains 'context_fetched') {
@@ -1171,7 +1178,7 @@ function Get-TaskDetail {
 
 # 更新できるカラムはホワイトリストで固定する。キーを SQL に埋めるため、
 # 呼び出し側の入力をそのまま通してはいけない。
-$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'agent_output', 'draft_text',
+$script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'user_record', 'agent_output', 'draft_text',
                             'shape', 'human_step', 'subject_key')
 
 function Update-TaskFields {

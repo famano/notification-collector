@@ -472,8 +472,8 @@ Describe '設定が入ったあとの後始末' {
     It '設定カード自体は完了に移る' {
         $t = @($conn.Query('SELECT * FROM tasks WHERE id = ?', [object[]] @($setupId)))[0]
         Assert-Equal 'done' $t['board_column']
-        Assert-Match 'octocat' ([string] $t['user_edited'])
-        Assert-Match '2 枚' ([string] $t['user_edited'])
+        Assert-Match 'octocat' ([string] $t['user_record'])
+        Assert-Match '2 枚' ([string] $t['user_record'])
     }
 
     It '台帳の「未設定」を打ち消す (ワーカーに渡り続けるため)' {
