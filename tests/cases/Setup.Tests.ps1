@@ -22,8 +22,9 @@ function Protect-Text   { param([string] $Text)   return [Convert]::ToBase64Stri
 function Unprotect-Text { param([string] $Base64) return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Base64)) }
 
 # 疎通確認は外に出るので、テストでは差し替える。
+# -AccountId も受ける ―― 本物と同じ形にしておかないと、渡し忘れをここで吸ってしまう。
 $script:FakeConnection = [pscustomobject]@{ ok = $true; account = 'octocat'; note = '' }
-function Test-SetupConnection { param([string] $Key) return $script:FakeConnection }
+function Test-SetupConnection { param([string] $Key, [string] $AccountId) return $script:FakeConnection }
 
 # 配布設定は見に行かせない (開発機に置いてあると結果が変わる)。
 $script:SavedSetupCfgEnv = $env:NOTIFICATION_COLLECTOR_CONFIG

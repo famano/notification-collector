@@ -394,3 +394,15 @@ function Send-ChatworkMessage {
     $id = [string] $r.message_id
     return [pscustomobject]@{ messageId = $id; permalink = (New-ChatworkLink -RoomId $RoomId -MessageId $id) }
 }
+
+
+# ---------------------------------------------------------------- アカウントの切り替え
+#
+# 部屋 ID は Chatwork 全体で一意なので部屋名の控えは持ち越しても正しいが、
+# **見えるかどうかはアカウントで変わる。** 見えない部屋の名前を出し続けるより、
+# 切り替えの時点で落として引き直すほうが素直である。
+function Reset-ChatworkCache {
+    $script:ChatworkSelfId   = $null
+    $script:ChatworkRoomCache = @{}
+}
+Register-AccountReset -Service 'chatwork' -Handler { Reset-ChatworkCache }

@@ -131,6 +131,8 @@
   .card .foot .u-high { color: var(--high); font-weight: 600; }
   .card .foot .files { color: var(--ok); }
   .card .foot .recur { color: var(--muted); cursor: help; }
+  /* どのアカウントに届いたか。複数繋いでいるときだけ出る */
+  .card .foot .acct { color: var(--accent); cursor: help; }
   .card .warnflag { color: var(--danger); font-weight: 600; cursor: help; }
   /* 本人にしかできない1手。カードの表に出す ―― 開かないと分からないのでは、
      期限のあるもの (本人確認リンクなど) を取り逃がす */
@@ -432,6 +434,16 @@
     font-family: ui-monospace, Consolas, monospace; font-size: 25px; font-weight: 700;
     letter-spacing: 3px; margin: 7px 0; user-select: all;
   }
+  /* アカウント1つぶんの枠。2つ以上繋いでいるときだけ罫線で仕切る */
+  .setup .acct { border-left: 2px solid var(--border); padding-left: 11px; margin-top: 13px; }
+  .setup .acctcap {
+    font-size: 12px; font-weight: 650; color: var(--text);
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+  .setup .acctcap input {
+    width: 150px; margin: 0; padding: 3px 6px; font-size: 11.5px;
+  }
+  .setup .addacct { margin-top: 13px; }
   .setup .doc { font-size: 11.5px; color: var(--accent); text-decoration: none; }
   .setup .doc:hover { text-decoration: underline; }
   #conn .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -840,6 +852,13 @@
       oc.title = '同じ件が ' + t.occurrence_count + ' 回届いています。カードは1枚にまとめています';
       foot.appendChild(oc);
     }
+    // 一つの連携先に複数のアカウントを繋いでいると、カードだけ見ても
+    // どちらに届いたものか分からない。返信の名義が変わるので、表に出す。
+    if (t.source_account) {
+      var ac = el('span', 'acct', t.source_account);
+      ac.title = 'このカードは ' + t.source_account + ' に届いたものです';
+      foot.appendChild(ac);
+    }
     if (t.artifact_count > 0) foot.appendChild(el('span', 'files', '成果物 ' + t.artifact_count));
     if (t.cancel_requested) {
       // 要対応にあるのに中止要求が残っていると、ワーカーは永久に飛ばす
@@ -1227,6 +1246,7 @@
       chip('列', COLUMN[t.board_column] || t.board_column, null, 'いまカンバンのどこにあるか');
       if (t.urgency) chip('緊急度', URGENCY[t.urgency] || t.urgency, t.urgency === 'high' ? 'hi' : null, '対応の急ぎ度合い');
       if (t.category) chip('種別', CATEGORY[t.category] || t.category, null, '通知の分類');
+      if (t.source_account) chip('アカウント', t.source_account, null, 'このカードが届いたアカウント。返信もこの名義で出ます');
       chip('版', t.version, null, '更新のたびに増える番号。同時編集の衝突検出に使う');
       if (t.cancel_requested) {
         var w = el('span', 'chip warn', '中止要求あり'); w.title = 'ワーカーはこのカードを飛ばします'; chips.appendChild(w);
@@ -1764,6 +1784,70 @@
     // 「端末で実行してください」を上に置かない。
     if (note) box.appendChild(el('div', 'hint', 'ワーカーからの申し送り: ' + note));
 
+    // アカウントごとに1枠ずつ。
+    //
+    // 一つの連携先に複数のアカウントがあることがある (仕事用と個人用の Gmail、
+    // 二つのワークスペースの Slack)。片方だけ繋いだのでは、もう片方に届いたものは
+    // このアプリを使っていないのと同じところに戻る。
+    // 1つしか無いときは今までと同じ見た目のまま (仕切りも呼び名の欄も出さない)。
+    var accounts = (svc.accounts && svc.accounts.length)
+      ? svc.accounts
+      : [{ id: '1', label: '', configured: svc.configured, account: svc.account }];
+    var many = accounts.length > 1;
+    accounts.forEach(function (acct) {
+      box.appendChild(setupAccountBlock(svc, acct, many, onDone));
+    });
+
+    if (svc.multi) {
+      var addRow = el('div', 'row addacct');
+      addRow.appendChild(actionButton('別のアカウントを追加', 'quiet', '追加中…', function () {
+        return api('/api/setup/' + svc.key + '/accounts', 'POST', { label: '' }).then(function (r) {
+          if (r.status !== 200 || !r.body.ok) {
+            toast('追加できませんでした: ' + (r.body.error || r.status), 'err');
+            return;
+          }
+          toast('枠を増やしました。続けてこのアカウントを繋いでください', 'ok');
+          if (onDone) onDone();
+        });
+      }));
+      addRow.appendChild(el('div', 'hint',
+        '同じ' + svc.label + 'に別のアカウントで繋ぎます。どちらに届いたものかはカードに出ます。'));
+      box.appendChild(addRow);
+    }
+
+    if (svc.help) {
+      var d = document.createElement('details');
+      var sm = document.createElement('summary');
+      sm.textContent = '必要な権限と取り方';
+      d.appendChild(sm);
+      d.appendChild(pre(svc.help));
+      box.appendChild(d);
+    }
+    return box;
+  }
+
+  // アカウント1つぶんの入力欄と接続ボタン。
+  //
+  // 繋ぎ方 (貼るだけ / 同意画面 / コード) はサービスで決まるが、繋ぐ相手は
+  // アカウントで決まる。どの経路でも account を必ず載せて送る ――
+  // 載せ忘れると 1人目の資格情報を上書きする、という一番分かりにくい壊れ方をする。
+  function setupAccountBlock(svc, acct, many, onDone) {
+    var box = el('div', many ? 'acct' : null);
+
+    if (many || (svc.multi && acct.label)) {
+      var cap = el('div', 'acctcap');
+      cap.appendChild(document.createTextNode(acct.account || ('アカウント ' + acct.id)));
+      cap.appendChild(labelEditor(svc, acct, onDone));
+      box.appendChild(cap);
+    }
+
+    if (many) {
+      box.appendChild(el('div', 'state' + (acct.configured ? ' on' : ' quiet'),
+        acct.configured
+          ? ('接続済み' + (acct.account ? '（' + acct.account + '）' : ''))
+          : 'この枠はまだ繋がっていません。'));
+    }
+
     // 配る人が用意済みのものは、入力欄を前面に出さない。
     //
     // Google の OAuth クライアントも API キーも、利用者の権限では作れないことが多い。
@@ -1771,7 +1855,7 @@
     // 権限が無くて辿り着けない ―― 一番いけない形の行き止まりになる。
     // 用意済みなら押すだけにして、入力欄は「別の値を使う」の中に畳んでおく。
     var preset = !!svc.preset;
-    if (preset && svc.managed) box.appendChild(el('div', 'hint', svc.managed));
+    if (preset && svc.managed && !many) box.appendChild(el('div', 'hint', svc.managed));
 
     var fieldBox = preset ? el('div') : box;
     var inputs = {};
@@ -1800,6 +1884,12 @@
     function clearInputs() {
       Object.keys(inputs).forEach(function (k) { inputs[k].value = ''; });
     }
+    function connected(r) {
+      var msg = svc.label + ' に接続しました' + (r.body.account ? '（' + r.body.account + '）' : '');
+      if (r.body.resumed > 0) msg += '。止まっていた ' + r.body.resumed + ' 枚を要対応に戻しました';
+      toast(msg, 'ok');
+      if (r.body.note) setTimeout(function () { toast(r.body.note, 'err'); }, 3400);
+    }
 
     var row = el('div', 'row');
     // コードを出す枠。device の流れでだけ使う。
@@ -1809,6 +1899,7 @@
 
     // 「済んだか」をサーバに聞きに行く。待つのはこちら側の仕事
     // (カンバンは1本のループで要求を捌くので、サーバ側で待つと画面ごと固まる)。
+    // どの枠に入れるかはコードを出した時点でサーバが覚えているので、ここでは送らない。
     function pollDevice(key, intervalSec, deadline) {
       if (pollTimer) clearTimeout(pollTimer);
       pollTimer = setTimeout(function () {
@@ -1827,10 +1918,7 @@
             toast('接続できませんでした: ' + (r.body.error || r.status), 'err');
             return;
           }
-          var msg = svc.label + ' に接続しました' + (r.body.account ? '（' + r.body.account + '）' : '');
-          if (r.body.resumed > 0) msg += '。止まっていた ' + r.body.resumed + ' 枚を要対応に戻しました';
-          toast(msg, 'ok');
-          if (r.body.note) setTimeout(function () { toast(r.body.note, 'err'); }, 3400);
+          connected(r);
           if (onDone) onDone();
         });
       }, intervalSec * 1000);
@@ -1841,7 +1929,8 @@
           'primary', '準備中…', function () {
         // 用意済みなら空のまま押せる。サーバが配布時のアプリ登録を使う。
         if (!preset && !anyValue()) { toast('入力が空です', 'err'); return; }
-        return api('/api/setup/' + svc.key + '/devicecode', 'POST', { values: values() })
+        return api('/api/setup/' + svc.key + '/devicecode', 'POST',
+            { values: values(), account: acct.id })
           .then(function (r) {
             if (r.status !== 200 || !r.body.ok) {
               toast('コードを取得できませんでした: ' + (r.body.error || r.status), 'err');
@@ -1862,6 +1951,10 @@
               codeBox.appendChild(a);
             }
             codeBox.appendChild(el('div', 'hint', 'サインインが終わると、この画面に自動で反映されます。'));
+            if (many) {
+              codeBox.appendChild(el('div', 'hint',
+                'すでに繋いであるのと同じアカウントでサインインすると、その場で弾かれます。'));
+            }
             if (vuri) window.open(vuri, '_blank', 'noopener');
             var iv = Number(r.body.interval) || 5;
             var life = (Number(r.body.expiresInSec) || 900) * 1000;
@@ -1876,7 +1969,7 @@
         if (!preset && !anyValue()) { toast('入力が空です', 'err'); return; }
         var v = values();
         return api('/api/setup/' + svc.key + '/authorize', 'POST',
-            { clientId: v.clientId, clientSecret: v.clientSecret })
+            { clientId: v.clientId, clientSecret: v.clientSecret, account: acct.id })
           .then(function (r) {
             if (r.status !== 200 || !r.body.ok) {
               toast('開けませんでした: ' + (r.body.error || r.status), 'err');
@@ -1886,7 +1979,9 @@
             // 同意は別タブ。戻り先はこのカンバン自身なので、
             // 同意し終えた時点でカードは自動で完了に移る。
             window.open(r.body.url, '_blank', 'noopener');
-            toast('別タブで同意してください。終わるとこの画面に反映されます', 'ok');
+            toast(many
+              ? '別タブで、繋ぎたいアカウントを選んで同意してください'
+              : '別タブで同意してください。終わるとこの画面に反映されます', 'ok');
             if (onDone) onDone();
           });
       }));
@@ -1894,18 +1989,16 @@
     else {
       row.appendChild(actionButton('保存して接続を確認', 'primary', '確認中…', function () {
         if (!anyValue()) { toast('入力が空です', 'err'); return; }
-        return api('/api/setup/' + svc.key, 'POST', { values: values() }).then(function (r) {
-          if (r.status !== 200 || !r.body.ok) {
-            toast('接続できませんでした: ' + (r.body.error || r.status), 'err');
-            return;
-          }
-          clearInputs();
-          var msg = svc.label + ' に接続しました' + (r.body.account ? '（' + r.body.account + '）' : '');
-          if (r.body.resumed > 0) msg += '。止まっていた ' + r.body.resumed + ' 枚を要対応に戻しました';
-          toast(msg, 'ok');
-          if (r.body.note) setTimeout(function () { toast(r.body.note, 'err'); }, 3400);
-          if (onDone) onDone();
-        });
+        return api('/api/setup/' + svc.key, 'POST', { values: values(), account: acct.id })
+          .then(function (r) {
+            if (r.status !== 200 || !r.body.ok) {
+              toast('接続できませんでした: ' + (r.body.error || r.status), 'err');
+              return;
+            }
+            clearInputs();
+            connected(r);
+            if (onDone) onDone();
+          });
       }));
     }
     if (svc.docUrl && !preset) {
@@ -1940,15 +2033,66 @@
     // コードは押したあとに出る。行のあとに置いておく (device のときだけ見える)。
     box.appendChild(codeBox);
 
-    if (svc.help) {
-      var d = document.createElement('details');
-      var sm = document.createElement('summary');
-      sm.textContent = '必要な権限と取り方';
-      d.appendChild(sm);
-      d.appendChild(pre(svc.help));
-      box.appendChild(d);
+    // 外すための2つ。役割が違うので分けてある。
+    //   切断 … 資格情報だけ消す。枠は残るので繋ぎ直せる
+    //   削除 … 枠ごと消す。最後の1つは消せない (繋ぎ直す入口が無くなるため)
+    if (svc.multi && (acct.configured || many)) {
+      var offRow = el('div', 'row');
+      if (acct.configured) {
+        offRow.appendChild(actionButton('切断', 'quiet', '切断中…', function () {
+          if (!confirm('このアカウントの資格情報を消します。よろしいですか。')) return;
+          return api('/api/setup/' + svc.key + '/accounts/' + acct.id + '/disconnect', 'POST', {})
+            .then(function (r) {
+              if (r.status !== 200 || !r.body.ok) {
+                toast('切断できませんでした: ' + (r.body.error || r.status), 'err');
+                return;
+              }
+              toast('切断しました', 'ok');
+              if (onDone) onDone();
+            });
+        }));
+      }
+      if (many) {
+        offRow.appendChild(actionButton('この枠を削除', 'quiet', '削除中…', function () {
+          if (!confirm('このアカウントを枠ごと外します。資格情報も消えます。よろしいですか。')) return;
+          return api('/api/setup/' + svc.key + '/accounts/' + acct.id + '/remove', 'POST', {})
+            .then(function (r) {
+              if (r.status !== 200 || !r.body.ok) {
+                toast('削除できませんでした: ' + (r.body.error || r.status), 'err');
+                return;
+              }
+              toast('削除しました。取り込み済みのカードは残ります', 'ok');
+              if (onDone) onDone();
+            });
+        }));
+      }
+      box.appendChild(offRow);
     }
     return box;
+  }
+
+  // 呼び名。メールアドレスやワークスペース名だけでは、カードの隅に出たときに
+  // どちらのことか判じにくい。「仕事」「個人」と付けられるようにする。
+  function labelEditor(svc, acct, onDone) {
+    var wrap = el('span', 'row');
+    var inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = acct.label || '';
+    inp.placeholder = '呼び名（仕事 / 個人）';
+    inp.autocomplete = 'off';
+    wrap.appendChild(inp);
+    wrap.appendChild(actionButton('保存', 'quiet', '保存中…', function () {
+      return api('/api/setup/' + svc.key + '/accounts/' + acct.id + '/label', 'POST',
+          { label: inp.value }).then(function (r) {
+        if (r.status !== 200 || !r.body.ok) {
+          toast('保存できませんでした: ' + (r.body.error || r.status), 'err');
+          return;
+        }
+        toast('呼び名を保存しました', 'ok');
+        if (onDone) onDone();
+      });
+    }));
+    return wrap;
   }
 
   function openConnections() {

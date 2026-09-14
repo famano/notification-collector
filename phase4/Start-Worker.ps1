@@ -150,6 +150,20 @@ function Invoke-WorkItem {
     $detail = Get-TaskDetail -Conn $conn -TaskId $id
     $evt = if ($detail) { $detail.event } else { $null }
 
+    # このカードは「どのアカウントに届いたもの」か。
+    #
+    # 一つの連携先に複数のアカウントを繋げるので、ここを決めないと以降の
+    # 取り直しも投稿先の解決も**繋いだうちのどれか**で行われる。
+    # 1枚の処理に入る一番手前で固定し、あとの経路は何も意識しなくてよいようにする
+    # (このアプリが他の箇所でもやっているのと同じ、指示ではなく構造で担保する形)。
+    if ($evt -and (Get-Command Use-EventAccount -ErrorAction SilentlyContinue)) {
+        $boundSvc = Use-EventAccount -Evt $evt
+        if ($boundSvc -and (Get-Command Get-AccountDisplayName -ErrorAction SilentlyContinue)) {
+            $who = Get-AccountDisplayName -Service $boundSvc -Id ([string] $evt['account_id'])
+            if ($who) { Write-Step $id 'step' ("{0} の「{1}」として扱います" -f $boundSvc, $who) 'DarkCyan' }
+        }
+    }
+
     # Gmail 由来なら、返信をスレッドにぶら下げるための識別子を取り出しておく
     $gmailThreadId = ''
     $gmailInReplyTo = ''

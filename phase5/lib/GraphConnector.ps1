@@ -1059,3 +1059,18 @@ function Send-TeamsMessage {
             -Body @{ body = @{ contentType = 'text'; content = $Text } }
     return [pscustomobject]@{ id = [string] $r.id; permalink = [string] $r.webUrl }
 }
+
+
+# ---------------------------------------------------------------- アカウントの切り替え
+#
+# チャット名の控えはテナントごとに別物で、持ち越すと別テナントの名前が出る。
+# 発行途中のデバイスコードも捨てる ―― あれは「いま繋ごうとしている1人」のもので、
+# 相手が変わったら無効である。
+function Reset-GraphCache {
+    Clear-GraphAccessToken
+    $script:GraphGrantedScopes = @()
+    $script:GraphSelfId        = $null
+    $script:TeamsChatCache     = @{}
+    $script:PendingGraphDevice = $null
+}
+Register-AccountReset -Service 'microsoft' -Handler { Reset-GraphCache }

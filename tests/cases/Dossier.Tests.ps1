@@ -53,9 +53,17 @@ Describe 'Get-SubjectKey (件の同一性)' {
     }
 
     It 'Slack はリンクを解けないときキーを付けない (チャンネル全体を1件に潰さない)' {
-        # ConvertFrom-SlackLink を読み込んでいない状態 = 解けない状態
+        # 「解けない状態」はここで作る。読み込み順に頼ると、Slack 連携を読む
+        # 別のケースが先に走っただけでこの試験の前提が消える。
+        function ConvertFrom-SlackLink { param($Link) return $null }
         $e = New-TestEvent -Link 'slack://channel?id=C123&message=1700000000.000100' -Title '#tech-sales'
         Assert-Equal '' (Get-SubjectKey -Evt $e)
+    }
+
+    It 'Slack は解けたらスレッドを件にする' {
+        function ConvertFrom-SlackLink { param($Link) return [pscustomobject]@{ channel = 'C123'; threadTs = '1700000000.000100' } }
+        $e = New-TestEvent -Link 'slack://channel?id=C123&message=1700000000.000100' -Title '#tech-sales'
+        Assert-Equal 'slack-thread:C123:1700000000.000100' (Get-SubjectKey -Evt $e)
     }
 
     It 'メールは差出人と件名の幹で束ねる' {

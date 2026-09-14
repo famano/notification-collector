@@ -32,6 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `Slack.Tests.ps1` | Slack のトークンが本人のもの1本であること。**返信が本人の名義で出る**こと |
 | `SlackRelay.Tests.ps1` | 公開される中継ページ。転送先が 127.0.0.1 に固定され、秘密も状態も持たないこと |
 | `Setup.Tests.ps1` | 画面からの資格情報の設定。値が漏れないこと、用意済みなら入力を求めないこと |
+| `Accounts.Tests.ps1` | 一つの連携先に複数のアカウントを繋いだときの分離。資格情報・watermark・イベントの主キー・コネクタの控えが混ざらないこと |
 
 選び方の基準は「壊れても静かなところ」。承認の要否や宛先の束縛は、
 壊れていても画面上は普通に動いて見えるのに、外に出るものが変わる。
