@@ -541,3 +541,15 @@ function ConvertTo-RfcHeader {
     # ${b64} と括ること。"$b64?=" は ? まで変数名に取り込まれて空になる。
     return "=?UTF-8?B?${b64}?="
 }
+
+
+# ---------------------------------------------------------------- アカウントの切り替え
+#
+# アクセストークンはリフレッシュトークンの変化を見て取り直す作りになっているが、
+# 切り替えた直後に古いトークンで1回叩いてしまうと、**別のメールボックスを読む。**
+# 切り替えの時点で捨てる。
+function Reset-GmailCache {
+    Clear-GmailAccessToken
+    $script:GoogleGrantedScopes = @()
+}
+Register-AccountReset -Service 'google' -Handler { Reset-GmailCache }

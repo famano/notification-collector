@@ -11,6 +11,10 @@
 #   1件を深く掘るのには向かない (全件に対して常時やるには重すぎる)。
 #   必要になった1枚についてだけ深く取る口が別に要る。それがここ。
 
+# 一つの連携先に複数のアカウントが繋がっていることがある。どのトークンで取り直し、
+# どの名義で返すかは、カードの元イベントに残っている account_id が決める。
+. "$PSScriptRoot\..\..\phase5\lib\AccountStore.ps1"
+
 $script:MaxSourceChars = 20000
 
 function Limit-SourceText {
@@ -195,6 +199,9 @@ function Get-SourceContext {
         $empty.note = 'このカードには元の通知がありません (手で起票されたカードです)。'
         return $empty
     }
+    # 取り直しは必ずそのカードのアカウントで行う。呼び出し側が忘れても
+    # ここで束縛されるようにしておく (忘れた場合の症状が「別の人のメールが載る」)。
+    [void] (Use-EventAccount -Evt $Evt)
 
     $source = [string] $Evt['source']
     $app    = [string] $Evt['app']

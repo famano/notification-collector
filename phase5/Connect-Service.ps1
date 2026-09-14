@@ -6,21 +6,33 @@
     入力した値は DPAPI (CurrentUser) で暗号化して phase5/data/secrets.dat に保存する。
     平文では残らず、別ユーザー・別PCでは復号できない。
 
+.PARAMETER Account
+    一つの連携先に複数のアカウントを繋ぐときに、どの枠を相手にするか (-Status で出る番号)。
+    省略すると1人目。
+
+.PARAMETER AddAccount
+    空の枠を1つ増やして、その番号を出す。続けて -Account <番号> で繋ぐ。
+
 .EXAMPLE
     .\Connect-Service.ps1 -Service slack
     .\Connect-Service.ps1 -Service gmail
     .\Connect-Service.ps1 -Service microsoft
     .\Connect-Service.ps1 -Status
+    .\Connect-Service.ps1 -Service gmail -AddAccount
+    .\Connect-Service.ps1 -Service gmail -Account 2
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('slack', 'gmail', 'github', 'anthropic', 'microsoft', 'chatwork', 'backlog')] [string] $Service,
+    [string] $Account,
+    [switch] $AddAccount,
     [switch] $Status,
     [switch] $Test
 )
 
 $ErrorActionPreference = 'Stop'
-. "$PSScriptRoot\lib\SecretStore.ps1"
+# 一つの連携先に複数のアカウントを繋げる。名簿と、秘密の名前空間の切り替えはここ。
+. "$PSScriptRoot\lib\AccountStore.ps1"
 . "$PSScriptRoot\lib\SlackConnector.ps1"
 . "$PSScriptRoot\lib\GmailConnector.ps1"
 . "$PSScriptRoot\lib\GraphConnector.ps1"
@@ -28,6 +40,47 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\BacklogConnector.ps1"
 # 画面と同じ保存・確認の経路を使う (端末と画面で挙動が割れると原因が読めなくなる)
 . "$PSScriptRoot\lib\ServiceSetup.ps1"
+
+# -Service で渡される名前と、アカウントの名簿で使う連携先の名前は別物
+# ('gmail' と書かれても名簿は 'google')。寄せるのは ServiceSetup の名寄せに任せる。
+function Get-AccountServiceKey {
+    param([string] $Name)
+    if (-not $Name) { return '' }
+    $svc = Get-SetupService $Name
+    if (-not $svc -or -not $svc.multi) { return '' }
+    return $svc.key
+}
+
+# 繋ぐ相手を固定する。以降の Get-Secret / Set-Secret はこの枠のものになる。
+function Select-Account {
+    param([string] $Name, [string] $Id)
+    $key = Get-AccountServiceKey $Name
+    if (-not $key) {
+        if ($Id) { Write-Host ("  {0} は複数のアカウントを繋げません。-Account は無視します。" -f $Name) -ForegroundColor Yellow }
+        return
+    }
+    if (-not $Id) { return }
+    if (-not (Test-ServiceAccountId -Service $key -Id $Id)) {
+        throw ("アカウント {0} はありません。-Status で番号を確かめてください (-AddAccount で増やせます)。" -f $Id)
+    }
+    [void] (Use-ServiceAccount -Service $key -Id $Id)
+    Write-Host ("  アカウント {0} を相手にします。" -f $Id) -ForegroundColor DarkGray
+}
+
+# 複数繋いでいる連携先の内訳。1つしか無ければ何も出さない (今までの表示のまま)。
+function Show-AccountList {
+    param([string] $Key)
+    $accts = @(Get-ServiceAccounts -Service $Key)
+    if ($accts.Count -le 1) { return }
+    foreach ($a in $accts) {
+        $who = Get-Secret -Name ("account.{0}" -f $Key) -AccountId $a.id
+        $state = if (Test-SetupAccountConfigured -Key $Key -AccountId $a.id) { '設定済み' } else { '未設定' }
+        Write-Host ("    [{0}] {1}{2} — {3}" -f `
+            $a.id, $state,
+            $(if ($who) { " ($who)" } else { '' }),
+            $(if ($a.label) { $a.label } else { '呼び名なし' })) -ForegroundColor DarkGray
+    }
+}
 
 function Show-Status {
     Write-Host ''
@@ -49,6 +102,9 @@ function Show-Status {
         try { $cal = Test-GoogleScope 'https://www.googleapis.com/auth/calendar.events' } catch { }
         Write-Host ("    └ カレンダー操作: {0}" -f $(if ($cal) { '可' } else { '不可 (gmail を設定し直すと有効になります)' })) `
             -ForegroundColor $(if ($cal) { 'DarkGray' } else { 'Yellow' })
+    }
+    foreach ($k in @('slack', 'google', 'microsoft', 'chatwork', 'backlog')) {
+        Show-AccountList -Key $k
     }
     $names = @(Get-SecretNames)
     if ($names.Count -gt 0) {
@@ -428,6 +484,21 @@ function Test-Connections {
 if ($Status) { Show-Status; return }
 if ($Test)   { Test-Connections; return }
 
+if ($AddAccount) {
+    $key = Get-AccountServiceKey $Service
+    if (-not $key) {
+        Write-Host '-AddAccount には、複数のアカウントを繋げる -Service を指定してください' -ForegroundColor Red
+        Write-Host '  (slack / gmail / microsoft / chatwork / backlog)' -ForegroundColor DarkGray
+        return
+    }
+    $new = Add-ServiceAccount -Service $key
+    Write-Host ("アカウント {0} の枠を作りました。" -f $new.id) -ForegroundColor Green
+    Write-Host ("  .\Connect-Service.ps1 -Service {0} -Account {1}" -f $Service, $new.id) -ForegroundColor DarkGray
+    return
+}
+
+Select-Account -Name $Service -Id $Account
+
 switch ($Service) {
     'slack'     { Connect-Slack }
     'gmail'     { Connect-Gmail }
@@ -446,6 +517,10 @@ switch ($Service) {
         Write-Host '  .\Connect-Service.ps1 -Service chatwork'
         Write-Host '  .\Connect-Service.ps1 -Service backlog'
         Write-Host '  .\Connect-Service.ps1 -Test     接続確認'
+        Write-Host ''
+        Write-Host '  同じ連携先に複数のアカウントを繋ぐとき:' -ForegroundColor Cyan
+        Write-Host '  .\Connect-Service.ps1 -Service gmail -AddAccount   枠を増やす'
+        Write-Host '  .\Connect-Service.ps1 -Service gmail -Account 2    その枠に繋ぐ'
         Write-Host ''
         Write-Host '  同じことはカンバンのヘッダの「接続」からもできます。' -ForegroundColor DarkGray
         Write-Host ''

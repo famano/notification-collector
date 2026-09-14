@@ -87,25 +87,155 @@ function Write-SecretStore {
     [void] (Set-PrivateFileAcl -Path $p)
 }
 
+# ---------------------------------------------------------------- アカウントの名前空間
+#
+# 一つの連携先に複数のアカウントがあることがある (仕事用と個人用の Gmail、
+# 二つのワークスペースの Slack、二つの Backlog スペース)。全部の通知をさばくには、
+# 資格情報を「連携先につき1組」ではなく「アカウントにつき1組」で持つ必要がある。
+#
+# やり方は名前空間を分けるだけにする。呼ぶ側 (コネクタ) は今までどおり
+# Get-Secret -Name 'slack.userToken' と書き、**いま選ばれているアカウント**に応じて
+# ここが 'slack.userToken#2' に読み替える。コネクタ側に一行も足さずに済み、
+# 「切り替えたつもりで前のトークンを使っていた」という失敗の形が生まれない。
+#
+# 1人目だけは接尾辞を付けない。既存の保管庫がそのまま1人目として読めるので、
+# 移行が要らない ―― 移行の要る変更は、配った先で一番高くつく。
+
+$script:PrimaryAccountId = '1'
+
+# 秘密の名前 → どの連携先のものか。名前の頭で決まる。
+# 'account.<連携先>' (どのアカウントとして繋がったかの表示名) だけは後ろが連携先。
+$script:SecretServiceOfPrefix = @{
+    slack = 'slack'; gmail = 'google'; ms = 'microsoft'
+    chatwork = 'chatwork'; backlog = 'backlog'; github = 'github'
+}
+
+# アカウントをまたいで共有される値。
+#
+# 同意画面に使うアプリ登録 (クライアント ID と秘密) は**配る人が1つ用意するもの**で、
+# 繋ぐ先のアカウントが増えても同じものを使う。ここまでアカウント単位にすると、
+# 2つ目を繋ぐときに「配布時に設定済み」が効かなくなり、利用者の手では取れない値を
+# 空欄として出すことになる (それは永久に埋まらない欄になる)。
+#
+# ms.tenantId と backlog.space はここに入れない。**アカウントごとに違う**
+# (別テナントの職場アカウント、別スペースの Backlog) ためである。
+$script:SharedSecretNames = @(
+    'slack.clientId', 'slack.clientSecret',
+    'gmail.clientId', 'gmail.clientSecret',
+    'ms.clientId',    'ms.clientSecret'
+)
+
+# 二重に読み込まれても選択とハンドラを失わないようにする。
+# コネクタは各自このファイルを読み込むので、初期化は何度も走る。
+if (-not (Get-Variable -Name 'CurrentAccountId' -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:CurrentAccountId = @{}
+}
+if (-not (Get-Variable -Name 'AccountResetHandlers' -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:AccountResetHandlers = @{}
+}
+
+function Get-PrimaryAccountId { return $script:PrimaryAccountId }
+
+function Get-SecretService {
+    <#
+      .SYNOPSIS
+        秘密の名前から、どの連携先のものかを返す。分からなければ空 (= アカウントで分けない)。
+    #>
+    param([string] $Name)
+    if (-not $Name) { return '' }
+    $parts = $Name -split '\.', 2
+    if ($parts[0] -eq 'account' -and $parts.Count -eq 2) { return $parts[1] }
+    if ($script:SecretServiceOfPrefix.ContainsKey($parts[0])) { return $script:SecretServiceOfPrefix[$parts[0]] }
+    return ''
+}
+
+function Get-CurrentAccountId {
+    param([string] $Service)
+    if ($Service -and $script:CurrentAccountId.ContainsKey($Service)) {
+        return [string] $script:CurrentAccountId[$Service]
+    }
+    return $script:PrimaryAccountId
+}
+
+function Resolve-SecretName {
+    <#
+      .SYNOPSIS
+        保管庫に実際に置く名前。1人目はそのまま、2人目以降は '#<id>' が付く。
+    #>
+    param([Parameter(Mandatory)] [string] $Name, [string] $AccountId)
+    if ($script:SharedSecretNames -contains $Name) { return $Name }
+    $svc = Get-SecretService $Name
+    if (-not $svc) { return $Name }
+    $id = if ($AccountId) { [string] $AccountId } else { Get-CurrentAccountId $svc }
+    if (-not $id -or $id -eq $script:PrimaryAccountId) { return $Name }
+    return ("{0}#{1}" -f $Name, $id)
+}
+
+function Register-AccountReset {
+    <#
+      .SYNOPSIS
+        アカウントが切り替わったときに落とすキャッシュを登録する。
+      .DESCRIPTION
+        コネクタはアクセストークン・自分のユーザーID・部屋名をモジュール変数に溜めている。
+        別のアカウントに切り替えたあとそれが残っていると、**別のワークスペースの名前で
+        別のワークスペースのメッセージを読む**ことになる。落とすのは持ち主であるコネクタの仕事。
+    #>
+    param([Parameter(Mandatory)] [string] $Service, [Parameter(Mandatory)] [scriptblock] $Handler)
+    if (-not $script:AccountResetHandlers.ContainsKey($Service)) { $script:AccountResetHandlers[$Service] = @() }
+    # コネクタは複数の入口から読み込まれる。同じものを何度も積むと、
+    # 切り替えのたびに同じキャッシュを何度も落とすだけの手数になる。
+    $text = $Handler.ToString()
+    foreach ($h in $script:AccountResetHandlers[$Service]) { if ($h.ToString() -eq $text) { return } }
+    $script:AccountResetHandlers[$Service] += $Handler
+}
+
+function Reset-ServiceAccountCache {
+    param([Parameter(Mandatory)] [string] $Service)
+    if (-not $script:AccountResetHandlers.ContainsKey($Service)) { return }
+    # 1つが投げても残りは落とす。落とし損ねたキャッシュのほうが害が大きい。
+    foreach ($h in $script:AccountResetHandlers[$Service]) { try { & $h } catch { } }
+}
+
+function Use-ServiceAccount {
+    <#
+      .SYNOPSIS
+        以降の Get-Secret / Set-Secret を、この連携先のこのアカウントのものにする。
+      .OUTPUTS
+        [string] 実際に選ばれたアカウント ID
+    #>
+    param([Parameter(Mandatory)] [string] $Service, [string] $Id)
+    if (-not $Id) { $Id = $script:PrimaryAccountId }
+    $wanted = [string] $Id
+    $prev = Get-CurrentAccountId $Service
+    $script:CurrentAccountId[$Service] = $wanted
+    if ($prev -ne $wanted) { Reset-ServiceAccountCache -Service $Service }
+    return $wanted
+}
+
 # 1件取り出す。$Name は 'slack.userToken' のようなドット区切り。
 function Get-Secret {
-    param([Parameter(Mandatory)] [string] $Name, [string] $Path)
+    # -AccountId を渡すと、いま選ばれているアカウントではなく、そのアカウントのものを読む
+    # (設定画面が全アカウントの状態を一度に並べるのに要る)。
+    param([Parameter(Mandatory)] [string] $Name, [string] $Path, [string] $AccountId)
+    $key = Resolve-SecretName -Name $Name -AccountId $AccountId
     $s = Read-SecretStore -Path $Path
-    if ($s.ContainsKey($Name)) { return [string] $s[$Name] }
+    if ($s.ContainsKey($key)) { return [string] $s[$key] }
     return $null
 }
 
 function Set-Secret {
-    param([Parameter(Mandatory)] [string] $Name, [Parameter(Mandatory)] [string] $Value, [string] $Path)
+    param([Parameter(Mandatory)] [string] $Name, [Parameter(Mandatory)] [string] $Value, [string] $Path, [string] $AccountId)
+    $key = Resolve-SecretName -Name $Name -AccountId $AccountId
     $s = Read-SecretStore -Path $Path
-    $s[$Name] = $Value
+    $s[$key] = $Value
     Write-SecretStore -Store $s -Path $Path
 }
 
 function Remove-Secret {
-    param([Parameter(Mandatory)] [string] $Name, [string] $Path)
+    param([Parameter(Mandatory)] [string] $Name, [string] $Path, [string] $AccountId)
+    $key = Resolve-SecretName -Name $Name -AccountId $AccountId
     $s = Read-SecretStore -Path $Path
-    if ($s.ContainsKey($Name)) { $s.Remove($Name); Write-SecretStore -Store $s -Path $Path; return $true }
+    if ($s.ContainsKey($key)) { $s.Remove($key); Write-SecretStore -Store $s -Path $Path; return $true }
     return $false
 }
 

@@ -185,6 +185,15 @@ function Invoke-SchemaMigration {
     if ($ecols -notcontains 'superseded_by') {
         $Conn.Exec('ALTER TABLE events ADD COLUMN superseded_by TEXT')
     }
+    # どのアカウントで取り込んだか。
+    #
+    # 一つの連携先に複数のアカウントを繋げるようにしたので、source だけでは
+    # 「どのトークンで取り直すか・どの名義で返すか」が決まらなくなった。
+    # ここが空の行は1人目 (接尾辞の無い資格情報) のものとして扱う ――
+    # この列より前に入ったイベントはすべてそれに当たる。
+    if ($ecols -notcontains 'account_id') {
+        $Conn.Exec('ALTER TABLE events ADD COLUMN account_id TEXT')
+    }
 
     # 「同じ件」を束ねるキー。dedup_key (同じメッセージか) の一段上で、
     # 別々のメールが同じ用事を指しているときに束ねる。
@@ -260,6 +269,42 @@ function Open-TaskStore {
 
 # 通知1件を events に入れる。既に入っていれば何もしない。
 # 戻り値: @{ id; isNew }
+# 1人目のアカウント。接尾辞を付けない側で、既存のデータはすべてこれに当たる。
+# 資格情報側の定義 (phase5\lib\SecretStore.ps1 の $script:PrimaryAccountId) と
+# 同じ値であること。DB 層から保管庫を読ませないために、ここにも置いている。
+$script:PrimaryEventAccountId = '1'
+
+function ConvertTo-AccountSourceKey {
+    <#
+      .SYNOPSIS
+        アカウントで分けたイベントの主キー。1人目はそのまま。
+      .DESCRIPTION
+        source_key は経路ごとの主キーだが、**その一意性が効く範囲は経路によって違う。**
+        Backlog のお知らせ ID はスペース内の連番なので、二つ目のスペースを繋いだ瞬間に
+        既存のイベントと衝突し、UNIQUE(source, source_key) に弾かれて
+        「繋いだのに何も入らない」になる。アカウントを頭に付けて避ける。
+
+        1人目に接尾辞を付けないのは、既存の行 (と、それを指している tasks.event_id や
+        triage_log.event_id) を書き換えずに済ませるため。移行の要る変更は高くつく。
+    #>
+    param([Parameter(Mandatory)] [string] $SourceKey, [string] $AccountId)
+    if (-not $AccountId -or $AccountId -eq $script:PrimaryEventAccountId) { return $SourceKey }
+    return ("{0}|{1}" -f $AccountId, $SourceKey)
+}
+
+function Get-EventAccountId {
+    <#
+      .SYNOPSIS
+        イベントを取り込んだアカウント。空なら1人目。
+    #>
+    param($Evt)
+    if (-not $Evt) { return $script:PrimaryEventAccountId }
+    $v = ''
+    try { $v = [string] $Evt['account_id'] } catch { $v = '' }
+    if (-not $v) { return $script:PrimaryEventAccountId }
+    return $v
+}
+
 function Add-Event {
     param(
         [Parameter(Mandatory)] $Conn,
@@ -268,13 +313,18 @@ function Add-Event {
         [string] $App, [string] $AppId, [string] $OccurredAt,
         [string] $Title, [string] $Body, [string] $Link, [string] $RawJson,
         # 通知と同期で同じものを指すときの突き合わせ用 (New-EventIdentity で作る)
-        [string] $DedupKey
+        [string] $DedupKey,
+        # どのアカウントで取り込んだか。省略すると1人目 (通知のように、
+        # どのアカウント宛かを決められない経路はこちらになる)。
+        [string] $AccountId
     )
-    $id = "$Source|$SourceKey"
+    if (-not $AccountId) { $AccountId = $script:PrimaryEventAccountId }
+    $key = ConvertTo-AccountSourceKey -SourceKey $SourceKey -AccountId $AccountId
+    $id = "$Source|$key"
     $changed = $Conn.NonQuery(
-        'INSERT OR IGNORE INTO events (id, source, source_key, app, app_id, occurred_at, ingested_at, title, body, link, raw_json, dedup_key)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-        [object[]] @($id, $Source, $SourceKey, $App, $AppId, $OccurredAt, (Get-Now), $Title, $Body, $Link, $RawJson, $DedupKey))
+        'INSERT OR IGNORE INTO events (id, source, source_key, app, app_id, occurred_at, ingested_at, title, body, link, raw_json, dedup_key, account_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [object[]] @($id, $Source, $key, $App, $AppId, $OccurredAt, (Get-Now), $Title, $Body, $Link, $RawJson, $DedupKey, $AccountId))
     # 既存行には INSERT OR IGNORE が効かない。この列より前に入ったイベントにも
     # 後から同一性が付くように、取り込みのたびに書き直す (計算は決定的)。
     if (-not $changed -and $DedupKey) { Set-EventIdentity -Conn $Conn -EventId $id -Key $DedupKey }

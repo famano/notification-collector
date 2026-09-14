@@ -22,7 +22,7 @@
 #   画面に返すのは「設定済みか」と「どのアカウントとして繋がったか」だけで、
 #   トークンそのものは決して返さない。
 
-. "$PSScriptRoot\SecretStore.ps1"
+. "$PSScriptRoot\AccountStore.ps1"
 # API キーの取得元 (環境変数 / 保管庫 / 配布設定) の判定はここに集約してある。
 . "$PSScriptRoot\..\..\lib\ApiKey.ps1"
 
@@ -34,11 +34,16 @@
 #   flow     … 'token' は貼るだけ。'oauth' はブラウザの同意画面を通る。
 #              'device' は画面にコードを出し、別のタブでサインインしてもらう
 #              (リダイレクト URI の登録が要らないぶん、事務所のテナントで通りやすい)。
+#   multi    … 同じ連携先に複数のアカウントを繋げるか。
+#              繋げるものは、資格情報も watermark もイベントもアカウント単位で分かれ、
+#              同期は全アカウントを回る。繋げないものは1組しか持たない。
 $script:SetupServices = @(
     @{
         key   = 'anthropic'
         label = 'Claude'
         flow  = 'token'
+        # ここだけは連携先ではなく**エンジン**である。複数繋いでも、さばける通知は増えない。
+        multi = $false
         # これだけは「あると便利」ではない。無ければカードが1枚も作られない。
         # 以前は起動時に環境変数が無いと起動そのものを拒んでいたが、それだと
         # 配った先では画面すら出ず、直し方を出す場所が無かった。ここに入口を作る。
@@ -72,6 +77,10 @@ console.anthropic.com の Settings → Organization で確認できます。
         key   = 'github'
         label = 'GitHub'
         flow  = 'token'
+        # GitHub は通知の取り込み経路を持たない (カードの出自にならない) ので、
+        # 「このカードはどちらのアカウントのものか」を決める手がかりが無い。
+        # 複数対応は、リポジトリの所有者で選ぶ別の仕掛けが要る。
+        multi = $false
         why   = '非公開リポジトリの調査、CI の失敗内容の取得、招待の承諾。'
         docUrl = 'https://github.com/settings/tokens'
         help  = @'
@@ -90,6 +99,7 @@ classic token なら repo スコープでまとめて足ります。
     @{
         key   = 'slack'
         label = 'Slack'
+        multi = $true
         # Google と同じく同意画面を通す。以前は xoxb- / xoxp- を貼る方式だったが、
         # **その画面に入れるのはアプリを作れる人だけ**で、配った先では永久に埋まらない
         # 空欄になっていた。ここを同意画面に変えると、配る人が用意するのは
@@ -123,6 +133,7 @@ Bot は増えないので、チャンネルへの招待も要りません。
     @{
         key   = 'chatwork'
         label = 'Chatwork'
+        multi = $true
         flow  = 'token'
         why   = 'ダイレクトチャットと自分宛メンションの取得、同じ部屋への投稿。'
         docUrl = 'https://www.chatwork.com/service/packages/chatwork/subpackages/api/token.php'
@@ -148,6 +159,7 @@ Chatwork のカードが2枚立ちます。繋いだらメール通知は切る�
     @{
         key   = 'backlog'
         label = 'Backlog'
+        multi = $true
         flow  = 'token'
         why   = '自分宛のお知らせ (担当に設定・コメント) の取得と、課題へのコメント投稿。'
         docUrl = 'https://support-ja.backlog.com/hc/ja/articles/360035641754'
@@ -175,6 +187,7 @@ Backlog のカードが2枚立ちます。繋いだらメール通知は切る�
     @{
         key   = 'microsoft'
         label = 'Microsoft 365 (Outlook / Teams)'
+        multi = $true
         flow  = 'device'
         why   = 'Outlook のメールと Teams のチャットの取得、下書き・送信・投稿。'
         docUrl = 'https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade'
@@ -214,6 +227,7 @@ API がありません (Outlook のメールは個人アカウントでも読め
     @{
         key   = 'google'
         label = 'Gmail / カレンダー'
+        multi = $true
         flow  = 'oauth'
         why   = 'メール本文の取得、下書きの作成と送信、カレンダーの出欠。'
         docUrl = 'https://console.cloud.google.com/'
@@ -255,19 +269,164 @@ function Get-SetupService {
     return $null
 }
 
-function Test-SetupConfigured {
+# ---------------------------------------------------------------- アカウント
+#
+# 一つの連携先に複数のアカウントがあることがある (仕事用と個人用の Gmail、
+# 二つのワークスペースの Slack)。片方だけ繋いだのでは、もう片方に届いたものは
+# このアプリを使っていないのと同じところに戻る。
+#
+# 名簿は AccountStore が持ち、資格情報の分離は SecretStore が名前空間でやる。
+# ここが足すのは「設定画面から見たときの1人ぶん」の扱いだけである。
+
+function Test-SetupMultiAccount {
+    param([string] $Key)
+    $svc = Get-SetupService $Key
+    return [bool] ($svc -and $svc.multi)
+}
+
+function Get-SetupAccounts {
+    <#
+      .SYNOPSIS
+        その連携先に繋がっている (繋ごうとしている) アカウントの一覧。
+      .DESCRIPTION
+        複数を持てない連携先でも1件は返す。画面と保存の経路を1本にしておかないと、
+        「Claude だけ別扱い」のような分岐がここから先の全部に散る。
+      .OUTPUTS
+        [pscustomobject[]] id / label
+    #>
     param([Parameter(Mandatory)] [string] $Key)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { return @() }
+    if (-not $svc.multi) { return @([pscustomobject]@{ id = (Get-PrimaryAccountId); label = '' }) }
+    return @(Get-ServiceAccounts -Service $svc.key)
+}
+
+function Test-SetupAccountConfigured {
+    <#
+      .SYNOPSIS
+        そのアカウント1つが繋がっているか。
+    #>
+    param([Parameter(Mandatory)] [string] $Key, [string] $AccountId)
+    if (-not $AccountId) { $AccountId = Get-PrimaryAccountId }
+    $a = $AccountId
     switch ((Get-SetupService $Key).key) {
         # キーは保管庫以外 (環境変数・配布設定) にも居られるので、置き場所ごと判定する。
         'anthropic' { return [bool] (Test-AnthropicConfigured) }
-        'github' { return [bool] (Get-Secret -Name 'github.token') }
-        'slack'  { return [bool] (Get-Secret -Name 'slack.userToken') }
-        'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken') -and (Get-Secret -Name 'gmail.clientId')) }
-        'microsoft' { return [bool] ((Get-Secret -Name 'ms.refreshToken') -and (Get-Secret -Name 'ms.clientId')) }
-        'chatwork'  { return [bool] (Get-Secret -Name 'chatwork.token') }
-        'backlog'   { return [bool] ((Get-Secret -Name 'backlog.apiKey') -and (Get-Secret -Name 'backlog.space')) }
+        'github' { return [bool] (Get-Secret -Name 'github.token' -AccountId $a) }
+        'slack'  { return [bool] (Get-Secret -Name 'slack.userToken' -AccountId $a) }
+        'google' { return [bool] ((Get-Secret -Name 'gmail.refreshToken' -AccountId $a) -and (Get-Secret -Name 'gmail.clientId' -AccountId $a)) }
+        'microsoft' { return [bool] ((Get-Secret -Name 'ms.refreshToken' -AccountId $a) -and (Get-Secret -Name 'ms.clientId' -AccountId $a)) }
+        'chatwork'  { return [bool] (Get-Secret -Name 'chatwork.token' -AccountId $a) }
+        'backlog'   { return [bool] ((Get-Secret -Name 'backlog.apiKey' -AccountId $a) -and (Get-Secret -Name 'backlog.space' -AccountId $a)) }
     }
     return $false
+}
+
+function Test-SetupConfigured {
+    <#
+      .SYNOPSIS
+        繋がっているか。-AccountId を省くと「どれか1つでも繋がっているか」。
+      .DESCRIPTION
+        ヘッダの警告や設定カードの判定はこちらを使う。2つ繋いであるうちの
+        1つが切れているだけで「未接続」と言うと、直す場所が分からない警告になる。
+    #>
+    param([Parameter(Mandatory)] [string] $Key, [string] $AccountId)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { return $false }
+    if ($AccountId) { return (Test-SetupAccountConfigured -Key $svc.key -AccountId $AccountId) }
+    foreach ($a in (Get-SetupAccounts -Key $svc.key)) {
+        if (Test-SetupAccountConfigured -Key $svc.key -AccountId $a.id) { return $true }
+    }
+    return $false
+}
+
+function Add-SetupAccount {
+    <#
+      .SYNOPSIS
+        空のアカウントを1つ増やす。資格情報はこのあと通常の設定経路で入れる。
+    #>
+    param([Parameter(Mandatory)] [string] $Key, [string] $Label)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { throw ("知らないサービスです: {0}" -f $Key) }
+    if (-not $svc.multi) { throw ("{0} は複数のアカウントを繋げません。" -f $svc.label) }
+    return Add-ServiceAccount -Service $svc.key -Label $Label
+}
+
+function Rename-SetupAccount {
+    param([Parameter(Mandatory)] [string] $Key, [Parameter(Mandatory)] [string] $AccountId, [string] $Label)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { throw ("知らないサービスです: {0}" -f $Key) }
+    if (-not $svc.multi) { throw ("{0} は複数のアカウントを繋げません。" -f $svc.label) }
+    return [bool] (Set-ServiceAccountLabel -Service $svc.key -Id $AccountId -Label $Label)
+}
+
+function Clear-SetupCredential {
+    <#
+      .SYNOPSIS
+        そのアカウントの資格情報だけを消す。枠は残る (繋ぎ直せる)。
+      .DESCRIPTION
+        共有の値 (配る人が用意したアプリ登録) は消さない。あれは全アカウントで
+        使い回すもので、1人切ったからといって他の人まで繋げなくする理由がない。
+    #>
+    param([Parameter(Mandatory)] [string] $Key, [string] $AccountId)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { throw ("知らないサービスです: {0}" -f $Key) }
+    if (-not $AccountId) { $AccountId = Get-PrimaryAccountId }
+    foreach ($n in $svc.secrets) {
+        if ($script:SharedSecretNames -contains $n) { continue }
+        [void] (Remove-Secret -Name $n -AccountId $AccountId)
+    }
+    [void] (Remove-Secret -Name ("account.{0}" -f $svc.key) -AccountId $AccountId)
+    Reset-ServiceAccountCache -Service $svc.key
+    return $true
+}
+
+function Remove-SetupAccount {
+    <#
+      .SYNOPSIS
+        アカウントを1つ丸ごと外す。資格情報も一緒に消える。
+      .DESCRIPTION
+        最後の1つは外さない。外すと画面から枠が消え、繋ぎ直す入口が無くなる。
+        「もう使わない」は Clear-SetupCredential (切断) のほうで足りる。
+    #>
+    param([Parameter(Mandatory)] [string] $Key, [Parameter(Mandatory)] [string] $AccountId)
+    $svc = Get-SetupService $Key
+    if (-not $svc) { throw ("知らないサービスです: {0}" -f $Key) }
+    if (-not $svc.multi) { throw ("{0} は複数のアカウントを繋げません。" -f $svc.label) }
+    if ((@(Get-SetupAccounts -Key $svc.key)).Count -le 1) {
+        throw '最後の1つは外せません。使わなくなっただけなら「切断」で資格情報を消せます。'
+    }
+    $names = @($svc.secrets | Where-Object { $script:SharedSecretNames -notcontains $_ })
+    return [bool] (Remove-ServiceAccount -Service $svc.key -Id $AccountId -SecretNames $names)
+}
+
+function Get-SetupDuplicateNote {
+    <#
+      .SYNOPSIS
+        いま繋いだ相手が、すでに繋いである別のアカウントと同じでないか。
+      .DESCRIPTION
+        これが要るのは同意画面のせいである。ブラウザに前のアカウントのセッションが
+        残っていると、**2つ目を繋いだつもりで1つ目をもう一度繋ぐ**ことになり、
+        画面上は成功するのにカードは1件も増えない ―― 原因が一番見えない失敗の形。
+        繋いだ直後に名前で突き合わせて、その場で知らせる。
+      .OUTPUTS
+        [string] 重複していたときの説明。していなければ空。
+    #>
+    param([Parameter(Mandatory)] [string] $Key, [string] $AccountId, [string] $Account)
+    if (-not $Account) { return '' }
+    $svc = Get-SetupService $Key
+    if (-not $svc -or -not $svc.multi) { return '' }
+    if (-not $AccountId) { $AccountId = Get-PrimaryAccountId }
+    foreach ($a in (Get-SetupAccounts -Key $svc.key)) {
+        if ($a.id -eq $AccountId) { continue }
+        if ((Get-SetupAccount -Key $svc.key -AccountId $a.id) -eq $Account) {
+            return ("「{0}」は、すでに繋いである別のアカウントと同じです。" -f $Account) +
+                   'ブラウザに前のアカウントのままサインインしていると、' +
+                   '同意画面が相手を聞かずにそのまま通ります。' +
+                   'そのサービスから一度サインアウトするか、シークレット ウィンドウで開き直してから、もう一度繋いでください。'
+        }
+    }
+    return ''
 }
 
 # 画面に渡す一覧。**トークンは含めない。**
@@ -282,6 +441,19 @@ function Get-SetupStatusList {
         $configured = (Test-SetupConfigured -Key $s.key)
         $att = Get-SetupAttention -Conn $Conn -Key $s.key -Configured $configured `
                     -Required ([bool] $s.required) -NotificationApps $apps
+        # 1人ぶんずつの状態。画面はこれを並べて「どれが切れているか」を出す。
+        $accounts = @(Get-SetupAccounts -Key $s.key | ForEach-Object {
+            [pscustomobject]@{
+                id         = $_.id
+                label      = $_.label
+                configured = (Test-SetupAccountConfigured -Key $s.key -AccountId $_.id)
+                account    = (Get-SetupAccount -Key $s.key -AccountId $_.id)
+            }
+        })
+        # ヘッダに出す名前。繋がっている全員を並べる ―― 1つ目だけ出すと、
+        # 2つ目が別人として繋がっていても気付けない。
+        $names = @($accounts | Where-Object { $_.account } | ForEach-Object { $_.account })
+
         $out += [pscustomobject]@{
             key        = $s.key
             label      = $s.label
@@ -290,7 +462,10 @@ function Get-SetupStatusList {
             help       = $s.help
             docUrl     = $s.docUrl
             configured = $configured
-            account    = (Get-SetupAccount -Key $s.key)
+            account    = ($names -join '、')
+            # 複数のアカウントを繋げるか。画面が「アカウントを追加」を出すかを決める。
+            multi      = [bool] $s.multi
+            accounts   = $accounts
             # これが無いとアプリが成立しないもの。画面はこれを先頭に出す。
             required   = [bool] $s.required
             # 未接続を知らせるべきか。warn だけを見ればよい。
@@ -482,13 +657,16 @@ function Get-SetupManagedNote {
 # 「どのアカウントとして繋がっているか」。ネットワークには出ない
 # (画面を開くたびに外を叩かない)。確認できた時点の表示名を保存しておき、それを返す。
 function Get-SetupAccount {
-    param([string] $Key)
+    param([string] $Key, [string] $AccountId)
+    if ($AccountId) { return [string] (Get-Secret -Name ("account.$Key") -AccountId $AccountId) }
     return [string] (Get-Secret -Name ("account.$Key"))
 }
 
 function Set-SetupAccount {
-    param([Parameter(Mandatory)] [string] $Key, [string] $Account)
-    if ($Account) { Set-Secret -Name ("account.$Key") -Value $Account }
+    param([Parameter(Mandatory)] [string] $Key, [string] $Account, [string] $AccountId)
+    if (-not $Account) { return }
+    if ($AccountId) { Set-Secret -Name ("account.$Key") -Value $Account -AccountId $AccountId }
+    else { Set-Secret -Name ("account.$Key") -Value $Account }
 }
 
 # ---------------------------------------------------------------- 保存
@@ -500,10 +678,16 @@ function Set-SetupAccount {
 function Save-SetupCredential {
     param(
         [Parameter(Mandatory)] [string] $Key,
-        [Parameter(Mandatory)] [hashtable] $Values
+        [Parameter(Mandatory)] [hashtable] $Values,
+        # どのアカウントに入れるか。省略すると1人目。
+        [string] $AccountId
     )
     $svc = Get-SetupService $Key
     if (-not $svc) { return [pscustomobject]@{ ok = $false; error = ("知らないサービスです: {0}" -f $Key) } }
+    if (-not $AccountId) { $AccountId = Get-PrimaryAccountId }
+    if ($svc.multi -and -not (Test-ServiceAccountId -Service $svc.key -Id $AccountId)) {
+        return [pscustomobject]@{ ok = $false; error = 'そのアカウントはもうありません。画面を開き直してください。' }
+    }
     if ($svc.flow -ne 'token') {
         $how = if ($svc.flow -eq 'device') { 'サインイン画面にコードを入れる必要があります' } else { 'ブラウザでの同意が要ります' }
         return [pscustomobject]@{ ok = $false; error = ("{0} は貼るだけでは設定できません。{1}。" -f $svc.label, $how) }
@@ -519,6 +703,12 @@ function Save-SetupCredential {
             return [pscustomobject]@{ ok = $false; error = ("{0} を入力してください。" -f $f.label) }
         }
     }
+
+    # 以降の Set-Secret / 疎通確認を、このアカウントのものにする。
+    # 元に戻すのは finally ―― 途中で失敗しても、別のアカウントを選んだまま
+    # 次の要求を捌くと、そちらの資格情報を上書きする。
+    $prevAccount = Get-CurrentAccountId $svc.key
+    [void] (Use-ServiceAccount -Service $svc.key -Id $AccountId)
 
     $backup = @{}
     foreach ($n in $svc.secrets) { $backup[$n] = Get-Secret -Name $n }
@@ -545,9 +735,12 @@ function Save-SetupCredential {
                 Set-Secret -Name 'backlog.apiKey' -Value ([string] $Values['apiKey']).Trim()
             }
         }
-        $check = Test-SetupConnection -Key $svc.key
+        $check = Test-SetupConnection -Key $svc.key -AccountId $AccountId
         if (-not $check.ok) { throw $check.error }
-        Set-SetupAccount -Key $svc.key -Account $check.account
+        # すでに繋いである相手をもう一度繋いでいないか。入れ直してから気付くのでは遅い。
+        $dup = Get-SetupDuplicateNote -Key $svc.key -AccountId $AccountId -Account $check.account
+        if ($dup) { throw $dup }
+        Set-SetupAccount -Key $svc.key -Account $check.account -AccountId $AccountId
         return [pscustomobject]@{ ok = $true; account = $check.account; note = $check.note }
     }
     catch {
@@ -558,14 +751,24 @@ function Save-SetupCredential {
         }
         return [pscustomobject]@{ ok = $false; error = $_.Exception.Message }
     }
+    finally {
+        [void] (Use-ServiceAccount -Service $svc.key -Id $prevAccount)
+    }
 }
 
 # 実際に1回叩いて確かめる。貼り間違いを後のカードで気づくのは高くつく。
 function Test-SetupConnection {
-    param([Parameter(Mandatory)] [string] $Key)
+    param([Parameter(Mandatory)] [string] $Key, [string] $AccountId)
     $svc = Get-SetupService $Key
     if (-not $svc) { return [pscustomobject]@{ ok = $false; error = '知らないサービスです。' } }
 
+    # 確かめる相手を固定する。ここで切り替えないと、**別のアカウントのトークンで
+    # 叩いて「繋がりました」と言う**ことになる (画面には成功と出て、実際は増えない)。
+    $prevAccount = $null
+    if ($AccountId) {
+        $prevAccount = Get-CurrentAccountId $svc.key
+        [void] (Use-ServiceAccount -Service $svc.key -Id $AccountId)
+    }
     try {
         switch ($svc.key) {
             'anthropic' {
@@ -654,6 +857,9 @@ function Test-SetupConnection {
     catch {
         return [pscustomobject]@{ ok = $false; error = $_.Exception.Message }
     }
+    finally {
+        if ($null -ne $prevAccount) { [void] (Use-ServiceAccount -Service $svc.key -Id $prevAccount) }
+    }
     return [pscustomobject]@{ ok = $false; error = '確認できませんでした。' }
 }
 
@@ -729,7 +935,9 @@ function Get-GoogleAuthRequest {
     param(
         [Parameter(Mandatory)] [string] $ClientId,
         [Parameter(Mandatory)] [string] $ClientSecret,
-        [Parameter(Mandatory)] [string] $RedirectUri
+        [Parameter(Mandatory)] [string] $RedirectUri,
+        # どのアカウントの枠に入れるか。戻ってきたときにこれで束縛する。
+        [string] $AccountId
     )
     $scopes = if ($script:GmailScopes) { $script:GmailScopes } else {
         'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/calendar.events'
@@ -741,13 +949,17 @@ function Get-GoogleAuthRequest {
     $script:PendingGoogleAuth = @{
         state = $state; clientId = $ClientId.Trim(); clientSecret = $ClientSecret.Trim()
         redirectUri = $RedirectUri; createdAt = (Get-Date)
+        accountId = $(if ($AccountId) { [string] $AccountId } else { Get-PrimaryAccountId })
     }
+    # prompt に select_account を足す。**2つ目を繋ぐときに要る。**
+    # これが無いと、ブラウザに残っている1つ目のセッションでそのまま通ってしまい、
+    # 「2つ目を繋いだのにカードが増えない」という一番読めない形になる。
     $url = "$authUrl" +
         "?client_id=$([Uri]::EscapeDataString($ClientId.Trim()))" +
         "&redirect_uri=$([Uri]::EscapeDataString($RedirectUri))" +
         "&response_type=code" +
         "&scope=$([Uri]::EscapeDataString($scopes))" +
-        "&access_type=offline&prompt=consent&state=$state"
+        "&access_type=offline&prompt=$([Uri]::EscapeDataString('consent select_account'))&state=$state"
     return [pscustomobject]@{ url = $url; state = $state }
 }
 
@@ -797,7 +1009,9 @@ function Get-SlackAuthRequest {
         [Parameter(Mandatory)] [string] $ClientId,
         [Parameter(Mandatory)] [string] $ClientSecret,
         [Parameter(Mandatory)] [string] $RedirectUri,
-        [Parameter(Mandatory)] [int] $BoardPort
+        [Parameter(Mandatory)] [int] $BoardPort,
+        # どのアカウントの枠に入れるか。戻ってきたときにこれで束縛する。
+        [string] $AccountId
     )
     if ($RedirectUri -notmatch '^https://') {
         throw 'Slack の戻り先は https:// でなければなりません (中継ページの URL を設定してください)。'
@@ -815,6 +1029,7 @@ function Get-SlackAuthRequest {
     $script:PendingSlackAuth = @{
         state = $state; clientId = $ClientId.Trim(); clientSecret = $ClientSecret.Trim()
         redirectUri = $RedirectUri; createdAt = (Get-Date)
+        accountId = $(if ($AccountId) { [string] $AccountId } else { Get-PrimaryAccountId })
     }
     # user_scope だけを求める。scope (Bot 用) は空のままにする ――
     # 空にしておけば、ワークスペースに Bot が増えない。
@@ -873,18 +1088,38 @@ function Complete-SlackAuth {
         }
     }
 
-    Set-Secret -Name 'slack.clientId'     -Value $p.clientId
-    Set-Secret -Name 'slack.clientSecret' -Value $p.clientSecret
-    Set-Secret -Name 'slack.userToken'    -Value $userToken
-    # 掃き寄せのメンション判定に使う「自分」。同意した本人なので、ここで確定する。
-    if ($resp.authed_user.id) { Set-Secret -Name 'slack.selfUserId' -Value ([string] $resp.authed_user.id) }
-    $script:PendingSlackAuth = $null
-    $script:SlackSelfId = $null
+    # 取ったトークンは、押した枠のアカウントに入れる。
+    # clientId / clientSecret はアプリ登録なので全アカウント共通のまま保存される。
+    $acctId = [string] $p.accountId
+    if (-not $acctId) { $acctId = Get-PrimaryAccountId }
+    $prevAccount = Get-CurrentAccountId 'slack'
+    [void] (Use-ServiceAccount -Service 'slack' -Id $acctId)
+    try {
+        Set-Secret -Name 'slack.clientId'     -Value $p.clientId
+        Set-Secret -Name 'slack.clientSecret' -Value $p.clientSecret
+        Set-Secret -Name 'slack.userToken'    -Value $userToken
+        # 掃き寄せのメンション判定に使う「自分」。同意した本人なので、ここで確定する。
+        if ($resp.authed_user.id) { Set-Secret -Name 'slack.selfUserId' -Value ([string] $resp.authed_user.id) }
+        $script:PendingSlackAuth = $null
+        # 同じ枠を繋ぎ直したときは切り替えが起きないので、ここで明示的に落とす。
+        # 前のトークンで引いた「自分」やチャンネル名が残ると、そのまま使われる。
+        Reset-ServiceAccountCache -Service 'slack'
 
-    $check = Test-SetupConnection -Key 'slack'
-    if (-not $check.ok) { return [pscustomobject]@{ ok = $false; error = $check.error } }
-    Set-SetupAccount -Key 'slack' -Account $check.account
-    return [pscustomobject]@{ ok = $true; account = $check.account; note = $check.note }
+        $check = Test-SetupConnection -Key 'slack'
+        if (-not $check.ok) { return [pscustomobject]@{ ok = $false; error = $check.error } }
+        # Slack の同意画面にはアカウントを選び直させる指定が無い。すでに繋いである
+        # ワークスペースにそのまま通ってしまうことがあるので、ここで突き合わせる。
+        $dup = Get-SetupDuplicateNote -Key 'slack' -AccountId $acctId -Account $check.account
+        if ($dup) {
+            [void] (Clear-SetupCredential -Key 'slack' -AccountId $acctId)
+            return [pscustomobject]@{ ok = $false; error = $dup }
+        }
+        Set-SetupAccount -Key 'slack' -Account $check.account
+        return [pscustomobject]@{ ok = $true; account = $check.account; note = $check.note; accountId = $acctId }
+    }
+    finally {
+        [void] (Use-ServiceAccount -Service 'slack' -Id $prevAccount)
+    }
 }
 
 function Complete-GoogleAuth {
@@ -925,28 +1160,42 @@ function Complete-GoogleAuth {
         }
     }
 
-    Set-Secret -Name 'gmail.clientId'     -Value $p.clientId
-    Set-Secret -Name 'gmail.clientSecret' -Value $p.clientSecret
-    Set-Secret -Name 'gmail.refreshToken' -Value ([string] $resp.refresh_token)
-    $script:PendingGoogleAuth = $null
+    # 取ったトークンは、押した枠のアカウントに入れる。
+    $acctId = [string] $p.accountId
+    if (-not $acctId) { $acctId = Get-PrimaryAccountId }
+    $prevAccount = Get-CurrentAccountId 'google'
+    [void] (Use-ServiceAccount -Service 'google' -Id $acctId)
+    try {
+        Set-Secret -Name 'gmail.clientId'     -Value $p.clientId
+        Set-Secret -Name 'gmail.clientSecret' -Value $p.clientSecret
+        Set-Secret -Name 'gmail.refreshToken' -Value ([string] $resp.refresh_token)
+        $script:PendingGoogleAuth = $null
 
-    # 取り直したので、前のアクセストークンの残りは捨てる。
-    # これが効くのはこのプロセス (カンバン) だけ。ワーカーや収集は別プロセスなので、
-    # Get-GmailAccessToken が保存済みのリフレッシュトークンの変化を見て取り直す。
-    $script:GmailToken = $null
-    $script:GmailTokenExpiry = [DateTime]::MinValue
-    if ($resp.scope) { $script:GoogleGrantedScopes = @(([string] $resp.scope) -split '\s+') }
+        # 取り直したので、前のアクセストークンの残りは捨てる。
+        # これが効くのはこのプロセス (カンバン) だけ。ワーカーや収集は別プロセスなので、
+        # Get-GmailAccessToken が保存済みのリフレッシュトークンの変化を見て取り直す。
+        Reset-ServiceAccountCache -Service 'google'
+        if ($resp.scope) { $script:GoogleGrantedScopes = @(([string] $resp.scope) -split '\s+') }
 
-    $check = Test-SetupConnection -Key 'google'
-    if (-not $check.ok) { return [pscustomobject]@{ ok = $false; error = $check.error } }
-    Set-SetupAccount -Key 'google' -Account $check.account
+        $check = Test-SetupConnection -Key 'google'
+        if (-not $check.ok) { return [pscustomobject]@{ ok = $false; error = $check.error } }
+        $dup = Get-SetupDuplicateNote -Key 'google' -AccountId $acctId -Account $check.account
+        if ($dup) {
+            [void] (Clear-SetupCredential -Key 'google' -AccountId $acctId)
+            return [pscustomobject]@{ ok = $false; error = $dup }
+        }
+        Set-SetupAccount -Key 'google' -Account $check.account
 
-    $note = ''
-    if ($script:GoogleGrantedScopes -and
-        ($script:GoogleGrantedScopes -notcontains 'https://www.googleapis.com/auth/calendar.events')) {
-        $note = 'カレンダーの出欠は返せません (同意画面でカレンダーの権限が付きませんでした)。'
+        $note = ''
+        if ($script:GoogleGrantedScopes -and
+            ($script:GoogleGrantedScopes -notcontains 'https://www.googleapis.com/auth/calendar.events')) {
+            $note = 'カレンダーの出欠は返せません (同意画面でカレンダーの権限が付きませんでした)。'
+        }
+        return [pscustomobject]@{ ok = $true; account = $check.account; note = $note; accountId = $acctId }
     }
-    return [pscustomobject]@{ ok = $true; account = $check.account; note = $note }
+    finally {
+        [void] (Use-ServiceAccount -Service 'google' -Id $prevAccount)
+    }
 }
 
 # ---------------------------------------------------------------- デバイスコード (Microsoft)
@@ -955,6 +1204,10 @@ function Complete-GoogleAuth {
 # そのかわり「画面にコードを出して、済んだか聞きに行く」形になる。
 # カンバンは1本のループで要求を捌くので、**待つのはブラウザ側の仕事**にする。
 # サーバ側で待つと画面ごと固まる。
+
+# コードを出したときに「どの枠に入れるつもりか」。
+# デバイスコードは発行と確認が別の要求になるので、その間だけここで覚えておく。
+$script:PendingSetupDeviceAccount = $null
 
 function Start-SetupDeviceCode {
     <#
@@ -965,7 +1218,8 @@ function Start-SetupDeviceCode {
     #>
     param(
         [Parameter(Mandatory)] [string] $Key,
-        [Parameter(Mandatory)] [hashtable] $Values
+        [Parameter(Mandatory)] [hashtable] $Values,
+        [string] $AccountId
     )
     $svc = Get-SetupService $Key
     if (-not $svc -or $svc.flow -ne 'device') {
@@ -974,11 +1228,23 @@ function Start-SetupDeviceCode {
     if (-not (Get-Command Start-GraphDeviceCode -ErrorAction SilentlyContinue)) {
         return [pscustomobject]@{ ok = $false; error = 'Microsoft 連携が読み込まれていません。' }
     }
-    # 入力が空でも、配る人が用意したアプリ登録があればそれで進む。
-    $c = Get-MicrosoftClientCredential -ClientId ([string] $Values['clientId']) `
-            -TenantId ([string] $Values['tenantId']) -ClientSecret ([string] $Values['clientSecret'])
-    if (-not $c.clientId) { return [pscustomobject]@{ ok = $false; error = 'アプリケーション (クライアント) ID を入力してください。' } }
-    return Start-GraphDeviceCode -ClientId $c.clientId -TenantId $c.tenantId -ClientSecret $c.clientSecret
+    if (-not $AccountId) { $AccountId = Get-PrimaryAccountId }
+    # 発行の時点で切り替えておく。アプリ登録は入力 → そのアカウントの保管庫 →
+    # 配布設定の順に探すので、ここが1人目のままだと**別の枠の登録**で発行してしまう。
+    $prevAccount = Get-CurrentAccountId $svc.key
+    [void] (Use-ServiceAccount -Service $svc.key -Id $AccountId)
+    try {
+        # 入力が空でも、配る人が用意したアプリ登録があればそれで進む。
+        $c = Get-MicrosoftClientCredential -ClientId ([string] $Values['clientId']) `
+                -TenantId ([string] $Values['tenantId']) -ClientSecret ([string] $Values['clientSecret'])
+        if (-not $c.clientId) { return [pscustomobject]@{ ok = $false; error = 'アプリケーション (クライアント) ID を入力してください。' } }
+        $r = Start-GraphDeviceCode -ClientId $c.clientId -TenantId $c.tenantId -ClientSecret $c.clientSecret
+        if ($r.ok) { $script:PendingSetupDeviceAccount = @{ service = $svc.key; accountId = $AccountId } }
+        return $r
+    }
+    finally {
+        [void] (Use-ServiceAccount -Service $svc.key -Id $prevAccount)
+    }
 }
 
 function Get-MicrosoftClientCredential {
@@ -1028,17 +1294,36 @@ function Test-SetupDeviceCode {
         return [pscustomobject]@{ state = 'error'; error = 'Microsoft 連携が読み込まれていません。'; account = ''; note = '' }
     }
 
-    $r = Test-GraphDeviceCode
-    if ($r.state -ne 'ok') {
-        return [pscustomobject]@{ state = $r.state; error = [string] $r.error; account = ''; note = '' }
+    # コードを出したときの枠に入れる。Test-GraphDeviceCode は保存まで行うので、
+    # ここで切り替えていないと**別のアカウントの資格情報を上書きする。**
+    $acctId = Get-PrimaryAccountId
+    if ($script:PendingSetupDeviceAccount -and $script:PendingSetupDeviceAccount.service -eq $svc.key) {
+        $acctId = [string] $script:PendingSetupDeviceAccount.accountId
     }
+    $prevAccount = Get-CurrentAccountId $svc.key
+    [void] (Use-ServiceAccount -Service $svc.key -Id $acctId)
+    try {
+        $r = Test-GraphDeviceCode
+        if ($r.state -ne 'ok') {
+            return [pscustomobject]@{ state = $r.state; error = [string] $r.error; account = ''; note = ''; accountId = $acctId }
+        }
+        $script:PendingSetupDeviceAccount = $null
 
-    # 保存できていても、実際に叩けるとは限らない (スコープが付かなかった等)。
-    # 貼るだけのサービスと同じく、ここで一度確かめてから「接続済み」と言う。
-    $check = Test-SetupConnection -Key $svc.key
-    if (-not $check.ok) {
-        return [pscustomobject]@{ state = 'error'; error = $check.error; account = ''; note = '' }
+        # 保存できていても、実際に叩けるとは限らない (スコープが付かなかった等)。
+        # 貼るだけのサービスと同じく、ここで一度確かめてから「接続済み」と言う。
+        $check = Test-SetupConnection -Key $svc.key
+        if (-not $check.ok) {
+            return [pscustomobject]@{ state = 'error'; error = $check.error; account = ''; note = ''; accountId = $acctId }
+        }
+        $dup = Get-SetupDuplicateNote -Key $svc.key -AccountId $acctId -Account $check.account
+        if ($dup) {
+            [void] (Clear-SetupCredential -Key $svc.key -AccountId $acctId)
+            return [pscustomobject]@{ state = 'error'; error = $dup; account = ''; note = ''; accountId = $acctId }
+        }
+        Set-SetupAccount -Key $svc.key -Account $check.account
+        return [pscustomobject]@{ state = 'ok'; error = ''; account = $check.account; note = [string] $check.note; accountId = $acctId }
     }
-    Set-SetupAccount -Key $svc.key -Account $check.account
-    return [pscustomobject]@{ state = 'ok'; error = ''; account = $check.account; note = [string] $check.note }
+    finally {
+        [void] (Use-ServiceAccount -Service $svc.key -Id $prevAccount)
+    }
 }

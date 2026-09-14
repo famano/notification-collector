@@ -250,6 +250,34 @@ function Get-EventLinkMap {
     return $map
 }
 
+# カードの出自のアカウント。**複数繋いでいるときだけ**値が入る。
+#
+# 一つの連携先に複数のアカウントを繋げるようにしたので、カードだけを見て
+# 「どちらに届いたものか」が分からないと、返信の名義も、自分宛だったかの判断も
+# 画面の上では決められなくなる。1つしか繋いでいない人には何も出さない。
+function Get-EventAccountMap {
+    param($Conn)
+    $map = @{}
+    if (-not $script:Connectors) { return $map }
+    if (-not (Get-Command Get-AccountDisplayName -ErrorAction SilentlyContinue)) { return $map }
+    # 表示名は保管庫を読むので、同じアカウントで何度も引かない。
+    $cache = @{}
+    foreach ($r in $Conn.Query(
+        'SELECT t.id AS task_id, e.source, e.account_id
+           FROM tasks t JOIN events e ON e.id = t.event_id')) {
+        $svc = Get-AccountServiceForSource ([string] $r['source'])
+        if (-not $svc) { continue }
+        $id = [string] $r['account_id']
+        if (-not $id) { $id = Get-PrimaryAccountId }
+        $k = "$svc|$id"
+        if (-not $cache.ContainsKey($k)) {
+            $cache[$k] = [string] (Get-AccountDisplayName -Service $svc -Id $id)
+        }
+        if ($cache[$k]) { $map[[string] $r['task_id']] = $cache[$k] }
+    }
+    return $map
+}
+
 # ---------------------------------------------------------------- カードの出口
 #
 # カードは「何をもって完了とするか」で2種類しかない。
@@ -264,6 +292,12 @@ function Get-TaskOutlet {
 
     $none = [pscustomobject]@{ kind = 'none'; label = ''; to = ''; subject = '' }
     if (-not $Event -or -not $script:Connectors) { return $none }
+
+    # 宛先を引くのに外を叩く (チャンネル名・部屋名・チャット名)。
+    # **どのアカウントで叩くかは、このカードの出自で決まる。**
+    # 束縛しないと、繋いだうちのどれかで引くことになり、読めなければ宛先が
+    # 消え、読めてしまえば別のワークスペースの名前が付く。
+    [void] (Use-EventAccount -Evt $Event)
 
     if (([string] $Event['source']) -eq 'gmail' -and (Test-GmailConfigured)) {
         $raw = $null
@@ -444,7 +478,7 @@ function Get-TaskWorkspaceDir {
 }
 
 function ConvertTo-CardObject {
-    param($Row, $Counts, $Links)
+    param($Row, $Counts, $Links, $Accounts)
     $o = ConvertTo-PlainObject $Row
     $n = 0
     $key = [string] $Row['id']
@@ -459,6 +493,10 @@ function ConvertTo-CardObject {
     # 差し替えるために使う (端末に戻る指示を表に出さない)。
     Add-Member -InputObject $o -NotePropertyName 'setup_ready' `
         -NotePropertyValue ([bool] (Get-CardSetupService $Row)) -Force
+    # どのアカウントに届いたものか。1つしか繋いでいなければ空のまま。
+    $acct = $null
+    if ($Accounts -and $Accounts.ContainsKey($key)) { $acct = $Accounts[$key] }
+    Add-Member -InputObject $o -NotePropertyName 'source_account' -NotePropertyValue $acct -Force
     return $o
 }
 
@@ -498,6 +536,7 @@ function Get-BoardPayload {
 
     $counts = Get-ArtifactCounts $Conn
     $links  = Get-EventLinkMap $Conn
+    $accts  = Get-EventAccountMap $Conn
 
     if ($Archived) {
         $rows = @(Get-Tasks -Conn $Conn -IncludeArchived | Where-Object { $_['archived_at'] })
@@ -505,7 +544,7 @@ function Get-BoardPayload {
             rev     = (Get-BoardRevision -Conn $Conn)
             columns = @([pscustomobject]@{
                 key   = 'archived'; label = 'アーカイブ済み'
-                tasks = @($rows | ForEach-Object { ConvertTo-CardObject $_ $counts $links })
+                tasks = @($rows | ForEach-Object { ConvertTo-CardObject $_ $counts $links $accts })
             })
             worker  = (Get-WorkerPayload $Conn)
             collector = (Get-CollectorPayload $Conn)
@@ -514,7 +553,7 @@ function Get-BoardPayload {
 
     $all = @(Get-Tasks -Conn $Conn)
     $cols = foreach ($c in $Columns) {
-        $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-CardObject $_ $counts $links })
+        $items = @($all | Where-Object { $_['board_column'] -eq $c.key } | ForEach-Object { ConvertTo-CardObject $_ $counts $links $accts })
         [pscustomobject]@{ key = $c.key; label = $c.label; tasks = $items }
     }
     return [pscustomobject]@{
@@ -556,6 +595,17 @@ function Get-WorkerPayload {
         currentTaskId = $w['current_task_id']
         staleSeconds  = $age
     }
+}
+
+# 要求の本文で指定されたアカウント。省略されたら1人目。
+#
+# 画面は必ず付けて送ってくるが、古い画面や手で叩かれたときに落ちないよう、
+# 無ければ1人目として扱う (今までの1アカウント構成と同じ挙動になる)。
+function Get-RequestAccountId {
+    param($Body)
+    if ($Body -and $Body.PSObject.Properties['account'] -and $Body.account) { return [string] $Body.account }
+    if (Get-Command Get-PrimaryAccountId -ErrorAction SilentlyContinue) { return (Get-PrimaryAccountId) }
+    return '1'
 }
 
 # ---------------------------------------------------------------- routing
@@ -612,6 +662,74 @@ function Invoke-Route {
         return
     }
 
+    # アカウントの出し入れ。
+    #
+    # 一つの連携先に複数のアカウントがあることがある (仕事用と個人用の Gmail、
+    # 二つのワークスペースの Slack)。枠を先に作ってから、いつもの設定経路で
+    # その枠に繋ぐ ―― 入口を増やさないので、画面もここから先は今までと同じ。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/accounts$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+        $b = Read-JsonBody $Context
+        $label = if ($b -and $b.PSObject.Properties['label']) { [string] $b.label } else { '' }
+        try { $new = Add-SetupAccount -Key $svc.key -Label $label }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400; return }
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true; account = $new.id
+            service = @(Get-SetupStatusList -Conn $Conn | Where-Object { $_.key -eq $svc.key })[0]
+        })
+        return
+    }
+
+    # 資格情報だけ消す (枠は残る)。「もう使わない」はこちら。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/accounts/([0-9]+)/disconnect$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+        $acctId = $Matches[2]
+        try { [void] (Clear-SetupCredential -Key $svc.key -AccountId $acctId) }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400; return }
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true
+            service = @(Get-SetupStatusList -Conn $Conn | Where-Object { $_.key -eq $svc.key })[0]
+        })
+        return
+    }
+
+    # 枠ごと外す。資格情報も一緒に消える。最後の1つは外せない。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/accounts/([0-9]+)/remove$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+        $acctId = $Matches[2]
+        try { [void] (Remove-SetupAccount -Key $svc.key -AccountId $acctId) }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400; return }
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true
+            service = @(Get-SetupStatusList -Conn $Conn | Where-Object { $_.key -eq $svc.key })[0]
+        })
+        return
+    }
+
+    # 呼び名を付け替える。「仕事」「個人」が付いていないと、カードの出自を見ても
+    # どちらのことか分からない (メールアドレスだけでは見分けにくい)。
+    if ($path -match '^/api/setup/([a-z0-9.\-]+)/accounts/([0-9]+)/label$' -and $method -eq 'POST') {
+        if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }
+        $svc = Get-SetupService $Matches[1]
+        if (-not $svc) { Write-JsonResponse $Context @{ ok = $false; error = '知らないサービスです' } 400; return }
+        $acctId = $Matches[2]
+        $b = Read-JsonBody $Context
+        $label = if ($b -and $b.PSObject.Properties['label']) { [string] $b.label } else { '' }
+        try { [void] (Rename-SetupAccount -Key $svc.key -AccountId $acctId -Label $label) }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400; return }
+        Write-JsonResponse $Context ([pscustomobject]@{
+            ok = $true
+            service = @(Get-SetupStatusList -Conn $Conn | Where-Object { $_.key -eq $svc.key })[0]
+        })
+        return
+    }
+
     # 貼るだけのサービス (GitHub / Chatwork など)。保存して疎通を確認し、
     # 止まっていたカードを要対応に戻すところまでを1回で行う。
     if ($path -match '^/api/setup/([a-z0-9.\-]+)$' -and $method -eq 'POST') {
@@ -626,7 +744,7 @@ function Invoke-Route {
             foreach ($f in $svc.fields) { $values[$f.name] = [string] $b.values.($f.name) }
         }
 
-        $r = Save-SetupCredential -Key $svc.key -Values $values
+        $r = Save-SetupCredential -Key $svc.key -Values $values -AccountId (Get-RequestAccountId $b)
         if (-not $r.ok) { Write-JsonResponse $Context @{ ok = $false; error = $r.error } 400; return }
 
         $done = Invoke-SetupCompletion -Conn $Conn -Service $svc.key -Account $r.account
@@ -657,7 +775,8 @@ function Invoke-Route {
         # 戻り先は「いま開いているカンバン」。127.0.0.1 で組み立てる
         # (Google のデスクトップ クライアントはループバックを任意のポートで許す)。
         $redirect = "http://127.0.0.1:$script:BoardPort/oauth/google/callback"
-        $req = Get-GoogleAuthRequest -ClientId $cid -ClientSecret $sec -RedirectUri $redirect
+        $req = Get-GoogleAuthRequest -ClientId $cid -ClientSecret $sec -RedirectUri $redirect `
+                    -AccountId (Get-RequestAccountId $b)
         Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; url = $req.url; redirectUri = $redirect })
         return
     }
@@ -685,7 +804,8 @@ function Invoke-Route {
         }
         try {
             $r = Get-SlackAuthRequest -ClientId $given.clientId -ClientSecret $given.clientSecret `
-                    -RedirectUri $given.redirectUri -BoardPort $script:BoardPort
+                    -RedirectUri $given.redirectUri -BoardPort $script:BoardPort `
+                    -AccountId (Get-RequestAccountId $b)
         }
         catch {
             Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 400
@@ -755,7 +875,7 @@ function Invoke-Route {
         if ($b -and $b.values) {
             foreach ($f in $svc.fields) { $values[$f.name] = [string] $b.values.($f.name) }
         }
-        $r = Start-SetupDeviceCode -Key $svc.key -Values $values
+        $r = Start-SetupDeviceCode -Key $svc.key -Values $values -AccountId (Get-RequestAccountId $b)
         if (-not $r.ok) { Write-JsonResponse $Context @{ ok = $false; error = $r.error } 400; return }
         Write-JsonResponse $Context ([pscustomobject]@{
             ok = $true; userCode = $r.userCode; verificationUri = $r.verificationUri
@@ -967,6 +1087,18 @@ function Invoke-Route {
             # カードに出ていた1手が開いた瞬間に消える。
             $taskObj = ConvertTo-PlainObject $d.task
             Add-HumanStepObject -Row $d.task -Object $taskObj
+            # 一覧と同じく「どのアカウントに届いたか」。複数繋いでいるときだけ入る。
+            $acctName = $null
+            if ($script:Connectors -and $d.event -and (Get-Command Get-AccountDisplayName -ErrorAction SilentlyContinue)) {
+                $svcOfCard = Get-AccountServiceForSource ([string] $d.event['source'])
+                if ($svcOfCard) {
+                    $aid = [string] $d.event['account_id']
+                    if (-not $aid) { $aid = Get-PrimaryAccountId }
+                    $acctName = [string] (Get-AccountDisplayName -Service $svcOfCard -Id $aid)
+                    if (-not $acctName) { $acctName = $null }
+                }
+            }
+            Add-Member -InputObject $taskObj -NotePropertyName 'source_account' -NotePropertyValue $acctName -Force
             Write-JsonResponse $Context ([pscustomobject]@{
                 task     = $taskObj
                 # 設定カードなら入力欄一式。画面はこれを見て設定フォームを出す。
@@ -1182,6 +1314,10 @@ function Invoke-Route {
 
                 $d = Get-TaskDetail -Conn $Conn -TaskId $taskId
                 if (-not $d) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
+                # 送るのは「このカードが届いたアカウント」の名義で。
+                # Get-TaskOutlet の中でも束縛しているが、送信は取り消せないので、
+                # 送る側でも自分で固定する (呼ぶ順を変えた誰かに壊させない)。
+                if ($script:Connectors) { [void] (Use-EventAccount -Evt $d.event) }
                 $outlet = Get-TaskOutlet $d.event
                 if ($outlet.kind -eq 'none') {
                     Write-JsonResponse $Context @{ error = 'このカードには送り先がありません' } 400; return
@@ -1351,6 +1487,9 @@ try {
         }
         finally {
             try { $ctx.Response.OutputStream.Close() } catch { }
+            # カードを1枚見るために切り替えたアカウントを、次の要求に持ち越さない。
+            # 持ち越すと、無関係な要求がそのカードの相手の資格情報で動く。
+            if ($script:Connectors) { try { Reset-AccountSelection } catch { } }
         }
     }
 }

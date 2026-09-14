@@ -488,3 +488,17 @@ function Send-SlackMessage {
     } catch { }
     return [pscustomobject]@{ ts = $r.ts; channel = $r.channel; permalink = $permalink }
 }
+
+
+# ---------------------------------------------------------------- アカウントの切り替え
+#
+# 一つのワークスペースぶんの控えを、別のワークスペースに持ち越さないこと。
+# ユーザー名もチャンネル名も ID も**ワークスペースごとに別物**なので、
+# 残したまま切り替えると、別のワークスペースの名前で別の会話を読むことになる。
+function Reset-SlackCache {
+    $script:SlackUserCache    = @{}
+    $script:SlackChannelCache = @{}
+    $script:SlackSelfId       = $null
+    $script:SlackTeamId       = $null
+}
+Register-AccountReset -Service 'slack' -Handler { Reset-SlackCache }
