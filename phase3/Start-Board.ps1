@@ -583,7 +583,7 @@ function Invoke-Route {
         return
     }
 
-    # 貼るだけのサービス (GitHub / Slack)。保存して疎通を確認し、
+    # 貼るだけのサービス (GitHub / Chatwork など)。保存して疎通を確認し、
     # 止まっていたカードを要対応に戻すところまでを1回で行う。
     if ($path -match '^/api/setup/([a-z0-9.\-]+)$' -and $method -eq 'POST') {
         if (-not $script:Connectors) { Write-JsonResponse $Context @{ ok = $false; error = '連携を読み込めていません' } 500; return }

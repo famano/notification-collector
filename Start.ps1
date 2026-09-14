@@ -197,6 +197,9 @@ try {
     . "$PSScriptRoot\phase5\lib\GraphConnector.ps1"
     . "$PSScriptRoot\phase5\lib\ChatworkConnector.ps1"
     . "$PSScriptRoot\phase5\lib\BacklogConnector.ps1"
+    # 古い構成 (Bot 名義で投稿していた頃) の名残を捨てる。読まないものを
+    # 保管庫に残すと、ワークスペース共有の鍵が置かれたままになる。
+    try { [void] (Remove-SlackBotToken) } catch { }
     $slackOn  = Test-SlackConfigured
     $gmailOn  = Test-GmailConfigured
     $githubOn = [bool] (Get-Secret -Name 'github.token')

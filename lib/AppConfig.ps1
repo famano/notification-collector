@@ -135,8 +135,9 @@ $script:AppConfigSecretMap = [ordered]@{
     'google.clientSecret' = 'gmail.clientSecret'
     'slack.clientId'      = 'slack.clientId'
     'slack.clientSecret'  = 'slack.clientSecret'
-    # 貼る方式で配っていた頃の名残。Bot 名義で投稿したい構成では今も使える。
-    'slack.botToken'      = 'slack.botToken'
+    # 貼る方式で配っていた頃の名残。同意画面を通せない事情があるときの逃げ道。
+    # Bot トークン (slack.botToken) はここに無い ―― もう読まないので、
+    # 書いてあっても取り込まれない。
     'slack.userToken'     = 'slack.userToken'
     'github.token'        = 'github.token'
 }

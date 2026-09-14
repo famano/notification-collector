@@ -98,8 +98,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\phase2\Invoke-Triage.ps1
 | `thread` | **すでにカードがあるスレッドへの新しい返信** ＝ 会話の続き |
 
 `mention` の判定には自分のユーザーIDが要る。同意画面を通ると `authed_user.id` が
-そのまま本人なので、繋いだ時点で確定する（Bot Token だけの構成では `auth.test` が
-Bot を返すため、`Connect-Service.ps1 -Service slack` がメールアドレスや表示名から引く）。
+そのまま本人なので、繋いだ時点で確定する（トークンを貼る場合も `auth.test` が本人を返す）。
+名前から「自分」を探す経路は Bot Token 時代の回避策だったので、もう持っていない。
 
 掃き寄せたメッセージは通知から来たものと同じ形の `slack://` リンクを持たせてある。
 そのため次の補完段がそのまま動き、スレッド全文も permalink も同じ経路で埋まる。
@@ -123,9 +123,10 @@ client secret を持つ手元のカンバンでしか行えない。**
 求めるのは User Token Scopes だけで、`scope`（Bot 用）は空で投げる。
 ワークスペースに Bot を増やさないためで、結果として**チャンネルへの招待も要らない。**
 
-### Bot Token と User Token
+### トークンは本人のもの1本 (User Token)
 
-**読み取りは User Token (`xoxp-`) があればそちらを優先する。** 理由は見える範囲が違うため:
+**読むのも投稿するのも User Token (`xoxp-`) である。Bot Token は使わない。**
+読む側の理由は見える範囲が違うため:
 
 | | Bot Token (`xoxb-`) | User Token (`xoxp-`) |
 |---|---|---|
@@ -133,10 +134,18 @@ client secret を持つ手元のカンバンでしか行えない。**
 | DM | Bot 自身宛のものだけ | **自分の DM が読める** |
 
 つまり Bot Token だけの構成では、**夜のあいだに来た DM は取りこぼしたままになる。**
-このアプリが要るのは「本人に届いたもの」なので、**既定は User Token だけ**にしてある。
+このアプリが要るのは「本人に届いたもの」なので、ここは本人のトークンでしか成り立たない。
 
-Bot Token は任意。入れると投稿だけが Bot 名義になる（読み取りは User Token を優先）。
-端末から足す: `.\phase5\Connect-Service.ps1 -Service slack`
+書く側の理由は名義である。**返信は会話の続きなので、本人名義で出なければ相手に通じない。**
+Bot 名義だと、相手からは「誰かのアプリが代わりに喋っている」ように見える ――
+相手はスレッドの相手に返事をしているつもりなので、これは読み手の側の問題になる。
+
+読み書きが同じトークンなので、`Get-SlackToken` 1つで足りる。
+古い構成で保管庫に入った `slack.botToken` は起動時に削除する
+（読まない鍵を、しかもワークスペース共有の鍵を、残しておく理由がない）。
+
+通常はカンバンの「接続」から同意画面を通す。中継ページを用意できない場合の逃げ道として
+`.\phase5\Connect-Service.ps1 -Service slack` で `xoxp-` を貼ることもできる。
 
 ### 補完
 
@@ -152,13 +161,12 @@ Bot Token は任意。入れると投稿だけが Bot 名義になる（読み�
 投稿もできる。ワーカーに `send_slack_message` ツールが増え、`chat.postMessage` で
 **元のスレッドへの返信として**投稿する。チャンネルと `thread_ts` は通知のリンクから
 ワーカーが束縛して渡すので、モデルは投稿先を指定できない。実行前に必ずカンバンで
-承認を取る。投稿名義は利用者本人ではなくこの Bot になる。
+承認を取る。**投稿は利用者本人の名義で出る。**
 
-必要な Bot Token Scopes は `Connect-Service.ps1 -Service slack` が案内する。
-投稿には `chat:write` が要る。**後から足した場合は再インストールしてトークンを
-取り直すこと。**古いトークンのままだと `missing_scope` で失敗する。
-**Bot は招待されたチャンネルしか読めない。** 通知は来るのに本文が取れない場合、
-たいていアプリがそのチャンネルに入っていない。
+必要な User Token Scopes は `Connect-Service.ps1 -Service slack` が案内する
+（同意画面を使う場合は `$script:SlackUserScopes` がそのまま要求される）。
+投稿には `chat:write` が要る。**後から足した場合は同意を取り直さないと有効にならない。**
+古いトークンのままだと `missing_scope` で失敗する。
 
 ## Gmail
 
@@ -449,10 +457,10 @@ Microsoft 365 について確認したこと（`tests\cases\Graph.Tests.ps1`。�
 - `POST /chats/{id}/messages` は汎用 HTTP から塞ぎ、**同じ URL の GET は通す**こと。
   ここをメソッドごとに見ないと、塞いだ瞬間にチャットの本文が取れなくなる
 
-**未検証:** Slack の `drafts.create` と `chat.postMessage` は実データで動かせていない。
-Slack の掃き寄せも、現在の Bot Token では Bot が入っているチャンネルが無いため
-**0 件でしか確認できていない**（メンション判定に使う自分のユーザーIDも未設定）。
-`Connect-Service.ps1 -Service slack` をもう一度流すのが最初の一歩になる。
+**未検証:** Slack の `drafts.create` と `chat.postMessage` は実データで動かせていない
+（投稿が本人名義で出ることも、実際のワークスペースでは未確認）。
+掃き寄せも Bot Token だった頃に **0 件でしか確認できていない**。
+カンバンの「接続」から同意画面を通し、自分のトークンで流し直すのが最初の一歩になる。
 
 Chatwork / Backlog について確認したこと（`tests\cases\ChatworkBacklog.Tests.ps1`）:
 
