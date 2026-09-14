@@ -54,18 +54,28 @@ console.anthropic.com にサインインし、Settings → API keys で
 会社で配られている場合は、配った人に聞いてください
 (配る人が config\app-config.json に入れておけば、この欄は空のままで繋がります)。
 
-組織 ID は任意です。動かすのには要りません。入れておくと、接続の確認のときに
-「貼ったキーがその組織のものか」を突き合わせ、違えば知らせます
-(個人の組織で作ったキーを貼ってしまい、請求先が違う、を見つけるためのものです)。
+組織 ID は任意です。動かすのには要りません。入れておくと2つのことができます。
+  ・接続の確認のときに「貼ったキーがその組織のものか」を突き合わせ、違えば知らせます
+    (個人の組織で作ったキーを貼ってしまい、請求先が違う、を見つけるためのものです)
+  ・URL に組織 ID が要る API を、ワーカーが自分で組み立てられるようになります
 console.anthropic.com の Settings → Organization で確認できます。
+
+管理 API キーも任意です。組織の利用状況のように、URL に組織 ID が要る口
+(/v1/organizations/...) は通常のキーでは通らず、これが要ります。
+Settings → Admin keys で発行できます (組織の管理者だけが作れます)。
+**これは組織の管理権限そのものなので、配布設定には書けません。** 入れるなら各自がここから。
 '@
-        secrets = @('anthropic.apiKey', 'anthropic.organizationId')
+        secrets = @('anthropic.apiKey', 'anthropic.organizationId', 'anthropic.adminApiKey')
         fields  = @(
             @{ name = 'apiKey'; label = 'API キー'; secret = $true; required = $true
-               placeholder = 'sk-ant-...' },
+               placeholder = 'sk-ant-...'; keepIfEmpty = $true
+               hint = '設定済みなら空欄のままでかまいません (下の欄だけを後から足せます)' },
             @{ name = 'organizationId'; label = '組織 ID'; secret = $false; required = $false
                placeholder = '00000000-0000-0000-0000-000000000000'
-               hint = '空欄でも動きます。入れると、キーがこの組織のものかを確認します' }
+               hint = '空欄でも動きます。入れると、キーがこの組織のものかを確認します' },
+            @{ name = 'adminApiKey'; label = '管理 API キー'; secret = $true; required = $false
+               placeholder = 'sk-ant-admin...'
+               hint = '空欄でも動きます。組織の利用状況など、管理 API を叩かせるときだけ要ります' }
         )
     },
     @{
@@ -514,10 +524,16 @@ function Save-SetupCredential {
     if ($given.Count -eq 0) {
         return [pscustomobject]@{ ok = $false; error = '入力が空です。' }
     }
+    # 必須の欄でも、keepIfEmpty が立っていて**すでに設定済みなら空欄で通す。**
+    # そうしないと、任意の欄 (組織 ID や管理 API キー) を後から足すたびに API キーを
+    # 貼り直すことになる ―― キーは発行時に一度しか表示されないので、
+    # それは実質「キーを作り直してください」と言うに等しい。
+    $already = (Test-SetupConfigured -Key $svc.key)
     foreach ($f in $svc.fields) {
-        if ($f.required -and -not [string] $Values[$f.name]) {
-            return [pscustomobject]@{ ok = $false; error = ("{0} を入力してください。" -f $f.label) }
-        }
+        if (-not $f.required) { continue }
+        if ([string] $Values[$f.name]) { continue }
+        if ($f.keepIfEmpty -and $already) { continue }
+        return [pscustomobject]@{ ok = $false; error = ("{0} を入力してください。" -f $f.label) }
     }
 
     $backup = @{}
@@ -526,10 +542,15 @@ function Save-SetupCredential {
     try {
         switch ($svc.key) {
             'anthropic' {
-                Set-Secret -Name 'anthropic.apiKey' -Value ([string] $Values['apiKey']).Trim()
-                # 空欄のときは触らない。キーだけ差し替えた人の組織 ID (配布時の値) を消さない。
+                # どの欄も「空欄なら触らない」。貼り直しを求めずに1欄だけ足せるようにする。
+                $key = ([string] $Values['apiKey']).Trim()
+                if ($key) { Set-Secret -Name 'anthropic.apiKey' -Value $key }
+                # キーだけ差し替えた人の組織 ID (配布時の値) を消さない。
                 $org = ([string] $Values['organizationId']).Trim()
                 if ($org) { Set-Secret -Name 'anthropic.organizationId' -Value $org }
+                # 管理 API キーも同じ。任意の欄なので、空欄で保存しても前の値は消えない。
+                $admin = ([string] $Values['adminApiKey']).Trim()
+                if ($admin) { Set-Secret -Name 'anthropic.adminApiKey' -Value $admin }
             }
             'github' { Set-Secret -Name 'github.token' -Value ([string] $Values['token']).Trim() }
             'chatwork' { Set-Secret -Name 'chatwork.token' -Value ([string] $Values['token']).Trim() }

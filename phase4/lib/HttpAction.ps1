@@ -20,6 +20,8 @@
 #   これで「狭すぎる専用ツール」と「何でもできてしまう生の HTTP」の間を取れる。
 
 . "$PSScriptRoot\..\..\phase5\lib\SecretStore.ps1"
+# Claude のキーと組織 ID は「どこから取るか」がすでに1箇所に集めてある。
+. "$PSScriptRoot\..\..\lib\ApiKey.ps1"
 
 # ホスト → 資格情報。サフィックス一致で引く。
 # ここに無いホストには認証情報を付けない (公開 API と素の Web ページは
@@ -75,6 +77,51 @@ $script:CredentialHosts = @(
         configured = 'Test-GraphConfigured'
         scheme   = 'Bearer'
         setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service microsoft)'
+    },
+    @{
+        # Claude 自身の API。組織の利用状況のように、URL に組織 ID が要る口 (管理 API) は
+        # **通常のキーでは通らない。** 同じホストでも道によって鍵が変わるので、
+        # path を書いた項目を先に置いて、そこだけ管理 API キーを使う。
+        service  = 'anthropic'
+        match    = @('api.anthropic.com')
+        path     = '^/v1/organizations(/|$)'
+        label    = 'Claude の管理 API キー'
+        dynamic  = 'Get-AnthropicAdminApiKey'
+        configured = 'Test-AnthropicAdminConfigured'
+        header   = 'x-api-key'
+        scheme   = ''
+        setupHint = 'カンバンの「接続」→ Claude の「管理 API キー」に入れてください ' +
+                    '(console.anthropic.com の Settings → Admin keys で、組織の管理者が発行します)'
+    },
+    @{
+        service  = 'anthropic'
+        match    = @('api.anthropic.com')
+        label    = 'Claude の API キー'
+        dynamic  = 'Get-AnthropicApiKey'
+        configured = 'Test-AnthropicConfigured'
+        header   = 'x-api-key'
+        scheme   = ''
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service anthropic)'
+    }
+)
+
+# Claude の API に付ける版 (anthropic-version)。
+$script:AnthropicApiVersion = '2023-06-01'
+
+# ワーカーが URL を埋める差し込み口。
+#
+# なぜ要るか: 組織 ID は秘密ではないが、**モデルは知りようがない。** 保管庫を読む口は
+# 無いし、読ませるつもりも無い。かといって「組織 ID が分からないので調べてください」で
+# カードが止まるのでは、URL に組織 ID が要る API は永久に叩けない。
+# そこで、モデルには書き方だけを教えて (`{organizationId}`)、値はワーカーが入れる。
+# 承認画面には**埋めたあとの URL** が出る (実際に飛ぶものを出す、という約束を崩さない)。
+$script:UrlPlaceholders = @(
+    @{
+        pattern   = '\{(organizationId|organization_id|org_id)\}'
+        resolve   = 'Get-AnthropicOrganizationId'
+        label     = 'Claude の組織 ID'
+        setupHint = 'カンバンの「接続」→ Claude の「組織 ID」に入れてください ' +
+                    '(console.anthropic.com の Settings → Organization で確認できます)'
     }
 )
 
@@ -153,16 +200,68 @@ function Get-UrlHost {
     try { return ([Uri] $Url).Host.ToLower() } catch { return '' }
 }
 
+function Get-UrlPath {
+    param([Parameter(Mandatory)] [string] $Url)
+    try { return ([Uri] $Url).AbsolutePath } catch { return '' }
+}
+
 function Get-HostCredentialSpec {
+    <#
+      .DESCRIPTION
+        path を書いた項目は、ホストに加えてその道に当たったときだけ使う
+        (同じホストで鍵が分かれる API 用)。先に書いたものが勝つので、
+        狭いほうを上に置くこと。
+    #>
     param([Parameter(Mandatory)] [string] $Url)
     $h = Get-UrlHost $Url
     if (-not $h) { return $null }
+    $p = Get-UrlPath $Url
     foreach ($spec in $script:CredentialHosts) {
+        if ($spec.path -and $p -notmatch $spec.path) { continue }
         foreach ($m in $spec.match) {
             if ($h -eq $m -or $h.EndsWith('.' + $m)) { return $spec }
         }
     }
     return $null
+}
+
+function Expand-RequestUrl {
+    <#
+      .SYNOPSIS
+        モデルが書いた URL の差し込み口 ({organizationId} など) をワーカーが埋める。
+      .DESCRIPTION
+        埋める値は秘密ではない。秘密をここで埋める形にはしないこと ――
+        URL に載った時点で承認画面と作業ログに残り、「トークンを URL に入れない」という
+        全体の約束が崩れる。
+      .OUTPUTS
+        url   … 埋めたあとの URL (差し込み口が無ければ元のまま)
+        error … 埋められなかった理由。空なら成功
+    #>
+    param([string] $Url)
+    $out = [pscustomobject]@{ url = [string] $Url; error = '' }
+    if (-not $Url) { return $out }
+    foreach ($ph in $script:UrlPlaceholders) {
+        if ($out.url -notmatch $ph.pattern) { continue }
+        $v = ''
+        if (Get-Command $ph.resolve -ErrorAction SilentlyContinue) {
+            try { $v = [string] (& $ph.resolve) } catch { $v = '' }
+        }
+        $v = $v.Trim()
+        if (-not $v) {
+            $out.error = ("{0}が設定されていないため、URL を組み立てられませんでした。`n{1}" -f $ph.label, $ph.setupHint) +
+                         "`n設定の問題なので、推測で調べ続けずに require_human_step を blocker='credential_missing' で呼んでください。"
+            return $out
+        }
+        # 保管されている値が壊れていると、URL の形そのものが変わる (別の道に飛ぶ)。
+        # 差し込み口は1つの区切りを埋めるためのものなので、そこを越える文字は入れない。
+        if ($v -match '[\s/?#&]') {
+            $out.error = ("{0}に URL で使えない文字が入っています ({1})。設定を見直してください。" -f $ph.label, $v)
+            return $out
+        }
+        # -replace の置換文字列では $ が後方参照になる。値に $ が混ざっても化けないよう $$ に直す。
+        $out.url = $out.url -replace $ph.pattern, $v.Replace('$', '$$')
+    }
+    return $out
 }
 
 function Get-CredentialStatus {
@@ -250,6 +349,9 @@ function Test-SecretLeak {
     param([string] $Text)
     if (-not $Text) { return $null }
     foreach ($name in @(Get-SecretNames)) {
+        # 秘密ではない識別子 (組織 ID、クライアント ID、Backlog のスペース名) は見ない。
+        # URL に載って当たり前の値で、ここで止めると正しい呼び出しが通らなくなる。
+        if (-not (Test-SecretConfidential -Name $name)) { continue }
         $v = Get-Secret -Name $name
         # 短い値は誤検知する (空文字や 'true' など)。鍵として意味のある長さだけ見る。
         if (-not $v -or $v.Length -lt 16) { continue }
@@ -283,6 +385,14 @@ function Invoke-HttpAction {
         [int] $TimeoutSec = 45,
         [int] $MaxChars = 20000
     )
+
+    # 差し込み口を先に埋める。以降の検査 (束縛された宛先か、漏洩が無いか) も、
+    # 資格情報の選び方も、**実際に飛ぶ URL** で行う。
+    $expanded = Expand-RequestUrl -Url $Url
+    if ($expanded.error) {
+        return [pscustomobject]@{ isError = $true; text = $expanded.error }
+    }
+    $Url = $expanded.url
 
     if (Test-BoundOnlyEndpoint -Url $Url -Method $Method) {
         return [pscustomobject]@{
@@ -332,6 +442,13 @@ function Invoke-HttpAction {
     }
     $cred = $credStatus.credential
     if ($cred) { $send[$credHeader] = $cred.value }
+
+    # Claude の API は版の指定が無いと 400 で返る。モデルに覚えさせる類のものではないので
+    # ワーカーが付ける (自分で指定していればそちらを尊重する)。
+    if ($spec -and $spec.service -eq 'anthropic' -and
+        -not ($send.Keys | Where-Object { $_ -ieq 'anthropic-version' })) {
+        $send['anthropic-version'] = $script:AnthropicApiVersion
+    }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $req = @{

@@ -39,6 +39,33 @@ function Get-AnthropicApiKey {
     return $null
 }
 
+function Get-AnthropicAdminApiKey {
+    <#
+      .SYNOPSIS
+        組織の管理 API (URL に組織 ID が要る口) 用のキー。無ければ $null。
+      .DESCRIPTION
+        通常のキー (sk-ant-api...) とは別物で、/v1/organizations/... はこちらでないと通らない。
+        判定にもワーカーの通常の作業にも要らないので、入っていなくても何も困らない。
+
+        **配布設定 (app-config.json) からは読まない。** これは組織の管理権限そのもので、
+        平文で同梱してよい種類のものではない。入れるなら各自が画面から入れる
+        (開発機のために環境変数だけは見る)。
+    #>
+    param([string] $SecretPath)
+    if ($env:ANTHROPIC_ADMIN_KEY) { return [string] $env:ANTHROPIC_ADMIN_KEY }
+    try {
+        $v = Get-Secret -Name 'anthropic.adminApiKey' -Path $SecretPath
+        if ($v) { return [string] $v }
+    }
+    catch { }
+    return $null
+}
+
+function Test-AnthropicAdminConfigured {
+    param([string] $SecretPath)
+    return [bool] (Get-AnthropicAdminApiKey -SecretPath $SecretPath)
+}
+
 function Get-AnthropicKeySource {
     <#
       .SYNOPSIS
@@ -59,11 +86,14 @@ function Test-AnthropicConfigured {
 function Get-AnthropicOrganizationId {
     <#
       .SYNOPSIS
-        想定している組織の ID。無ければ $null (任意項目)。
+        この組織の ID。無ければ $null (任意項目)。
       .DESCRIPTION
-        API の呼び出しには使わない ―― キーそのものが組織に紐づいているので、
-        判定もワーカーもこれ無しで動く。配った先で「別の組織のキーを貼った」
-        (個人の組織で作ったキーで、会社の請求に乗っていない) を見分けるために持つ。
+        通常の API 呼び出しには要らない ―― キーそのものが組織に紐づいているので、
+        判定もワーカーもこれ無しで動く。持つ理由は2つ。
+          1. 配った先で「別の組織のキーを貼った」(個人の組織で作ったキーで、
+             会社の請求に乗っていない) を接続の確認で見分ける
+          2. URL に組織 ID が要る口 (/v1/organizations/{id}/...) を
+             ワーカーが組み立てる (HttpAction.ps1 の Expand-RequestUrl)
         取得元は画面から入れた値 → 配布設定 の順。
     #>
     param([string] $SecretPath)
