@@ -136,6 +136,19 @@ Gmail も Outlook も Slack も Teams も Chatwork も Backlog も通知 DB も�
 - 承認画面には実際のリクエストが出るが、認証行は `Bearer <Google トークン>` と伏せる
 - リクエストに保管中のシークレットが混ざっていたら、承認に出す前に**止める**
 
+**止めるのは秘密だけ。** OAuth のクライアント ID、テナント ID、Backlog のスペース名は
+保管庫に入っているが秘密ではなく、URL に載って当たり前の値である。これらまで
+「シークレットが混ざっている」で止めると、**1文字も間違っていない呼び出しが通らない** ――
+実際、スペース名はホスト名そのものなので、Backlog へのリクエストは全部中止されていた。
+検査から外すのは `SecretStore.ps1` の `$NonSecretNames` に挙げたものだけで、
+知らない名前は秘密として扱う。
+
+Claude 自身の API も叩ける。版のヘッダ (`anthropic-version`) はワーカーが付ける。
+組織全体の口 (`/v1/organizations/...` 利用状況など) だけは**通常のキーでは通らない**ので、
+同じホストでも道を見て管理 API キー (任意設定) に切り替える。
+**URL に組織 ID は要らない** ―― `organizations` は固定の語で、どの組織を見るかは鍵が決める
+(組織 ID を URL に載せる口は Anthropic の API に1つも無い)。
+
 **人に届くメッセージの送信は汎用ツールから叩けない。**
 `chat.postMessage`、Gmail の send、Graph の `sendMail`、Chatwork の部屋への POST は
 資格情報を注入せず弾く。

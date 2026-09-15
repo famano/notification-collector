@@ -20,6 +20,8 @@
 #   これで「狭すぎる専用ツール」と「何でもできてしまう生の HTTP」の間を取れる。
 
 . "$PSScriptRoot\..\..\phase5\lib\SecretStore.ps1"
+# Claude のキー (通常・管理) は「どこから取るか」がすでに1箇所に集めてある。
+. "$PSScriptRoot\..\..\lib\ApiKey.ps1"
 
 # ホスト → 資格情報。サフィックス一致で引く。
 # ここに無いホストには認証情報を付けない (公開 API と素の Web ページは
@@ -75,8 +77,39 @@ $script:CredentialHosts = @(
         configured = 'Test-GraphConfigured'
         scheme   = 'Bearer'
         setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service microsoft)'
+    },
+    @{
+        # Claude 自身の API。組織全体の口 (利用状況など /v1/organizations/...) は
+        # **通常のキーでは通らない。** 同じホストでも道によって鍵が変わるので、
+        # path を書いた項目を先に置いて、そこだけ管理 API キーを使う。
+        #
+        # 組織 ID は要らない。この道の 'organizations' は固定の語で、
+        # **どの組織を見るかはキーが決める** (URL に組織 ID を載せる口は1つも無い)。
+        service  = 'anthropic'
+        match    = @('api.anthropic.com')
+        path     = '^/v1/organizations(/|$)'
+        label    = 'Claude の管理 API キー'
+        dynamic  = 'Get-AnthropicAdminApiKey'
+        configured = 'Test-AnthropicAdminConfigured'
+        header   = 'x-api-key'
+        scheme   = ''
+        setupHint = 'カンバンの「接続」→ Claude の「管理 API キー」に入れてください ' +
+                    '(console.anthropic.com の Settings → Admin keys で、組織の管理者が発行します)'
+    },
+    @{
+        service  = 'anthropic'
+        match    = @('api.anthropic.com')
+        label    = 'Claude の API キー'
+        dynamic  = 'Get-AnthropicApiKey'
+        configured = 'Test-AnthropicConfigured'
+        header   = 'x-api-key'
+        scheme   = ''
+        setupHint = 'カンバンの「接続」から設定できます (端末なら .\phase5\Connect-Service.ps1 -Service anthropic)'
     }
 )
+
+# Claude の API に付ける版 (anthropic-version)。
+$script:AnthropicApiVersion = '2023-06-01'
 
 function Get-ServiceKey {
     <#
@@ -153,11 +186,24 @@ function Get-UrlHost {
     try { return ([Uri] $Url).Host.ToLower() } catch { return '' }
 }
 
+function Get-UrlPath {
+    param([Parameter(Mandatory)] [string] $Url)
+    try { return ([Uri] $Url).AbsolutePath } catch { return '' }
+}
+
 function Get-HostCredentialSpec {
+    <#
+      .DESCRIPTION
+        path を書いた項目は、ホストに加えてその道に当たったときだけ使う
+        (同じホストで鍵が分かれる API 用)。先に書いたものが勝つので、
+        狭いほうを上に置くこと。
+    #>
     param([Parameter(Mandatory)] [string] $Url)
     $h = Get-UrlHost $Url
     if (-not $h) { return $null }
+    $p = Get-UrlPath $Url
     foreach ($spec in $script:CredentialHosts) {
+        if ($spec.path -and $p -notmatch $spec.path) { continue }
         foreach ($m in $spec.match) {
             if ($h -eq $m -or $h.EndsWith('.' + $m)) { return $spec }
         }
@@ -250,6 +296,9 @@ function Test-SecretLeak {
     param([string] $Text)
     if (-not $Text) { return $null }
     foreach ($name in @(Get-SecretNames)) {
+        # 秘密ではない識別子 (クライアント ID、テナント ID、Backlog のスペース名) は見ない。
+        # URL に載って当たり前の値で、ここで止めると正しい呼び出しが通らなくなる。
+        if (-not (Test-SecretConfidential -Name $name)) { continue }
         $v = Get-Secret -Name $name
         # 短い値は誤検知する (空文字や 'true' など)。鍵として意味のある長さだけ見る。
         if (-not $v -or $v.Length -lt 16) { continue }
@@ -332,6 +381,13 @@ function Invoke-HttpAction {
     }
     $cred = $credStatus.credential
     if ($cred) { $send[$credHeader] = $cred.value }
+
+    # Claude の API は版の指定が無いと 400 で返る。モデルに覚えさせる類のものではないので
+    # ワーカーが付ける (自分で指定していればそちらを尊重する)。
+    if ($spec -and $spec.service -eq 'anthropic' -and
+        -not ($send.Keys | Where-Object { $_ -ieq 'anthropic-version' })) {
+        $send['anthropic-version'] = $script:AnthropicApiVersion
+    }
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $req = @{

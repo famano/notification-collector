@@ -39,6 +39,34 @@ function Get-AnthropicApiKey {
     return $null
 }
 
+function Get-AnthropicAdminApiKey {
+    <#
+      .SYNOPSIS
+        組織の管理 API (/v1/organizations/...) 用のキー。無ければ $null。
+      .DESCRIPTION
+        通常のキー (sk-ant-api...) とは別物で、/v1/organizations/... はこちらでないと通らない。
+        どの組織を見るかは**このキー自身が決める** (URL にも本文にも組織 ID は要らない)。
+        判定にもワーカーの通常の作業にも要らないので、入っていなくても何も困らない。
+
+        **配布設定 (app-config.json) からは読まない。** これは組織の管理権限そのもので、
+        平文で同梱してよい種類のものではない。入れるなら各自が画面から入れる
+        (開発機のために環境変数だけは見る)。
+    #>
+    param([string] $SecretPath)
+    if ($env:ANTHROPIC_ADMIN_KEY) { return [string] $env:ANTHROPIC_ADMIN_KEY }
+    try {
+        $v = Get-Secret -Name 'anthropic.adminApiKey' -Path $SecretPath
+        if ($v) { return [string] $v }
+    }
+    catch { }
+    return $null
+}
+
+function Test-AnthropicAdminConfigured {
+    param([string] $SecretPath)
+    return [bool] (Get-AnthropicAdminApiKey -SecretPath $SecretPath)
+}
+
 function Get-AnthropicKeySource {
     <#
       .SYNOPSIS
@@ -56,42 +84,17 @@ function Test-AnthropicConfigured {
     return [bool] (Get-AnthropicApiKey -SecretPath $SecretPath)
 }
 
-function Get-AnthropicOrganizationId {
-    <#
-      .SYNOPSIS
-        想定している組織の ID。無ければ $null (任意項目)。
-      .DESCRIPTION
-        API の呼び出しには使わない ―― キーそのものが組織に紐づいているので、
-        判定もワーカーもこれ無しで動く。配った先で「別の組織のキーを貼った」
-        (個人の組織で作ったキーで、会社の請求に乗っていない) を見分けるために持つ。
-        取得元は画面から入れた値 → 配布設定 の順。
-    #>
-    param([string] $SecretPath)
-    try {
-        $v = Get-Secret -Name 'anthropic.organizationId' -Path $SecretPath
-        if ($v) { return ([string] $v).Trim() }
-    }
-    catch { }
-    $c = Get-AppConfigValue -Path 'anthropic.organizationId'
-    if ($c) { return [string] $c }
-    return $null
-}
-
-# 接続の確認で分かった組織と、想定の組織を突き合わせる。
+# 組織 ID は持たない。
 #
-# **食い違っても失敗にはしない。** 組織 ID は動かすのに要らない値なので、
-# ここで止めると「動くキーなのに保存できない」になる。代わりに言葉で知らせる。
-# 応答に組織が載っていなければ何も言わない (確かめられないことを食い違いと呼ばない)。
-function Get-AnthropicOrganizationNote {
-    param([string] $Expected, [string] $Actual)
-    $e = ([string] $Expected).Trim()
-    $a = ([string] $Actual).Trim()
-    if (-not $e -or -not $a) { return '' }
-    if ($e -eq $a) { return '' }
-    return ("このキーは組織 {0} のものです。設定されている組織 ID ({1}) と違います。" -f $a, $e) +
-           '判定とワーカーはこのまま動きますが、請求先が想定と違う可能性があります。'
-}
-
+# 以前は「接続の確認でキーの組織と突き合わせる」ために任意項目として入力・保存していたが、
+# 公式ドキュメントを当たると、**組織 ID を URL に載せる口は1つも無い。**
+#   - 管理 API     … /v1/organizations/users, /v1/organizations/cost_report など
+#   - 利用状況     … /v1/organizations/usage_report/messages
+#   - Claude Code  … /v1/organizations/usage_report/claude_code
+#   - セッション   … /v1/compliance/apps/sessions/local|remote/{session_id}
+# どれも「organizations」は固定の語で、**どの組織かはキーが決める。** 組織 ID を
+# 入れてもらう理由が残らないので、欄ごと畳んだ。欲しくなったら応答 (x-api-key に
+# 紐づく組織) から取れる。
 # 未設定のときに出す文言。端末でも画面でも同じ言い方をする。
 # 「環境変数を設定してください」と言い切らないこと ―― 配った先ではそれが最後の壁になる。
 function Get-AnthropicMissingMessage {

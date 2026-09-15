@@ -163,8 +163,13 @@ HTTP リクエストを送る。外部サービスの API を叩いて、実際�
 GET で調べるだけでなく、POST/PATCH/PUT/DELETE で操作できる。
 例: GitHub の招待を承諾する、カレンダーの出欠を返す、Issue を立てる。
 
-認証は指定しない。ワーカーが宛先ホストを見て自動で付ける (GitHub / Google / Slack)。
+認証は指定しない。ワーカーが宛先ホストを見て自動で付ける
+(GitHub / Google / Slack / Microsoft / Chatwork / Claude)。
 Authorization ヘッダを自分で書いても捨てられる。トークンを URL や本文に入れてはいけない。
+
+Claude 自身の API (api.anthropic.com) も叩ける。版のヘッダ (anthropic-version) は自動で付く。
+組織全体の口 (/v1/organizations/... 利用状況など) もそのまま書けばよい ――
+どの組織かはワーカーが付ける鍵が決めるので、URL に組織 ID は要らない。
 
 GET 以外は必ず利用者の承認を求める。承認画面には実際に飛ぶリクエストが全文出る。
 人に届くメッセージの送信 (Slack への投稿、メールの送信) はこのツールでは行えない。

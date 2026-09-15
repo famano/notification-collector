@@ -244,3 +244,43 @@ function Get-SecretNames {
     param([string] $Path)
     return @((Read-SecretStore -Path $Path).Keys | Sort-Object)
 }
+
+# 保管しているもののうち、**秘密ではない識別子。**
+#
+# ここに挙げるのは、隠しても何も守れない値である ―― OAuth のクライアント ID、
+# テナント ID、Backlog のスペース名。どれも URL やリクエストに載って当たり前のもので、
+# 相手に渡らなければ API が呼べない。保管庫に入っているのは
+# 「利用者に一度だけ入力させて覚えておく」ためであって、秘匿のためではない。
+#
+# 何のために区別するか:
+#   漏洩検査 (Test-SecretLeak) は「保管中の値がリクエストに混ざっていたら送らない」。
+#   識別子まで同じ扱いにすると、**何も間違っていない呼び出しが止まる。** 実際、
+#   Backlog のスペース名 (example.backlog.jp) はホスト名そのものなので、
+#   Backlog へのリクエストは全部「資格情報が含まれていた」として中止されていた。
+#   検査から外すのはここに挙げたものだけで、**知らない名前は秘密として扱う。**
+$script:NonSecretNames = @(
+    # もう保存しない値だが、以前の保管庫に残っていることがある (組織 ID)。
+    # 残っていても止める理由は無いので、外したままにしておく。
+    'anthropic.organizationId',
+    'gmail.clientId',
+    'slack.clientId', 'slack.selfUserId',
+    'ms.clientId', 'ms.tenantId', 'ms.selfUserId',
+    'chatwork.selfAccountId',
+    'backlog.space'
+)
+
+function Test-SecretConfidential {
+    <#
+      .SYNOPSIS
+        その名前で保管している値を、秘密として扱うべきか。
+      .DESCRIPTION
+        知らない名前は $true (秘密) を返す。新しい資格情報を足したときに
+        黙って検査の外に出ないようにするため、緩める側は必ず明示で書く。
+    #>
+    param([Parameter(Mandatory)] [string] $Name)
+    return (-not ($script:NonSecretNames -contains $Name))
+}
+
+function Get-NonSecretNames {
+    return @($script:NonSecretNames)
+}
