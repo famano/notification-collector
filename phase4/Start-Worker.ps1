@@ -161,12 +161,27 @@ function Invoke-WorkItem {
     # 取り直しも投稿先の解決も**繋いだうちのどれか**で行われる。
     # 1枚の処理に入る一番手前で固定し、あとの経路は何も意識しなくてよいようにする
     # (このアプリが他の箇所でもやっているのと同じ、指示ではなく構造で担保する形)。
+    $boundSvc = ''
+    $who = ''
     if ($evt -and (Get-Command Use-EventAccount -ErrorAction SilentlyContinue)) {
         $boundSvc = Use-EventAccount -Evt $evt
         if ($boundSvc -and (Get-Command Get-AccountDisplayName -ErrorAction SilentlyContinue)) {
             $who = Get-AccountDisplayName -Service $boundSvc -Id ([string] $evt['account_id'])
             if ($who) { Write-Step $id 'step' ("{0} の「{1}」として扱います" -f $boundSvc, $who) 'DarkCyan' }
         }
+    }
+
+    # このカードで「あなた」は誰か。名義は本文から推測させない。
+    #
+    # To: 他人 / Cc: 自分 で届いたメールで、ワーカーがその他人の名義で返信を
+    # 下書きしていた。スレッド全文だけを渡すと、本文の中で一番「返事をする人」に
+    # 見えるのは To: の人なので、そちらに寄るのが自然な読み方になってしまう。
+    # 誰の代わりに書いているかは繋いだアカウントから決まるので、ここで作って渡す。
+    # 立場 (宛先か Cc か) は出自を取り直したときにヘッダから足される。
+    $viewer = $null
+    if ($boundSvc) {
+        $viewer = New-Viewer -Who (Get-SelfAccountName -Service $boundSvc -Id ([string] $evt['account_id'])) `
+                    -Label $who -Role 'member' -Service $boundSvc
     }
 
     # Gmail 由来なら、返信をスレッドにぶら下げるための識別子を取り出しておく
@@ -376,6 +391,10 @@ function Invoke-WorkItem {
             else {
                 Write-Step $id 'step' ('元のやり取りは取り直せませんでした: ' + $sc.note) 'Yellow'
             }
+            # 立場 (宛先か Cc か) はヘッダを取り直したときにしか分からない。
+            # 取れたなら差し替える。取れなければアカウントだけの名義のままにする。
+            if ($sc.viewer) { $viewer = $sc.viewer }
+
             # 先に取ったぶんも証跡に残す。これを残さないと、
             # 人間送りのゲートが「まだ読んでいない」と誤判定する。
             Add-TaskAttempt -Conn $conn -TaskId $id -Tool 'open_source' `
@@ -392,12 +411,22 @@ function Invoke-WorkItem {
 
     if (Stop-IfCancelled $id) { return }
 
+    # 名義は作業ログにも出す。「誰として書いたか」は、あとから報告だけを見ても
+    # 分からない (文面には本人の名前しか出てこない)。
+    $viewerText = Get-ViewerBlock -Viewer $viewer
+    $viewerLine = Get-ViewerLine -Viewer $viewer
+    if ($viewerLine) { Write-Step $id 'step' ('このカードでのあなた: ' + $viewerLine) 'DarkCyan' }
+
     $workspace = Get-TaskWorkspace -Root $OutputRoot -TaskId $id
 
     # このカードで実際に外へ出したもの。送信はファイルとして残らないので、
     # 検証と報告のために別に控える。GetNewClosure() は変数を複製するが、
     # 参照型なら中身は共有されるので、クロージャからの追記が外にも見える。
     $sentItems = [System.Collections.ArrayList]::new()
+
+    # 承認画面に出す差出人。モデルの入力ではなくアカウントから決まるので、
+    # 「誰の名義で出るか」を利用者がそこで確かめられる。
+    $selfName = if ($viewer) { [string] $viewer.who } else { '' }
 
     Write-Step $id 'llm' '対応内容を検討しています…'
 
@@ -549,7 +578,8 @@ function Invoke-WorkItem {
         $risk = Get-ToolRisk -Name $toolName -ToolInput $toolInput -Workspace $workspace `
                     -SlackChannelName $slackChannelName -GmailThreadLabel $gmailThreadLabel `
                     -TeamsChatName $teamsChatName -OutlookThreadLabel $outlookThreadLabel `
-                    -ChatworkRoomName $chatworkRoomName -BacklogIssueKey $backlogIssueKey
+                    -ChatworkRoomName $chatworkRoomName -BacklogIssueKey $backlogIssueKey `
+                    -SelfName $selfName
         if ($risk.risky) {
             $decision = Wait-ToolApproval -TaskId $id -Tool $toolName -Risk $risk
             if ($decision -ne 'approved') {
@@ -619,7 +649,8 @@ function Invoke-WorkItem {
                         -HasBacklogTarget:([bool] $backlogIssueKey) -HasOutlet:$hasOutlet) `
             -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
             -RepairIssues $issues -Occurrence $occurrence -Dossier $dossierText `
-            -SourceText $sourceText -SourceNote $sourceNote -Memory $memoryText
+            -SourceText $sourceText -SourceNote $sourceNote `
+            -Memory $memoryText -Viewer $viewerText
 
         if ($res.aborted) { Stop-IfCancelled $id | Out-Null; return }
         if (Stop-IfCancelled $id) { return }
@@ -639,7 +670,8 @@ function Invoke-WorkItem {
         if ($humanStep) { $humanStepJson = ($humanStep | ConvertTo-Json -Depth 5) }
         $v = (Invoke-ClaudeVerify -Task $Task -Policy $policy -Artifacts $arts -Report $res.text `
                 -Instructions $instructions -Sent ([string[]] $sentItems.ToArray()) `
-                -Attempts (Get-AttemptSummary -Conn $conn -TaskId $id) -HumanStep $humanStepJson).result
+                -Attempts (Get-AttemptSummary -Conn $conn -TaskId $id) -HumanStep $humanStepJson `
+                -Viewer $viewerText).result
         $verdict = $v
 
         $high = @($v.issues | Where-Object { $_.severity -eq 'high' })
