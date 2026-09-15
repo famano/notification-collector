@@ -18,6 +18,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 |---|---|
 | `Syntax.Tests.ps1` | 全 `.ps1` が構文として通り、UTF-8 BOM 付きで保存されていること |
 | `Dossier.Tests.ps1` | 「同じ件か」を決める `subject_key` と、件をまたぐ台帳 |
+| `Memory.Tests.ps1` | 利用者について覚えること。どんな文面のカードにも渡ること、増え続けないこと |
 | `TaskStore.Tests.ps1` | 通知と同期の突き合わせ、楽観ロック、ワーカーへの受け渡し、削除、承認 |
 | `WorkTools.Tests.ps1` | 危険度の判定 (承認の要否) と人間送りのゲート |
 | `HttpAction.Tests.ps1` | 資格情報をホストから決めること、送信の口を汎用ツールから塞ぐこと |

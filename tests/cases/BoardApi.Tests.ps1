@@ -11,6 +11,7 @@
 # ポートを開けない環境では、黙って通さずに skip と出して飛ばす。
 
 . "$RepoRoot\phase2\lib\TaskStore.ps1"
+. "$RepoRoot\phase2\lib\Memory.ps1"
 
 # ---------------------------------------------------------------- 起動
 
@@ -496,6 +497,36 @@ Describe '外から叩かれたとき' {
         $r = Invoke-Board $board '/'
         Assert-Equal 200 $r.status
         Assert-Match '通知カンバン' $r.text
+    }
+}
+
+Describe '覚えていること' {
+
+    # 覚えたことは指示が無くても次から効く。間違って覚えたものを画面から
+    # 消せなければ、一度の言い間違いが延々と渡り続ける。
+
+    It '一覧が返る' {
+        $c = Open-TaskStore -Path $board.db
+        [void] (Add-MemoryNote -Conn $c -Kind 'preference' -Topic '請求書' -Note '請求書は送らずに下書きまででよい')
+        $c.Dispose()
+        $r = Invoke-Board $board '/api/memory'
+        Assert-Equal 200 $r.status
+        $hit = @($r.body.memories | Where-Object { $_.topic -eq '請求書' })
+        Assert-Equal 1 $hit.Count
+        Assert-Match '下書き' $hit[0].note
+        Assert-NotNull $hit[0].label
+    }
+
+    It '消せる' {
+        $r = Invoke-Board $board '/api/memory'
+        $id = @($r.body.memories | Where-Object { $_.topic -eq '請求書' })[0].id
+        Assert-Equal 200 (Invoke-Board $board ("/api/memory/{0}" -f $id) 'DELETE').status
+        $after = Invoke-Board $board '/api/memory'
+        Assert-Equal 0 (@($after.body.memories | Where-Object { $_.topic -eq '請求書' })).Count
+    }
+
+    It '無い記憶を消そうとしたら 404' {
+        Assert-Equal 404 (Invoke-Board $board '/api/memory/999999' 'DELETE').status
     }
 }
 
