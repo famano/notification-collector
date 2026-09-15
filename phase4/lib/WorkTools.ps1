@@ -568,8 +568,15 @@ function Get-ToolRisk {
         [string] $TeamsChatName,
         [string] $OutlookThreadLabel,
         [string] $ChatworkRoomName,
-        [string] $BacklogIssueKey
+        [string] $BacklogIssueKey,
+        # 誰の名義で出るか。モデルの入力ではなく、繋いだアカウントから決まる。
+        # 承認画面は「本人の発言として読まれるもの」を見せる場所なので、
+        # 差出人もそこに出す (名義を取り違えたまま通るのを、人の目でも止められる)。
+        [string] $SelfName
     )
+
+    # 「差出人: あなた (me@example.com)」の一行。名前が取れていなければ「あなた」だけ。
+    $selfLine = if ($SelfName) { ("あなた ({0})" -f $SelfName) } else { 'あなた' }
 
     switch ($Name) {
         'send_slack_message' {
@@ -580,7 +587,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Slack に投稿します: $where"
-                detail  = "投稿先: $where`n形式: $how`n名義: あなた自身 (Bot ではありません)`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。あなたの発言として相手に届きます。"
+                detail  = "投稿先: $where`n形式: $how`n名義: $selfLine (Bot ではありません)`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。あなたの発言として相手に届きます。"
             }
         }
         'send_gmail' {
@@ -589,7 +596,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "メールを送信します: $($ToolInput.subject)"
-                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。相手に届きます。"
+                detail  = "差出人: $selfLine`n宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。あなたの名義で相手に届きます。"
             }
         }
         'send_teams_message' {
@@ -598,7 +605,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Teams に投稿します: $where"
-                detail  = "投稿先: $where`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+                detail  = "投稿先: $where`n名義: $selfLine`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。あなたの発言として相手に届きます。"
             }
         }
         'send_chatwork_message' {
@@ -606,7 +613,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Chatwork に投稿します: $where"
-                detail  = "投稿先: $where`n形式: 元の発言への返信として`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。相手に届きます。"
+                detail  = "投稿先: $where`n名義: $selfLine`n形式: 元の発言への返信として`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。あなたの発言として相手に届きます。"
             }
         }
         'add_backlog_comment' {
@@ -614,7 +621,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Backlog の課題にコメントします: $where"
-                detail  = "投稿先: 課題 $where`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。課題の関係者に通知が飛びます。"
+                detail  = "投稿先: 課題 $where`n名義: $selfLine`n`n--- 本文 ---`n$([string] $ToolInput.text)`n`n※投稿すると取り消せません。あなたの名義で、課題の関係者に通知が飛びます。"
             }
         }
         'send_outlook_mail' {
@@ -623,7 +630,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Outlook からメールを送信します: $($ToolInput.subject)"
-                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。相手に届きます。"
+                detail  = "差出人: $selfLine`n宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n形式: $how`n`n--- 本文 ---`n$([string] $ToolInput.body)`n`n※送信すると取り消せません。あなたの名義で相手に届きます。"
             }
         }
         'create_outlook_draft' {
@@ -634,7 +641,7 @@ function Get-ToolRisk {
             return [pscustomobject]@{
                 risky   = $true
                 summary = "Outlook に下書きを作成します: $($ToolInput.subject)"
-                detail  = "宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n`n--- 本文 ---`n$preview`n`n※作成されるのは下書きだけで、送信はされません。"
+                detail  = "差出人: $selfLine`n宛先: $to`nCc: $($ToolInput.cc)`n件名: $($ToolInput.subject)`n`n--- 本文 ---`n$preview`n`n※作成されるのは下書きだけで、送信はされません。"
             }
         }
         'run_command' {

@@ -14,6 +14,8 @@
 # 一つの連携先に複数のアカウントが繋がっていることがある。どのトークンで取り直し、
 # どの名義で返すかは、カードの元イベントに残っている account_id が決める。
 . "$PSScriptRoot\..\..\phase5\lib\AccountStore.ps1"
+# 「このカードで、あなたは誰か」。名義を本文から推測させないための束縛。
+. "$PSScriptRoot\Viewer.ps1"
 
 $script:MaxSourceChars = 20000
 
@@ -182,9 +184,10 @@ function Get-SourceContext {
         カードの元イベントから、いま取れる限りの出自を取り直す。
       .OUTPUTS
         [pscustomobject]
-          ok / kind / text / attachments / identifiers / links / note
+          ok / kind / text / attachments / identifiers / links / note / viewer
         attachments: @{ id; name; mimeType; size } — fetch_attachment の id になる
         identifiers: モデルが http_request で叩くときに使う主キー類
+        viewer:      このカードでの「あなた」(名義と立場)。Viewer.ps1 を参照
     #>
     # AllowNull が無いと、すぐ下の「元の通知がありません」の枝に到達できない。
     # Mandatory だけでは $null が束縛エラーになるためで、書いてあるのに効かない
@@ -194,6 +197,7 @@ function Get-SourceContext {
 
     $empty = [pscustomobject]@{
         ok = $false; kind = 'none'; text = ''; attachments = @(); identifiers = @{}; links = @(); note = ''
+        viewer = $null
     }
     if (-not $Evt) {
         $empty.note = 'このカードには元の通知がありません (手で起票されたカードです)。'
@@ -201,7 +205,25 @@ function Get-SourceContext {
     }
     # 取り直しは必ずそのカードのアカウントで行う。呼び出し側が忘れても
     # ここで束縛されるようにしておく (忘れた場合の症状が「別の人のメールが載る」)。
-    [void] (Use-EventAccount -Evt $Evt)
+    $boundService = Use-EventAccount -Evt $Evt
+
+    # そのアカウントで「自分は誰か」。ここで一度だけ決めて、下の各経路が
+    # 立場 (宛先か Cc か) を足す。本文から名義を推測させないための材料で、
+    # 取り直せたかどうかとは無関係に必要になる。
+    $selfWho = ''
+    $selfLabel = ''
+    if ($boundService) {
+        $acctId = [string] $Evt['account_id']
+        $selfWho = Get-SelfAccountName -Service $boundService -Id $acctId
+        $acct = Get-ServiceAccount -Service $boundService -Id $acctId
+        if ($acct) { $selfLabel = [string] $acct.label }
+    }
+    # アカウントを持たない経路 (トースト通知・手起票) では名義の話にならないので $null。
+    $memberViewer = $null
+    if ($boundService) {
+        $memberViewer = New-Viewer -Who $selfWho -Label $selfLabel -Role 'member' -Service $boundService
+    }
+    $empty.viewer = $memberViewer
 
     $source = [string] $Evt['source']
     $app    = [string] $Evt['app']
@@ -253,12 +275,21 @@ function Get-SourceContext {
                 })
             }
         }
+        # 名義。どのメールボックスで見ているかに加えて、**このメールでの立場**を決める。
+        # ヘッダが引けなかったとき (スレッドだけ取れた等) は立場を付けない ――
+        # 「Cc のはず」と当て推量するくらいなら、分からないと言うほうが害が小さい。
+        $viewer = $memberViewer
+        if ($ids.ContainsKey('to') -or $ids.ContainsKey('cc')) {
+            $viewer = New-MailViewer -Who $selfWho -Label $selfLabel -Service $boundService `
+                        -From ([string] $ids['from']) -To ([string] $ids['to']) -Cc ([string] $ids['cc'])
+        }
         return [pscustomobject]@{
             ok = [bool] $text.Trim(); kind = 'gmail'
             text = Limit-SourceText $text
             attachments = $atts
             identifiers = $ids
             links = Get-LinksFromText $text
+            viewer = $viewer
             note = $(if ($text.Trim()) { '' } else { 'スレッドは取得できましたが本文が空でした。' })
         }
     }
@@ -310,12 +341,19 @@ function Get-SourceContext {
                 }
             }
         }
+        # Gmail と同じ。名義と立場は経路で変わらないので、同じ形で渡す。
+        $viewer = $memberViewer
+        if ($ids.ContainsKey('to') -or $ids.ContainsKey('cc')) {
+            $viewer = New-MailViewer -Who $selfWho -Label $selfLabel -Service $boundService `
+                        -From ([string] $ids['from']) -To ([string] $ids['to']) -Cc ([string] $ids['cc'])
+        }
         return [pscustomobject]@{
             ok = [bool] $text.Trim(); kind = 'outlook'
             text = Limit-SourceText $text
             attachments = $atts
             identifiers = $ids
             links = Get-LinksFromText $text
+            viewer = $viewer
             note = $(if ($text.Trim()) { '' } else { 'スレッドは取得できましたが本文が空でした。' })
         }
     }
@@ -346,6 +384,7 @@ function Get-SourceContext {
                 permalink = $t.permalink
             }
             links = Get-LinksFromText $t.text
+            viewer = $memberViewer
             note = ''
         }
     }
@@ -372,6 +411,7 @@ function Get-SourceContext {
             attachments = @()
             identifiers = $ids
             links = Get-LinksFromText $t.text
+            viewer = $memberViewer
             note = ''
         }
     }
@@ -401,6 +441,7 @@ function Get-SourceContext {
             attachments = @()
             identifiers = @{ issueKey = $c.issueKey; summary = $c.summary; permalink = $c.permalink }
             links = Get-LinksFromText $c.text
+            viewer = $memberViewer
             note = ''
         }
     }
@@ -438,6 +479,7 @@ function Get-SourceContext {
                 permalink = $t.permalink
             }
             links = Get-LinksFromText $t.text
+            viewer = $memberViewer
             note = ''
         }
     }
@@ -460,6 +502,7 @@ function Get-SourceContext {
             attachments = @()
             identifiers = @{ cwd = $c.cwd; cliSessionId = $c.cliSessionId; transcript = $c.path }
             links = @()
+            viewer = $memberViewer
             note = 'この問いかけへの答えは、カードの「対応の記録」に書いても相手のセッションには届きません。セッションを開いて貼る必要があります。'
         }
     }
