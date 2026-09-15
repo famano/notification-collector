@@ -107,15 +107,18 @@ function Invoke-MemoryEviction {
         作られた日時で見る。profile は常に渡るぶん影響が大きいので別枠で絞る。
     #>
     param([Parameter(Mandatory)] $Conn)
-    foreach ($pair in @(@{ where = "kind = 'profile'"; max = $script:MaxProfileMemories },
-                        @{ where = "kind <> 'profile'"; max = $script:MaxMemories })) {
-        $n = [int] (@($Conn.Query("SELECT COUNT(*) AS c FROM memories WHERE $($pair.where)"))[0]['c'])
-        if ($n -le $pair.max) { continue }
+    foreach ($pair in @(@{ filter = "kind = 'profile'"; max = $script:MaxProfileMemories },
+                        @{ filter = "kind <> 'profile'"; max = $script:MaxMemories })) {
+        # キー名を 'where' にしないこと。PowerShell には .Where という組み込みメンバーが
+        # あり、$pair.where がどちらに解決されるかは版に依る。壊れると SQL が崩れる。
+        $cond = [string] $pair['filter']
+        $n = [int] (@($Conn.Query("SELECT COUNT(*) AS c FROM memories WHERE $cond"))[0]['c'])
+        if ($n -le $pair['max']) { continue }
         [void] $Conn.NonQuery(
             "DELETE FROM memories WHERE id IN (
-               SELECT id FROM memories WHERE $($pair.where)
+               SELECT id FROM memories WHERE $cond
                 ORDER BY COALESCE(last_used_at, created_at) ASC, hits ASC, id ASC LIMIT ?)",
-            [object[]] @($n - $pair.max))
+            [object[]] @($n - $pair['max']))
     }
 }
 
