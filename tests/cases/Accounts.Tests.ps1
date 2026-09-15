@@ -213,6 +213,34 @@ Describe '呼び名と持ち越し' {
         [void] (Remove-ServiceAccount -Service 'microsoft' -Id $b.id -SecretNames @())
     }
 
+    It '名義はカードのアカウント1つ、本人の判定は全アカウント' {
+        # 名義を取り違えると他人の名前で返信する。全アカウントを見落とすと、
+        # 別のアカウント宛に届いた本人宛のメールを「宛先は他人」と読む。
+        # 片方だけでは足りないので、単数と複数の両方を持っている。
+        $b = Add-ServiceAccount -Service 'google' -Label '個人用'
+        Set-Secret -Name 'account.google' -Value 'work@example.com' -AccountId '1'
+        Set-Secret -Name 'account.google' -Value 'me@personal.example' -AccountId $b.id
+
+        Assert-Equal 'work@example.com'    (Get-SelfAccountName -Service 'google' -Id '1')
+        Assert-Equal 'me@personal.example' (Get-SelfAccountName -Service 'google' -Id $b.id)
+
+        $all = @(Get-SelfAccountNames -Service 'google')
+        Assert-Equal 2 $all.Count
+        Assert-True ($all -contains 'work@example.com')
+        Assert-True ($all -contains 'me@personal.example')
+
+        [void] (Remove-ServiceAccount -Service 'google' -Id $b.id -SecretNames @())
+    }
+
+    It '疎通確認より前のアカウントは名前が無い。並べるときは飛ばす' {
+        $b = Add-ServiceAccount -Service 'backlog'
+        Set-Secret -Name 'account.backlog' -Value 'example / 私' -AccountId '1'
+        $all = @(Get-SelfAccountNames -Service 'backlog')
+        Assert-Equal 1 $all.Count
+        Assert-Equal 'example / 私' $all[0]
+        [void] (Remove-ServiceAccount -Service 'backlog' -Id $b.id -SecretNames @())
+    }
+
     It '選択を1人目に戻せる (要求をまたぐカンバンで、前のカードの相手を持ち越さない)' {
         $b = Add-ServiceAccount -Service 'chatwork'
         [void] (Use-ServiceAccount -Service 'chatwork' -Id $b.id)

@@ -69,6 +69,57 @@ Describe 'このメールでの立場' {
     }
 }
 
+Describe '本人は1人 (繋いである全アカウントで見る)' {
+
+    # 名義は1つに決まるが、本人は1人である。仕事用と個人用を両方繋いでいると、
+    # 片方宛のメールがもう片方の受信箱にも届く。カードのアカウントだけで見ると
+    # 「宛先は他人」と読み、**本人宛のメールに返さなくなる。**
+
+    It '別のアカウント宛なら、それも本人の宛先として扱う' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'x@y.com' -To 'me@personal.com' -Cc '' `
+                -SelfNames @('work@e.com', 'me@personal.com')
+        Assert-Equal 'to' $v.role
+    }
+
+    It 'カードのアカウントだけで見ると取り違える (これを直した)' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'x@y.com' -To 'me@personal.com' -Cc ''
+        Assert-Equal 'other' $v.role
+    }
+
+    It '別のアカウントが差出人なら、本人が出したメール' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'me@personal.com' -To 'x@y.com' -Cc '' `
+                -SelfNames @('work@e.com', 'me@personal.com')
+        Assert-Equal 'from' $v.role
+    }
+
+    It '他人宛のままなら立場は変わらない (広げすぎない)' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'x@y.com' -To 'sato@e.com' -Cc 'work@e.com' `
+                -SelfNames @('work@e.com', 'me@personal.com')
+        Assert-Equal 'cc' $v.role
+    }
+
+    It '名義はカードのアカウントのまま (返信はそこから出る)' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'x@y.com' -To 'me@personal.com' -Cc '' `
+                -SelfNames @('work@e.com', 'me@personal.com')
+        Assert-Equal 'work@e.com' $v.who
+        Assert-Equal 'me@personal.com' $v.viaAccount
+    }
+
+    It '名義のアドレスで当たったときは、別アカウントの断りを入れない' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'x@y.com' -To 'work@e.com' -Cc '' `
+                -SelfNames @('work@e.com', 'me@personal.com')
+        Assert-Equal '' $v.viaAccount
+    }
+
+    It '別のアカウントで当たったことをプロンプトに書く (返信は別のアドレスから出る)' {
+        $v = New-MailViewer -Who 'work@e.com' -From 'x@y.com' -To 'me@personal.com' -Cc '' `
+                -SelfNames @('work@e.com', 'me@personal.com')
+        $b = Get-ViewerBlock $v
+        Assert-Match 'me@personal\.com' $b
+        Assert-Match '別のアカウント' $b
+    }
+}
+
 Describe 'モデルに渡す名義' {
 
     It '本人の名前が入る' {

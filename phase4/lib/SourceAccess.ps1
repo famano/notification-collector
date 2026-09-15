@@ -19,6 +19,34 @@
 
 $script:MaxSourceChars = 20000
 
+# メールを持つ連携先。「本人のアドレス」を集める範囲。
+#
+# 立場 (宛先か Cc か) を見るときは、カードが届いたアカウントだけでは足りない。
+# 仕事用の Gmail と Outlook を両方繋いでいれば、Outlook 宛のメールが Gmail にも
+# 届く (両方が宛先、転送、メーリングリスト)。片方しか見ないと、本人宛のメールを
+# 「宛先は他人」と読んで、横で見ているだけの扱いにしてしまう。
+$script:MailAccountServices = @('google', 'microsoft')
+
+function Get-SelfMailNames {
+    <#
+      .SYNOPSIS
+        繋いである全アカウントの名前 (メールを持つ連携先のぶん)。
+      .DESCRIPTION
+        名義には使わない。名義はカードが届いたアカウント1つで、返信もそこから出る。
+        ここで集めるのは「そのアドレスは本人か」を見るためだけのもの。
+      .OUTPUTS
+        [string[]]
+    #>
+    $out = @()
+    if (-not (Get-Command Get-SelfAccountNames -ErrorAction SilentlyContinue)) { return @() }
+    foreach ($svc in $script:MailAccountServices) {
+        foreach ($n in @(Get-SelfAccountNames -Service $svc)) {
+            if ($n -and ($out -notcontains $n)) { $out += $n }
+        }
+    }
+    return @($out)
+}
+
 function Limit-SourceText {
     param([string] $Text, [int] $Max = 0)
     if ($Max -le 0) { $Max = $script:MaxSourceChars }
@@ -212,11 +240,14 @@ function Get-SourceContext {
     # 取り直せたかどうかとは無関係に必要になる。
     $selfWho = ''
     $selfLabel = ''
+    # 立場の判定に使うぶん。名義 (selfWho) とは別で、繋いである全アカウントを見る。
+    $selfNames = @()
     if ($boundService) {
         $acctId = [string] $Evt['account_id']
         $selfWho = Get-SelfAccountName -Service $boundService -Id $acctId
         $acct = Get-ServiceAccount -Service $boundService -Id $acctId
         if ($acct) { $selfLabel = [string] $acct.label }
+        if ($script:MailAccountServices -contains $boundService) { $selfNames = @(Get-SelfMailNames) }
     }
     # アカウントを持たない経路 (トースト通知・手起票) では名義の話にならないので $null。
     $memberViewer = $null
@@ -281,7 +312,8 @@ function Get-SourceContext {
         $viewer = $memberViewer
         if ($ids.ContainsKey('to') -or $ids.ContainsKey('cc')) {
             $viewer = New-MailViewer -Who $selfWho -Label $selfLabel -Service $boundService `
-                        -From ([string] $ids['from']) -To ([string] $ids['to']) -Cc ([string] $ids['cc'])
+                        -From ([string] $ids['from']) -To ([string] $ids['to']) -Cc ([string] $ids['cc']) `
+                        -SelfNames $selfNames
         }
         return [pscustomobject]@{
             ok = [bool] $text.Trim(); kind = 'gmail'
@@ -345,7 +377,8 @@ function Get-SourceContext {
         $viewer = $memberViewer
         if ($ids.ContainsKey('to') -or $ids.ContainsKey('cc')) {
             $viewer = New-MailViewer -Who $selfWho -Label $selfLabel -Service $boundService `
-                        -From ([string] $ids['from']) -To ([string] $ids['to']) -Cc ([string] $ids['cc'])
+                        -From ([string] $ids['from']) -To ([string] $ids['to']) -Cc ([string] $ids['cc']) `
+                        -SelfNames $selfNames
         }
         return [pscustomobject]@{
             ok = [bool] $text.Trim(); kind = 'outlook'

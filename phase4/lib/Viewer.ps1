@@ -16,6 +16,13 @@
 #   (投稿先を束縛する、出自を先に取り直す)。名義も同じにする ――
 #   本人が誰かは**繋いだアカウントから決まる**ので、モデルに推測させない。
 #
+# 名義は1つだが、本人は1人:
+#   名義 (誰の名前で書くか) はカードが届いたアカウントで決まる。返信もそこから出る。
+#   一方「そのメールの宛先が本人か」は、**繋いである全アカウント**で見る必要がある ――
+#   仕事用と個人用の Gmail を両方繋いでいると、片方宛のメールがもう片方の受信箱にも
+#   届く (両方が宛先、転送、メーリングリスト)。カードのアカウントのアドレスだけで
+#   見ると、本人宛なのに「宛先は他人」と読み、横で見ているだけの扱いにしてしまう。
+#
 # 立場 (role) で既定の振る舞いが変わる:
 #   to    … 宛先は自分。返信は自分の名義で書く (これまでどおり)
 #   cc    … 返事を求められているのは自分ではない。既定は眺めるだけ。
@@ -62,23 +69,36 @@ function Get-MailAddresses {
     return @($out)
 }
 
+function Get-MatchedSelfAddress {
+    <#
+      .SYNOPSIS
+        そのヘッダに入っている本人のアドレス。無ければ空。
+      .PARAMETER Self
+        本人のアドレス (複数可)。エイリアスも、**繋いである別のアカウント**も入る。
+      .DESCRIPTION
+        どれで当たったかまで返す。当たったのがこのカードのアカウント以外だった場合、
+        「本人宛ではあるが、返信は別のアドレスから出る」という状態になるので、
+        それを後段で伝えられるようにしておく。
+    #>
+    param([string] $Header, [string[]] $Self)
+    if (-not $Self -or @($Self).Count -eq 0) { return '' }
+    $list = @(Get-MailAddresses $Header)
+    if ($list.Count -eq 0) { return '' }
+    foreach ($s in @($Self)) {
+        $v = ([string] $s).Trim().ToLowerInvariant()
+        if (-not $v) { continue }
+        if ($list -contains $v) { return $v }
+    }
+    return ''
+}
+
 function Test-SelfAddress {
     <#
       .SYNOPSIS
         そのヘッダに本人のアドレスが入っているか。
-      .PARAMETER Self
-        本人のアドレス (複数可)。エイリアスを繋いでいることがある。
     #>
     param([string] $Header, [string[]] $Self)
-    if (-not $Self -or @($Self).Count -eq 0) { return $false }
-    $list = @(Get-MailAddresses $Header)
-    if ($list.Count -eq 0) { return $false }
-    foreach ($s in @($Self)) {
-        $v = ([string] $s).Trim().ToLowerInvariant()
-        if (-not $v) { continue }
-        if ($list -contains $v) { return $true }
-    }
-    return $false
+    return [bool] (Get-MatchedSelfAddress -Header $Header -Self $Self)
 }
 
 function Get-MailViewerRole {
@@ -114,33 +134,73 @@ function New-Viewer {
         [string] $Label,
         [string] $Role = 'unknown',
         [string] $Primary = '',
-        [string] $Service = ''
+        [string] $Service = '',
+        # 立場が、名義とは**別のアカウント**のアドレスで決まった場合にそのアドレス。
+        # 本人宛ではあるが、返信はこのカードのアカウントから出る、という状態。
+        [string] $ViaAccount = ''
     )
     return [pscustomobject]@{
-        who     = [string] $Who
-        label   = [string] $Label
-        role    = [string] $Role
-        primary = [string] $Primary
-        service = [string] $Service
+        who        = [string] $Who
+        label      = [string] $Label
+        role       = [string] $Role
+        primary    = [string] $Primary
+        service    = [string] $Service
+        viaAccount = [string] $ViaAccount
     }
 }
 
 function New-MailViewer {
+    <#
+      .PARAMETER Who
+        このカードのアカウントの名前。**名義はこれ**で、返信もここから出る。
+      .PARAMETER SelfNames
+        繋いである全アカウントの名前。名義は1つでも**本人は1人**なので、
+        立場 (宛先か Cc か) の判定にはこちらも混ぜる。
+
+        混ぜないと、仕事用と個人用の両方を繋いでいる人が損をする ――
+        個人用宛のメールが仕事用の受信箱にも届いたとき、「宛先は他人」と読んで
+        横で見ているだけの扱いにしてしまう。**本人宛なのに返さなくなる。**
+    #>
     param(
         [string] $Who,
         [string] $Label,
         [string] $From,
         [string] $To,
         [string] $Cc,
-        [string] $Service = ''
+        [string] $Service = '',
+        [string[]] $SelfNames
     )
-    $self = @()
-    if ($Who) { $self = @(Get-MailAddresses $Who) }
+    # 名義のアドレス (このカードのアカウント)
+    $own = @()
+    if ($Who) { $own = @(Get-MailAddresses $Who) }
+
+    # 立場の判定に使うアドレス。名義のぶん + 繋いである他のアカウントのぶん。
+    $self = @($own)
+    foreach ($n in @($SelfNames)) {
+        foreach ($a in @(Get-MailAddresses $n)) {
+            if ($self -notcontains $a) { $self += $a }
+        }
+    }
+
     # アカウント名がアドレスの形をしていないとき (表示名だけ) は立場を決められない。
     $role = Get-MailViewerRole -From $From -To $To -Cc $Cc -Self $self
     $primary = ''
     if ($role -eq 'cc' -or $role -eq 'other') { $primary = [string] $To }
-    return New-Viewer -Who $Who -Label $Label -Role $role -Primary $primary -Service $Service
+
+    # どのアドレスで当たったか。名義以外で当たったのなら、そう言えるようにしておく。
+    $header = switch ($role) {
+        'from' { $From }
+        'to'   { $To }
+        'cc'   { $Cc }
+        default { '' }
+    }
+    $via = ''
+    if ($header) {
+        $matched = Get-MatchedSelfAddress -Header $header -Self $self
+        if ($matched -and ($own -notcontains $matched)) { $via = $matched }
+    }
+    return New-Viewer -Who $Who -Label $Label -Role $role -Primary $primary `
+                      -Service $Service -ViaAccount $via
 }
 
 # ---------------------------------------------------------------- プロンプトに載せる形
@@ -212,6 +272,14 @@ function Get-ViewerBlock {
         default {
             $lines += '  本人の立場 (宛先か Cc か) はこのカードからは確定できません。断定せずに書いてください。'
         }
+    }
+
+    if ($Viewer.viaAccount) {
+        # 本人宛ではあるが、当たったのは別のアカウントのアドレス。
+        # 返信はこのカードのアカウントから出るので、相手には別のアドレスで届く。
+        $lines += ('  この立場は、本人が繋いでいる**別のアカウント** ({0}) のアドレスで判定しました。' -f [string] $Viewer.viaAccount)
+        $lines += '  本人宛であることは変わりませんが、返信はこのカードのアカウントから出ます'
+        $lines += '  (相手には上の「本人」のアドレスで届きます)。'
     }
 
     $lines += '**本人以外の名義で文面を書いてはいけません。** 宛先や Cc に出てくる別の人になりきって'
