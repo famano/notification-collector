@@ -170,37 +170,46 @@ Describe 'Claude の API キー' {
         Assert-True ($json -notmatch 'sk-ant-good') 'API キーが一覧に含まれています'
     }
 
-    It '組織 ID は任意の欄として出る (必須にすると配った先で埋まらない)' {
+    It '組織 ID は聞かない (URL に組織 ID を載せる口が無く、どの組織かは鍵が決める)' {
         $an = @(Get-SetupStatusList | Where-Object { $_.key -eq 'anthropic' })[0]
-        $org = @($an.fields | Where-Object { $_.name -eq 'organizationId' })[0]
-        Assert-NotNull $org '組織 ID の欄がありません'
-        Assert-False $org.required
-        Assert-False $org.secret
-    }
-
-    It '組織 ID を入れれば保存し、空欄なら前の値を消さない' {
+        Assert-Equal 0 (@($an.fields | Where-Object { $_.name -eq 'organizationId' })).Count `
+            '組織 ID の欄が残っています'
+        # 送られてきても保存しない (画面を古いまま開いていた場合)
         $script:FakeConnection = [pscustomobject]@{ ok = $true; account = ''; note = '' }
-        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good'; organizationId = ' org-1 ' }
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good'; organizationId = 'org-1' }
         Assert-True $r.ok
-        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId')
-        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good2'; organizationId = '' }
-        Assert-True $r.ok
-        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId')
-        Assert-Equal 'org-1' (Get-AnthropicOrganizationId)
+        Assert-Null (Get-Secret -Name 'anthropic.organizationId')
     }
 
-    It '組織が違っても失敗にはしない。言葉で知らせるだけ (動かすのに要らない値なので)' {
-        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected 'org-1' -Actual 'org-1')
-        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected '' -Actual 'org-1')
-        # 応答に組織が載っていなければ、確かめられないだけで食い違いではない
-        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected 'org-1' -Actual '')
-        $n = Get-AnthropicOrganizationNote -Expected 'org-1' -Actual 'org-2'
-        Assert-Match 'org-2' $n
-        Assert-Match 'org-1' $n
+    It '管理 API キーも任意の欄として出る (伏せ字で受け取る)' {
+        $an = @(Get-SetupStatusList | Where-Object { $_.key -eq 'anthropic' })[0]
+        $adm = @($an.fields | Where-Object { $_.name -eq 'adminApiKey' })[0]
+        Assert-NotNull $adm '管理 API キーの欄がありません'
+        Assert-False $adm.required
+        Assert-True  $adm.secret
+    }
+
+    It '設定済みなら、API キーを貼り直さずに任意の欄だけ足せる' {
+        # キーは発行時に一度しか表示されない。「1欄足すたびに貼り直せ」は
+        # 実質「キーを作り直せ」と言うのと同じなので、空欄のまま通す。
+        $script:FakeConnection = [pscustomobject]@{ ok = $true; account = ''; note = '' }
+        [void] (Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-keep' })
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = ''; adminApiKey = ' sk-ant-admin-1 ' }
+        Assert-True $r.ok $r.error
+        Assert-Equal 'sk-ant-keep'     (Get-Secret -Name 'anthropic.apiKey')
+        Assert-Equal 'sk-ant-admin-1'  (Get-Secret -Name 'anthropic.adminApiKey')
+        Assert-Equal 'sk-ant-admin-1'  (Get-AnthropicAdminApiKey)
+    }
+
+    It '未設定のうちは API キーを必須のままにする (空の設定を「済み」に見せない)' {
+        [void] (Remove-Secret -Name 'anthropic.apiKey')
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = ''; adminApiKey = 'sk-ant-admin-2' }
+        Assert-False $r.ok
+        Assert-Match 'API キー' $r.error
     }
 
     [void] (Remove-Secret -Name 'anthropic.apiKey')
-    [void] (Remove-Secret -Name 'anthropic.organizationId')
+    [void] (Remove-Secret -Name 'anthropic.adminApiKey')
 }
 
 Describe '配る人が用意済みのもの' {

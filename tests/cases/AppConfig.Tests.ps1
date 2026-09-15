@@ -92,24 +92,21 @@ Describe '配布設定から保管庫への取り込み' {
         Assert-Equal 'sk-ant-from-screen' (Get-Secret -Name 'anthropic.apiKey' -Path $store)
     }
 
-    It 'Microsoft 365 のアプリ登録と Claude の組織 ID も取り込む (配った先で押すだけにする)' {
+    It 'Microsoft 365 のアプリ登録も取り込む (配った先で押すだけにする)' {
         $store = Join-Path (New-TestTempDir) 'secrets.dat'
-        [void] (Set-TestConfig '{ "anthropic": { "organizationId": "org-1" }, "microsoft": { "clientId": "ms-cid", "tenantId": "contoso.onmicrosoft.com", "clientSecret": "ms-sec" } }')
+        [void] (Set-TestConfig '{ "microsoft": { "clientId": "ms-cid", "tenantId": "contoso.onmicrosoft.com", "clientSecret": "ms-sec" } }')
         $names = @(Import-AppConfigSecrets -Path $store)
-        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId' -Path $store)
         Assert-Equal 'ms-cid' (Get-Secret -Name 'ms.clientId' -Path $store)
         Assert-Equal 'contoso.onmicrosoft.com' (Get-Secret -Name 'ms.tenantId' -Path $store)
         Assert-Equal 'ms-sec' (Get-Secret -Name 'ms.clientSecret' -Path $store)
-        Assert-Equal 4 $names.Count
+        Assert-Equal 3 $names.Count
     }
 
-    It '組織 ID は API キーの代わりにはならない (無くても動き、あっても鍵ではない)' {
+    It '組織 ID は取り込まない (URL に載せる口が無く、どの組織かはキーが決める)' {
         $store = Join-Path (New-TestTempDir) 'secrets.dat'
         [void] (Set-TestConfig '{ "anthropic": { "organizationId": "org-1" } }')
-        Assert-Null (Get-AnthropicApiKey -SecretPath $store)
-        Assert-Equal 'org-1' (Get-AnthropicOrganizationId -SecretPath $store)
-        [void] (Set-TestConfig '{ }')
-        Assert-Null (Get-AnthropicOrganizationId -SecretPath $store)
+        Assert-Equal 0 (@(Import-AppConfigSecrets -Path $store)).Count
+        Assert-Null (Get-Secret -Name 'anthropic.organizationId' -Path $store)
     }
 
     It '知らない項目は取り込まない (書き間違いで保管庫が汚れない)' {
@@ -132,8 +129,8 @@ Describe '平文で残った資格情報' {
         Assert-False (Test-AppConfigHasPlainSecrets)
     }
 
-    It '組織 ID やテナント ID は秘密ではないので黙る' {
-        [void] (Set-TestConfig '{ "anthropic": { "organizationId": "org-1" }, "microsoft": { "tenantId": "contoso" } }')
+    It 'テナント ID は秘密ではないので黙る' {
+        [void] (Set-TestConfig '{ "microsoft": { "tenantId": "contoso" } }')
         Assert-False (Test-AppConfigHasPlainSecrets)
     }
 

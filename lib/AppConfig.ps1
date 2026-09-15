@@ -131,9 +131,8 @@ function Get-AppConfigBool {
 # (保管庫に写して古い値が残ると、合わなくなった理由が分からなくなる)。
 $script:AppConfigSecretMap = [ordered]@{
     'anthropic.apiKey'    = 'anthropic.apiKey'
-    # 組織 ID は判定にもワーカーにも要らない。キーがどの組織のものかを
-    # 接続の確認で突き合わせるためだけに持つ (任意)。
-    'anthropic.organizationId' = 'anthropic.organizationId'
+    # 組織 ID はここに無い。どの組織かはキーが決めるので、配っても使い道が無い
+    # (書いてあっても取り込まない。理由は lib\ApiKey.ps1)。
     'google.clientId'     = 'gmail.clientId'
     'google.clientSecret' = 'gmail.clientSecret'
     'slack.clientId'      = 'slack.clientId'
@@ -153,7 +152,7 @@ $script:AppConfigSecretMap = [ordered]@{
 
 # 取り込みはするが、秘密ではない識別子。平文で残っていても「消してよい」とは言わない
 # (消すと、保管庫の値を失ったときに配布時の値へ戻れなくなるだけで、隠す意味が無い)。
-$script:AppConfigNonSecret = @('anthropic.organizationId', 'microsoft.tenantId')
+$script:AppConfigNonSecret = @('microsoft.tenantId')
 
 function Import-AppConfigSecrets {
     <#

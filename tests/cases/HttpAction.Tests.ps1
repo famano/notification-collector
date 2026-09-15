@@ -8,6 +8,25 @@
 
 . "$RepoRoot\phase4\lib\HttpAction.ps1"
 
+# --- 資格情報ストアを一時ファイルに差し替える ---
+# 実データの secrets.dat には触らない。DPAPI も使わない (見たいのは筋であって暗号化ではない)。
+$script:HttpTestStore = Join-Path (New-TestTempDir) 'secrets.dat'
+function Get-SecretStorePath { param([string] $Path) if ($Path) { return $Path } return $script:HttpTestStore }
+function Protect-Text   { param([string] $Text)   return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text)) }
+function Unprotect-Text { param([string] $Base64) return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Base64)) }
+
+# 配布設定と環境変数は見に行かせない (開発機に置いてあると結果が変わる)
+$script:SavedHttpCfgEnv = $env:NOTIFICATION_COLLECTOR_CONFIG
+$script:SavedHttpKeyEnv = $env:ANTHROPIC_API_KEY
+$env:NOTIFICATION_COLLECTOR_CONFIG = Join-Path (New-TestTempDir) 'no-app-config.json'
+$env:ANTHROPIC_API_KEY = $null
+
+Set-Secret -Name 'anthropic.apiKey' -Value 'sk-ant-api03-0123456789abcdefghij'
+Set-Secret -Name 'ms.tenantId'      -Value '11111111-2222-3333-4444-555555555555'
+Set-Secret -Name 'backlog.space'    -Value 'example.backlog.jp'
+
+try {
+
 Describe 'ホストから資格情報を決める' {
 
     It '既知のホストとそのサブドメインを見分ける' {
@@ -95,4 +114,55 @@ Describe 'メソッドの分類' {
             Assert-True (Test-WriteMethod -Method $m) ("{0} が読み取り扱いになっています" -f $m)
         }
     }
+}
+
+Describe '漏洩検査は「秘密」だけを見る' {
+
+    It 'トークンが混ざっていれば止める (名前を返す)' {
+        Assert-Equal 'anthropic.apiKey' (Test-SecretLeak 'Authorization: sk-ant-api03-0123456789abcdefghij')
+    }
+
+    It 'テナント ID は止めない (秘密ではないし、URL に載って当たり前の値)' {
+        Assert-Null (Test-SecretLeak 'https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/oauth2/v2.0/token')
+    }
+
+    It 'Backlog のスペース名も止めない (ホスト名そのものなので、止めると全部通らない)' {
+        Assert-Null (Test-SecretLeak 'https://example.backlog.jp/api/v2/issues')
+    }
+
+    It '知らない名前は秘密として扱う (緩める側は必ず明示で書く)' {
+        Assert-True  (Test-SecretConfidential -Name 'github.token')
+        Assert-True  (Test-SecretConfidential -Name 'newservice.token')
+        Assert-False (Test-SecretConfidential -Name 'ms.tenantId')
+    }
+}
+
+Describe 'Claude の API' {
+
+    It '通常の口には通常のキーを付ける' {
+        $spec = Get-HostCredentialSpec -Url 'https://api.anthropic.com/v1/models?limit=1'
+        Assert-Equal 'anthropic' $spec.service
+        Assert-Equal 'Get-AnthropicApiKey' $spec.dynamic
+        Assert-Equal 'x-api-key' $spec.header
+    }
+
+    It '組織の口 (/v1/organizations/...) は管理 API キーに切り替える' {
+        # 同じホストでも道によって鍵が変わる。通常のキーでは通らない口なので、
+        # ここを取り違えると「設定済みなのに 401」という一番読めない形になる。
+        # URL に組織 ID は入らない ―― どの組織かはこの鍵が決める。
+        $spec = Get-HostCredentialSpec -Url 'https://api.anthropic.com/v1/organizations/usage_report/claude_code?starting_at=2026-09-08'
+        Assert-Equal 'Get-AnthropicAdminApiKey' $spec.dynamic
+        Assert-Equal 'Get-AnthropicAdminApiKey' (Get-HostCredentialSpec -Url 'https://api.anthropic.com/v1/organizations/cost_report').dynamic
+    }
+
+    It '設定カードの名前は1つに寄る (通常の口も組織の口も anthropic)' {
+        Assert-Equal 'anthropic' (Get-ServiceKey -Url 'https://api.anthropic.com/v1/messages')
+        Assert-Equal 'anthropic' (Get-ServiceKey -Url 'https://api.anthropic.com/v1/organizations/usage_report/claude_code')
+    }
+}
+
+}
+finally {
+    $env:NOTIFICATION_COLLECTOR_CONFIG = $script:SavedHttpCfgEnv
+    $env:ANTHROPIC_API_KEY = $script:SavedHttpKeyEnv
 }
