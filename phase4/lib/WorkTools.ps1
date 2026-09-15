@@ -168,8 +168,8 @@ GET で調べるだけでなく、POST/PATCH/PUT/DELETE で操作できる。
 Authorization ヘッダを自分で書いても捨てられる。トークンを URL や本文に入れてはいけない。
 
 Claude 自身の API (api.anthropic.com) も叩ける。版のヘッダ (anthropic-version) は自動で付く。
-URL に組織 ID が要る口 (/v1/organizations/... ) は `{organizationId}` と書けば、
-ワーカーが実際の値に置き換える。組織 ID を自分で調べたり、利用者に聞いたりしないこと。
+組織全体の口 (/v1/organizations/... 利用状況など) もそのまま書けばよい ――
+どの組織かはワーカーが付ける鍵が決めるので、URL に組織 ID は要らない。
 
 GET 以外は必ず利用者の承認を求める。承認画面には実際に飛ぶリクエストが全文出る。
 人に届くメッセージの送信 (Slack への投稿、メールの送信) はこのツールでは行えない。
@@ -658,9 +658,7 @@ function Get-ToolRisk {
             #   書き込み (POST/PATCH/PUT/DELETE)
             #     → 常に承認。相手側の状態が変わり、取り消せないことが多い。
             $method = if ($ToolInput.method) { ([string] $ToolInput.method).ToUpper() } else { 'GET' }
-            # 差し込み口 ({organizationId} など) は埋めてから出す。
-            # 承認画面に出すのは**実際に飛ぶリクエスト**でなければならない。
-            $url    = (Expand-RequestUrl -Url ([string] $ToolInput.url)).url
+            $url    = [string] $ToolInput.url
             $credStatus = Get-CredentialStatus -Url $url
             $cred   = $credStatus.credential
             $credLabel = if ($cred) { $cred.label } else { '(認証なし)' }

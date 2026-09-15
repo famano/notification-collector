@@ -169,23 +169,15 @@ Describe 'Claude の API キー' {
         Assert-True ($json -notmatch 'sk-ant-good') 'API キーが一覧に含まれています'
     }
 
-    It '組織 ID は任意の欄として出る (必須にすると配った先で埋まらない)' {
+    It '組織 ID は聞かない (URL に組織 ID を載せる口が無く、どの組織かは鍵が決める)' {
         $an = @(Get-SetupStatusList | Where-Object { $_.key -eq 'anthropic' })[0]
-        $org = @($an.fields | Where-Object { $_.name -eq 'organizationId' })[0]
-        Assert-NotNull $org '組織 ID の欄がありません'
-        Assert-False $org.required
-        Assert-False $org.secret
-    }
-
-    It '組織 ID を入れれば保存し、空欄なら前の値を消さない' {
+        Assert-Equal 0 (@($an.fields | Where-Object { $_.name -eq 'organizationId' })).Count `
+            '組織 ID の欄が残っています'
+        # 送られてきても保存しない (画面を古いまま開いていた場合)
         $script:FakeConnection = [pscustomobject]@{ ok = $true; account = ''; note = '' }
-        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good'; organizationId = ' org-1 ' }
+        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good'; organizationId = 'org-1' }
         Assert-True $r.ok
-        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId')
-        $r = Save-SetupCredential -Key 'anthropic' -Values @{ apiKey = 'sk-ant-good2'; organizationId = '' }
-        Assert-True $r.ok
-        Assert-Equal 'org-1' (Get-Secret -Name 'anthropic.organizationId')
-        Assert-Equal 'org-1' (Get-AnthropicOrganizationId)
+        Assert-Null (Get-Secret -Name 'anthropic.organizationId')
     }
 
     It '管理 API キーも任意の欄として出る (伏せ字で受け取る)' {
@@ -215,18 +207,7 @@ Describe 'Claude の API キー' {
         Assert-Match 'API キー' $r.error
     }
 
-    It '組織が違っても失敗にはしない。言葉で知らせるだけ (動かすのに要らない値なので)' {
-        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected 'org-1' -Actual 'org-1')
-        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected '' -Actual 'org-1')
-        # 応答に組織が載っていなければ、確かめられないだけで食い違いではない
-        Assert-Equal '' (Get-AnthropicOrganizationNote -Expected 'org-1' -Actual '')
-        $n = Get-AnthropicOrganizationNote -Expected 'org-1' -Actual 'org-2'
-        Assert-Match 'org-2' $n
-        Assert-Match 'org-1' $n
-    }
-
     [void] (Remove-Secret -Name 'anthropic.apiKey')
-    [void] (Remove-Secret -Name 'anthropic.organizationId')
     [void] (Remove-Secret -Name 'anthropic.adminApiKey')
 }
 

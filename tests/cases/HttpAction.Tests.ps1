@@ -21,9 +21,9 @@ $script:SavedHttpKeyEnv = $env:ANTHROPIC_API_KEY
 $env:NOTIFICATION_COLLECTOR_CONFIG = Join-Path (New-TestTempDir) 'no-app-config.json'
 $env:ANTHROPIC_API_KEY = $null
 
-Set-Secret -Name 'anthropic.apiKey'         -Value 'sk-ant-api03-0123456789abcdefghij'
-Set-Secret -Name 'anthropic.organizationId' -Value '11111111-2222-3333-4444-555555555555'
-Set-Secret -Name 'backlog.space'            -Value 'example.backlog.jp'
+Set-Secret -Name 'anthropic.apiKey' -Value 'sk-ant-api03-0123456789abcdefghij'
+Set-Secret -Name 'ms.tenantId'      -Value '11111111-2222-3333-4444-555555555555'
+Set-Secret -Name 'backlog.space'    -Value 'example.backlog.jp'
 
 try {
 
@@ -122,8 +122,8 @@ Describe '漏洩検査は「秘密」だけを見る' {
         Assert-Equal 'anthropic.apiKey' (Test-SecretLeak 'Authorization: sk-ant-api03-0123456789abcdefghij')
     }
 
-    It '組織 ID は止めない (秘密ではないし、URL に載って当たり前の値)' {
-        Assert-Null (Test-SecretLeak 'https://api.anthropic.com/v1/organizations/11111111-2222-3333-4444-555555555555/usage_report/claude_code')
+    It 'テナント ID は止めない (秘密ではないし、URL に載って当たり前の値)' {
+        Assert-Null (Test-SecretLeak 'https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/oauth2/v2.0/token')
     }
 
     It 'Backlog のスペース名も止めない (ホスト名そのものなので、止めると全部通らない)' {
@@ -133,7 +133,7 @@ Describe '漏洩検査は「秘密」だけを見る' {
     It '知らない名前は秘密として扱う (緩める側は必ず明示で書く)' {
         Assert-True  (Test-SecretConfidential -Name 'github.token')
         Assert-True  (Test-SecretConfidential -Name 'newservice.token')
-        Assert-False (Test-SecretConfidential -Name 'anthropic.organizationId')
+        Assert-False (Test-SecretConfidential -Name 'ms.tenantId')
     }
 }
 
@@ -149,55 +149,15 @@ Describe 'Claude の API' {
     It '組織の口 (/v1/organizations/...) は管理 API キーに切り替える' {
         # 同じホストでも道によって鍵が変わる。通常のキーでは通らない口なので、
         # ここを取り違えると「設定済みなのに 401」という一番読めない形になる。
-        $spec = Get-HostCredentialSpec -Url 'https://api.anthropic.com/v1/organizations/abc/usage_report/claude_code'
+        # URL に組織 ID は入らない ―― どの組織かはこの鍵が決める。
+        $spec = Get-HostCredentialSpec -Url 'https://api.anthropic.com/v1/organizations/usage_report/claude_code?starting_at=2026-09-08'
         Assert-Equal 'Get-AnthropicAdminApiKey' $spec.dynamic
+        Assert-Equal 'Get-AnthropicAdminApiKey' (Get-HostCredentialSpec -Url 'https://api.anthropic.com/v1/organizations/cost_report').dynamic
     }
 
     It '設定カードの名前は1つに寄る (通常の口も組織の口も anthropic)' {
         Assert-Equal 'anthropic' (Get-ServiceKey -Url 'https://api.anthropic.com/v1/messages')
-        Assert-Equal 'anthropic' (Get-ServiceKey -Url 'https://api.anthropic.com/v1/organizations/abc/usage_report/claude_code')
-    }
-}
-
-Describe 'URL の差し込み口はワーカーが埋める' {
-
-    It '{organizationId} を実際の値に置き換える' {
-        $r = Expand-RequestUrl -Url 'https://api.anthropic.com/v1/organizations/{organizationId}/usage_report/claude_code'
-        Assert-Equal '' $r.error
-        Assert-Equal 'https://api.anthropic.com/v1/organizations/11111111-2222-3333-4444-555555555555/usage_report/claude_code' $r.url
-    }
-
-    It '書き方が違っても埋める (モデルの表記ゆれで詰まらせない)' {
-        Assert-Equal 'https://api.anthropic.com/v1/organizations/11111111-2222-3333-4444-555555555555/x' `
-            (Expand-RequestUrl -Url 'https://api.anthropic.com/v1/organizations/{org_id}/x').url
-    }
-
-    It '差し込み口が無ければ何もしない' {
-        $u = 'https://api.github.com/user/repository_invitations/1'
-        Assert-Equal $u (Expand-RequestUrl -Url $u).url
-    }
-
-    It '値が無ければ、送る前に理由を返す (推測で叩かせない)' {
-        [void] (Remove-Secret -Name 'anthropic.organizationId')
-        try {
-            $r = Expand-RequestUrl -Url 'https://api.anthropic.com/v1/organizations/{organizationId}/x'
-            Assert-Match '組織 ID' $r.error
-            Assert-Match 'credential_missing' $r.error
-        }
-        finally {
-            Set-Secret -Name 'anthropic.organizationId' -Value '11111111-2222-3333-4444-555555555555'
-        }
-    }
-
-    It 'URL の形を壊す値は埋めない (別の道に飛ばさない)' {
-        Set-Secret -Name 'anthropic.organizationId' -Value 'abc/../../v1/messages'
-        try {
-            $r = Expand-RequestUrl -Url 'https://api.anthropic.com/v1/organizations/{organizationId}/x'
-            Assert-NotEqual '' $r.error
-        }
-        finally {
-            Set-Secret -Name 'anthropic.organizationId' -Value '11111111-2222-3333-4444-555555555555'
-        }
+        Assert-Equal 'anthropic' (Get-ServiceKey -Url 'https://api.anthropic.com/v1/organizations/usage_report/claude_code')
     }
 }
 

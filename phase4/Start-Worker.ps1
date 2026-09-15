@@ -385,8 +385,7 @@ function Invoke-WorkItem {
             'run_command'        { "コマンドを実行しようとしています: $($toolInput.purpose)" }
             'http_request'       {
                 $m = if ($toolInput.method) { ([string] $toolInput.method).ToUpper() } else { 'GET' }
-                # 差し込み口を埋めたあとの URL を出す (画面にも台帳にも、実際に叩くものを残す)
-                "$m $((Expand-RequestUrl -Url ([string] $toolInput.url)).url)"
+                "$m $($toolInput.url)"
             }
             'open_source'        { '元のやり取りを取り直しています' }
             'fetch_attachment'   { "添付を取り込んでいます: $($toolInput.name)" }
@@ -557,7 +556,7 @@ function Invoke-WorkItem {
         if (@('http_request', 'open_source', 'fetch_attachment', 'run_command') -contains $toolName) {
             $target = if ($toolInput.url) {
                 $m = if ($toolInput.method) { ([string] $toolInput.method).ToUpper() } else { 'GET' }
-                "$m $((Expand-RequestUrl -Url ([string] $toolInput.url)).url)"
+                "$m $($toolInput.url)"
             } else { '' }
             $head = ($r.text -split "`n")[0]
             if ($head.Length -gt 200) { $head = $head.Substring(0, 200) }
