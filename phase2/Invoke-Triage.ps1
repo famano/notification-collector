@@ -282,7 +282,7 @@ try {
 
         # 何トークン使ったか。キャッシュが効いていれば「読んだ分」が伸びる。
         $usage = Get-ClaudeUsageLine
-        if ($usage) { Write-Host ("トークン: " + $usage) -ForegroundColor DarkGray }
+        if ($usage) { Write-Host ("トークン使用状況: " + $usage) -ForegroundColor DarkGray }
     }
 }
 finally { $conn.Dispose() }

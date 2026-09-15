@@ -542,7 +542,7 @@ function Get-ClaudeUsageLine {
     #>
     if (-not $script:ClaudeUsage) { return $null }
     $u = $script:ClaudeUsage
-    return ("{0}回 / 入力 {1:N0} (読んだ分 {2:N0} ・書いた分 {3:N0}) / 出力 {4:N0}" -f `
+    return ("API呼び出し {0}回 / 入力 {1:N0} (キャッシュヒット {2:N0} ・キャッシング {3:N0}) / 出力 {4:N0}" -f `
             $u.calls, ($u.input + $u.cacheRead + $u.cacheWrite), $u.cacheRead, $u.cacheWrite, $u.output)
 }
 
