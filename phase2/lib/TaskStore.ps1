@@ -245,6 +245,9 @@ CREATE INDEX IF NOT EXISTS idx_dossier_subject ON dossier(subject_key, id);
 
     # 利用者について覚えておくこと。件ではなく**人**についての記録なので、
     # 件が変わっても引かれる (台帳 dossier との違いはそこ)。
+    #
+    # 「どれが使われたか」は持たない。覚えていることは毎回まとめて渡すので、
+    # こちら側から見ると全部が毎回使われたことになり、数えても順位が付かない。
     $Conn.Exec(@'
 CREATE TABLE IF NOT EXISTS memories (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,12 +255,10 @@ CREATE TABLE IF NOT EXISTS memories (
   topic          TEXT NOT NULL,
   note           TEXT NOT NULL,
   source_task_id INTEGER,
-  hits           INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL,
-  last_used_at   TEXT
+  updated_at     TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind, id);
+CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind, updated_at);
 '@)
 
     # ワーカーがこのカードで実際に試したこと。

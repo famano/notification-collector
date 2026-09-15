@@ -11,26 +11,41 @@
 #   ここが持つのは**人**についての記録である。誰で、何に関心があり、
 #   似た件を前回どう処理したか。件をまたいでも効く。
 #
-# 長さの扱い:
-#   全部を毎回読み込むと、増えるほど邪魔になる (判定の材料が薄まり、費用も増える)。
-#   そこで二段で抑える。
-#     ・1件を短く保つ  … 200 字で切る。全体の件数にも上限を置き、
-#                        使われないものから落とす (profile は別枠で保護する)
-#     ・関連するものだけ渡す … カードの文面と突き合わせて、当たったものだけ渡す。
-#                        ただし profile (その人が誰か) は常に渡す ―― どの件にも効くため。
+# 長さの扱い ―― 絞り込まず、全体を短く保つ:
+#   最初は「カードの文面と突き合わせて関連するものだけ渡す」形にしていた。
+#   日本語を語で切れないので2文字ずつ (バイグラム) で見ていたが、実際に
+#   例文の組で測ると、外し方が二通りとも出た。
+#     誤って一致 … 「振り替える」と「池のかえる」が「える」で一致する
+#     取りこぼし … 日本語で覚えた記憶は、英語の通知
+#                  (GitHub の招待、CI の失敗) と一文字も重ならない
+#   後者のほうが重い。**覚えているのに渡らない**のは、症状が「同じ間違いを
+#   繰り返す」であって、記憶が無いときと見分けが付かない。しかも経路ごとに
+#   言語が違うのは直しようがない (語の切り方を変えても解決しない)。
+#
+#   そこで絞り込みをやめ、**全体を短く保って全部渡す**。人についての記憶は
+#   もともと増え続けるものではない。上限は二つで担保する。
+#     ・1件を短く … 200 字で切る。種類ごとに件数の上限を置き、古いものから落とす
+#     ・渡す量の上限 … 合計の文字数で切る。超える分は渡さない
+#   絞り込みが無ければ「関連度の判定を外す」という失敗の形そのものが無くなる。
+#   どれが効くかは、渡した先のモデルが文面を見て判断する。
 #
 # 種類は閉じた集合にする。自由記述にすると「何にでも当てはまる一般論」が
-# 積もって、関連度で絞れなくなる。
-#   profile    … 利用者そのもの。名前・役割・関心事・持ち物。**常に渡す**
+# 積もって、渡す枠を食い潰す。
+#   profile    … 利用者そのもの。名前・役割・関心事・持ち物
 #   preference … こう扱ってほしい。「請求書は送らずに下書きまで」
 #   how        … 似た件をこう処理した。「この種の招待は API で承諾できた」
 
 $script:MemoryKinds       = @('profile', 'preference', 'how')
 $script:MaxMemoryNote     = 200     # 1件の長さ
 $script:MaxMemoryTopic    = 40
-$script:MaxMemories       = 120     # profile 以外の総数
-$script:MaxProfileMemories = 20     # profile の総数 (常に渡るので別枠で絞る)
-$script:MemoryPromptChars = 1200    # プロンプトに載せる合計の上限
+# 種類ごとの件数。全部渡すので、ここが渡す量そのものになる。
+$script:MaxMemoriesByKind = @{ profile = 10; preference = 12; how = 15 }
+# 渡す合計の上限。**上の件数から決まる最大量より大きく取ってある。**
+#   (10 + 12 + 15) 件 × 1件あたり最大 250 字弱 ≒ 9,000 字
+# ここで切れるのは非常時の歯止めで、普段は全部が入る ―― 絞り込みをやめた意味が、
+# 上限で静かに落ちて消えてしまわないようにするため。
+# 短くしたいときは、この数ではなく件数の上限を下げる (落ちたことが画面に出る)。
+$script:MemoryPromptChars = 10000
 
 function Get-MemoryNow { return (Get-Date).ToString('o') }
 
@@ -50,10 +65,23 @@ function Test-MemoryKind {
     return ($script:MemoryKinds -contains [string] $Kind)
 }
 
+function Get-MemoryKindLimit {
+    param([string] $Kind)
+    if ($script:MaxMemoriesByKind.ContainsKey($Kind)) { return [int] $script:MaxMemoriesByKind[$Kind] }
+    return 20
+}
+
 function Add-MemoryNote {
     <#
       .SYNOPSIS
-        覚える。同じことを二度書かない (重なったら上書きする)。
+        覚える。同じことを二度書かない。
+      .DESCRIPTION
+        重なりの判定は二つだけにしてある。どちらも見れば分かる規則で、
+        外れ方が説明できる形にしたいため。
+          ・同じ文面 … 中身は変えずに日付だけ新しくする
+          ・同じ種類で同じ見出し … 見出しは「記憶の枠」なので、中身を差し替える
+        言い換えただけのものを潰すのは、ここではなく記憶係 (モデル) の仕事。
+        いま覚えていることは全部渡してあるので、そちらのほうが当たる。
       .OUTPUTS
         [pscustomobject] ok / id / reason
     #>
@@ -74,13 +102,10 @@ function Add-MemoryNote {
 
     $now = Get-MemoryNow
 
-    # 同じ種類で言っていることが重なるものは、増やさずに差し替える。
-    # 積むほど「関連するものだけ渡す」が効かなくなるので、増やさないほうを既定にする。
-    $existing = @(Get-Memories -Conn $Conn -Kind $Kind)
-    $newTokens = Get-MemoryTokens ($topic + ' ' + $note)
-    foreach ($m in $existing) {
-        $old = Get-MemoryTokens (([string] $m['topic']) + ' ' + ([string] $m['note']))
-        if ((Get-TokenOverlap -A $newTokens -B $old) -lt 0.7) { continue }
+    foreach ($m in @(Get-Memories -Conn $Conn -Kind $Kind)) {
+        $sameNote  = ([string] $m['note']) -eq $note
+        $sameTopic = ([string] $m['topic']) -eq $topic
+        if (-not $sameNote -and -not $sameTopic) { continue }
         [void] $Conn.NonQuery(
             'UPDATE memories SET topic = ?, note = ?, source_task_id = ?, updated_at = ? WHERE id = ?',
             [object[]] @($topic, $note, $(if ($TaskId) { $TaskId } else { $null }), $now, [int] $m['id']))
@@ -88,38 +113,35 @@ function Add-MemoryNote {
     }
 
     [void] $Conn.NonQuery(
-        'INSERT INTO memories (kind, topic, note, source_task_id, hits, created_at, updated_at) VALUES (?,?,?,?,0,?,?)',
+        'INSERT INTO memories (kind, topic, note, source_task_id, created_at, updated_at) VALUES (?,?,?,?,?,?)',
         [object[]] @($Kind, $topic, $note, $(if ($TaskId) { $TaskId } else { $null }), $now, $now))
     $row = @($Conn.Query('SELECT MAX(id) AS id FROM memories'))
     $id = if ($row.Count -gt 0) { [int] $row[0]['id'] } else { 0 }
 
-    Invoke-MemoryEviction -Conn $Conn
+    Invoke-MemoryEviction -Conn $Conn -Kind $Kind
     return [pscustomobject]@{ ok = $true; id = $id; reason = 'added' }
 }
 
 function Invoke-MemoryEviction {
     <#
       .SYNOPSIS
-        上限を超えたら、使われていないものから落とす。
+        種類ごとの上限を超えたら、古いものから落とす。
       .DESCRIPTION
-        際限なく積むと、渡す側で絞っても「絞る対象」が増え続ける。
-        落とす順は「最後に使われたのが古い順」。一度も使われていないものは
-        作られた日時で見る。profile は常に渡るぶん影響が大きいので別枠で絞る。
+        全部渡す以上、件数の上限がそのまま「毎回渡る量」になる。
+        落とす順は最後に書き換えられたのが古い順 ―― 使われた回数では見ない。
+        全部渡しているので、どれが効いたかはこちら側からは分からない。
     #>
-    param([Parameter(Mandatory)] $Conn)
-    foreach ($pair in @(@{ filter = "kind = 'profile'"; max = $script:MaxProfileMemories },
-                        @{ filter = "kind <> 'profile'"; max = $script:MaxMemories })) {
-        # キー名を 'where' にしないこと。PowerShell には .Where という組み込みメンバーが
-        # あり、$pair.where がどちらに解決されるかは版に依る。壊れると SQL が崩れる。
-        $cond = [string] $pair['filter']
-        $n = [int] (@($Conn.Query("SELECT COUNT(*) AS c FROM memories WHERE $cond"))[0]['c'])
-        if ($n -le $pair['max']) { continue }
-        [void] $Conn.NonQuery(
-            "DELETE FROM memories WHERE id IN (
-               SELECT id FROM memories WHERE $cond
-                ORDER BY COALESCE(last_used_at, created_at) ASC, hits ASC, id ASC LIMIT ?)",
-            [object[]] @($n - $pair['max']))
-    }
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [string] $Kind)
+    $max = Get-MemoryKindLimit $Kind
+    $n = [int] (@($Conn.Query('SELECT COUNT(*) AS c FROM memories WHERE kind = ?', [object[]] @($Kind)))[0]['c'])
+    if ($n -le $max) { return }
+    [void] $Conn.NonQuery(
+        'DELETE FROM memories WHERE id IN (
+           SELECT id FROM memories WHERE kind = ?
+            ORDER BY updated_at ASC, id ASC LIMIT ?)',
+        # 引き算は括ること。カンマのほうが優先されるので、括らないと
+        # 「($Kind, $n) から $max を引く」と解釈されて配列の引き算になる。
+        [object[]] @($Kind, ($n - $max)))
 }
 
 function Remove-Memory {
@@ -128,154 +150,19 @@ function Remove-Memory {
 }
 
 function Get-Memories {
+    <#
+      .SYNOPSIS
+        覚えていること。新しいものが先。
+    #>
     param([Parameter(Mandatory)] $Conn, [string] $Kind, [int] $Limit = 500)
     if ($Kind) {
-        return @($Conn.Query('SELECT * FROM memories WHERE kind = ? ORDER BY id DESC LIMIT ?',
+        return @($Conn.Query('SELECT * FROM memories WHERE kind = ? ORDER BY updated_at DESC, id DESC LIMIT ?',
                              [object[]] @($Kind, $Limit)))
     }
-    return @($Conn.Query('SELECT * FROM memories ORDER BY kind, id DESC LIMIT ?', [object[]] @($Limit)))
+    return @($Conn.Query('SELECT * FROM memories ORDER BY updated_at DESC, id DESC LIMIT ?', [object[]] @($Limit)))
 }
 
-function Set-MemoryUsed {
-    <#
-      .SYNOPSIS
-        渡したものに「使った」印を付ける。落とす順を決めるのに使う。
-    #>
-    param([Parameter(Mandatory)] $Conn, [int[]] $Ids)
-    if (-not $Ids -or @($Ids).Count -eq 0) { return }
-    $now = Get-MemoryNow
-    foreach ($id in @($Ids)) {
-        [void] $Conn.NonQuery('UPDATE memories SET hits = hits + 1, last_used_at = ? WHERE id = ?',
-                              [object[]] @($now, [int] $id))
-    }
-}
-
-# ---------------------------------------------------------------- 引き当て
-
-function Get-MemoryTokens {
-    <#
-      .SYNOPSIS
-        突き合わせ用のかけら。日本語は2文字ずつ、英数字は語のまま。
-      .DESCRIPTION
-        形態素解析は使えない (追加インストールを増やさない)。日本語を語で切れない以上、
-        2文字の並びで見るのが、依存を増やさずに「同じ話題か」を当てられる下限になる。
-      .OUTPUTS
-        [hashtable] かけら → $true
-    #>
-    param([string] $Text)
-    $set = @{}
-    if (-not $Text) { return $set }
-    $t = ([string] $Text).ToLowerInvariant()
-    $t = $t -replace '[\s\p{P}\p{S}]+', ' '
-    foreach ($w in ($t -split ' ')) {
-        if (-not $w) { continue }
-        if ($w -match '^[a-z0-9]+$') {
-            if ($w.Length -ge 2) { $set[$w] = $true }
-            continue
-        }
-        if ($w.Length -eq 1) { $set[$w] = $true; continue }
-        for ($i = 0; $i -lt $w.Length - 1; $i++) { $set[$w.Substring($i, 2)] = $true }
-    }
-    return $set
-}
-
-function Get-TokenOverlap {
-    <#
-      .SYNOPSIS
-        A のかけらのうち、B にも出てくる割合 (0〜1)。
-    #>
-    param([hashtable] $A, [hashtable] $B)
-    if (-not $A -or $A.Count -eq 0) { return 0.0 }
-    if (-not $B -or $B.Count -eq 0) { return 0.0 }
-    $hit = 0
-    foreach ($k in $A.Keys) { if ($B.ContainsKey($k)) { $hit++ } }
-    return ([double] $hit / [double] $A.Count)
-}
-
-function Get-MemoryScore {
-    <#
-      .SYNOPSIS
-        そのカードにどれくらい関係するか。見出しの一致を重く見る。
-      .DESCRIPTION
-        見出し (topic) は「何についての記憶か」を短く書いたもので、
-        本文より当たり外れがはっきりする。本文だけで見ると、長い記憶ほど
-        どの件にも薄く当たってしまう。
-    #>
-    param([Parameter(Mandatory)] $Memory, [hashtable] $QueryTokens)
-    $topic = Get-MemoryTokens ([string] $Memory['topic'])
-    $note  = Get-MemoryTokens ([string] $Memory['note'])
-    return ((Get-TokenOverlap -A $topic -B $QueryTokens) * 2.0) + (Get-TokenOverlap -A $note -B $QueryTokens)
-}
-
-function Get-RelevantMemories {
-    <#
-      .SYNOPSIS
-        このカードに関係する記憶。profile は常に付ける。
-      .PARAMETER Query
-        カードの文面 (件名・要約・本文など)。
-      .OUTPUTS
-        [array] memories の行
-    #>
-    param(
-        [Parameter(Mandatory)] $Conn,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Query,
-        [int] $Max = 8,
-        [double] $MinScore = 0.5
-    )
-    $all = @(Get-Memories -Conn $Conn)
-    if ($all.Count -eq 0) { return @() }
-
-    # profile は「その人が誰か」なので、どの件にも効く。関連度で落とさない。
-    $always = @($all | Where-Object { [string] $_['kind'] -eq 'profile' })
-    $rest   = @($all | Where-Object { [string] $_['kind'] -ne 'profile' })
-
-    $q = Get-MemoryTokens $Query
-    $scored = @()
-    foreach ($m in $rest) {
-        $s = Get-MemoryScore -Memory $m -QueryTokens $q
-        if ($s -lt $MinScore) { continue }
-        $scored += [pscustomobject]@{ row = $m; score = $s }
-    }
-    $picked = @($scored | Sort-Object -Property @{ Expression = 'score'; Descending = $true } |
-                Select-Object -First $Max | ForEach-Object { $_.row })
-    return @($always + $picked)
-}
-
-function Get-MemoryText {
-    <#
-      .SYNOPSIS
-        プロンプトに載せる形。関連するものだけを、合計の上限まで。
-      .DESCRIPTION
-        渡したものには「使った」印を付ける ―― 上限に当たったときに、
-        実際に役立っているものを残すため。
-      .OUTPUTS
-        [string] 空のことがある (覚えていることが無い / どれも関係しない)
-    #>
-    param(
-        [Parameter(Mandatory)] $Conn,
-        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Query,
-        [int] $Max = 8,
-        [int] $MaxChars = 0,
-        [switch] $NoTouch
-    )
-    if ($MaxChars -le 0) { $MaxChars = $script:MemoryPromptChars }
-    $rows = @(Get-RelevantMemories -Conn $Conn -Query $Query -Max $Max)
-    if ($rows.Count -eq 0) { return '' }
-
-    $lines = @()
-    $used = @()
-    $total = 0
-    foreach ($m in $rows) {
-        $line = "- [{0}] {1}: {2}" -f (Get-MemoryKindLabel ([string] $m['kind'])), [string] $m['topic'], [string] $m['note']
-        if ($total + $line.Length -gt $MaxChars) { break }
-        $total += $line.Length
-        $lines += $line
-        $used += [int] $m['id']
-    }
-    if ($lines.Count -eq 0) { return '' }
-    if (-not $NoTouch) { Set-MemoryUsed -Conn $Conn -Ids $used }
-    return ($lines -join "`n")
-}
+# ---------------------------------------------------------------- 渡す
 
 function Get-MemoryKindLabel {
     param([string] $Kind)
@@ -287,6 +174,43 @@ function Get-MemoryKindLabel {
     }
 }
 
+function Get-MemoryText {
+    <#
+      .SYNOPSIS
+        プロンプトに載せる形。全部を、合計の上限まで。
+      .DESCRIPTION
+        カードの文面とは突き合わせない (このファイルの冒頭を参照)。
+        並べる順は profile → preference → how、それぞれ新しいものが先。
+        上限に当たったら入り切らないものが落ちるので、**落ちてよいものほど後ろ**に置く。
+      .PARAMETER Kinds
+        渡す種類。判定 (トリアージ) は profile と preference だけを取る ――
+        how は「どう操作したか」で、通知を分類する側では使い道が無い。
+      .OUTPUTS
+        [string] 空のことがある (まだ何も覚えていない)
+    #>
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [string[]] $Kinds,
+        [int] $MaxChars = 0
+    )
+    if ($MaxChars -le 0) { $MaxChars = $script:MemoryPromptChars }
+    if (-not $Kinds -or @($Kinds).Count -eq 0) { $Kinds = $script:MemoryKinds }
+
+    $lines = @()
+    $total = 0
+    foreach ($kind in @($script:MemoryKinds)) {
+        if (@($Kinds) -notcontains $kind) { continue }
+        foreach ($m in @(Get-Memories -Conn $Conn -Kind $kind)) {
+            $line = "- [{0}] {1}: {2}" -f (Get-MemoryKindLabel $kind), [string] $m['topic'], [string] $m['note']
+            if ($total + $line.Length -gt $MaxChars) { continue }
+            $total += $line.Length
+            $lines += $line
+        }
+    }
+    if ($lines.Count -eq 0) { return '' }
+    return ($lines -join "`n")
+}
+
 # ---------------------------------------------------------------- 覚える材料
 
 function Get-MemorySource {
@@ -294,29 +218,47 @@ function Get-MemorySource {
       .SYNOPSIS
         1枚のカードから「覚える材料」を取り出す。
       .DESCRIPTION
-        材料は利用者が書いたものに限る ―― 指示 (差し戻しのコメント) と
-        完了メモ (対応の記録)。エージェント自身の報告から覚えると、
-        自分の書いたことを事実として覚え直す輪になる。
-        報告は「何の件だったか」を添えるためだけに使う。
+        材料は二種類あり、扱いが違う。
+          利用者が書いたもの (指示・完了メモ)
+            … そのまま材料。何を望んでいるかは本人しか書けない。
+          エージェント側の記録 (試したことの一覧・報告)
+            … **事実だけ**材料になる。何を叩いて何が返ったかは、
+               次に似た件が来たときにそのまま効く (前例)。
+               ただし報告はエージェント自身の言い分でもあるので、
+               取るのは事実に限る、と記憶係のプロンプト側で縛る。
+               試したことの一覧 (task_attempts) はツールの実行記録そのもので、
+               言い分の混ざりようが無いぶん、こちらが主の材料になる。
       .OUTPUTS
-        [pscustomobject] hasMaterial / title / summary / instructions / record / report
+        [pscustomobject] hasMaterial / title / summary / instructions / record / attempts / report
     #>
     param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
     $rows = @($Conn.Query('SELECT * FROM tasks WHERE id = ?', [object[]] @($TaskId)))
     if ($rows.Count -eq 0) {
-        return [pscustomobject]@{ hasMaterial = $false; title = ''; summary = ''; instructions = @(); record = ''; report = '' }
+        return [pscustomobject]@{
+            hasMaterial = $false; title = ''; summary = ''
+            instructions = @(); record = ''; attempts = ''; report = ''
+        }
     }
     $t = $rows[0]
     $comments = @($Conn.Query(
         "SELECT body FROM task_comments WHERE task_id = ? AND author = 'user' ORDER BY id", [object[]] @($TaskId)))
     $instructions = @($comments | ForEach-Object { [string] $_['body'] } | Where-Object { $_.Trim() })
     $record = ([string] $t['user_record']).Trim()
+    # 試したことの一覧は TaskStore が持つ。読み込まれていない環境 (単体の試験など)
+    # でも材料の取り出し自体は通るようにしておく。
+    $attempts = ''
+    if (Get-Command Get-AttemptSummary -ErrorAction SilentlyContinue) {
+        $attempts = [string] (Get-AttemptSummary -Conn $Conn -TaskId $TaskId)
+    }
     return [pscustomobject]@{
-        hasMaterial  = ([bool] $record -or $instructions.Count -gt 0)
+        # 利用者が何も書かず、エージェントも何も試していないカードには
+        # 覚えるものが無い。そこに1回分の費用を払わない。
+        hasMaterial  = ([bool] $record -or $instructions.Count -gt 0 -or [bool] $attempts)
         title        = [string] $t['title']
         summary      = [string] $t['summary']
         instructions = $instructions
         record       = $record
+        attempts     = $attempts
         report       = [string] $t['agent_output']
     }
 }
@@ -343,7 +285,8 @@ function Get-NextMemoryTask {
             AND board_column IN ('done', 'dismissed')
             AND updated_at >= ?
             AND (COALESCE(user_record, '') <> ''
-                 OR EXISTS (SELECT 1 FROM task_comments c WHERE c.task_id = tasks.id AND c.author = 'user'))
+                 OR EXISTS (SELECT 1 FROM task_comments c WHERE c.task_id = tasks.id AND c.author = 'user')
+                 OR EXISTS (SELECT 1 FROM task_attempts a WHERE a.task_id = tasks.id))
           ORDER BY id DESC LIMIT 1", [object[]] @($since)))
     if ($rows.Count -eq 0) { return $null }
     return $rows[0]

@@ -292,15 +292,10 @@ function Invoke-WorkItem {
 
     # 利用者について覚えていること。台帳が「この件の前回」なのに対し、こちらは
     # 「この人の事情」で、件が変わっても効く ―― 似た件で同じ間違いを繰り返さないため。
-    # 全部は渡さない (増えるほど判断の材料が薄まる)。関連するものと、
-    # その人が誰かだけを渡す。
-    $memoryQuery = ($Task['title'], $Task['summary']) -join ' '
-    if ($evt) {
-        $evtBody = [string] $evt['body']
-        if ($evtBody.Length -gt 500) { $evtBody = $evtBody.Substring(0, 500) }
-        $memoryQuery += ' ' + [string] $evt['title'] + ' ' + $evtBody
-    }
-    $memoryText = Get-MemoryText -Conn $conn -Query $memoryQuery
+    # カードの文面で選り分けず、覚えていること全部を渡す (上限は保存する側で効く)。
+    # 選り分けを外して渡し損ねると、症状は「同じ間違いを繰り返す」になり、
+    # 記憶が無いときと見分けが付かない。
+    $memoryText = Get-MemoryText -Conn $conn
     if ($memoryText) {
         Write-Step $id 'step' 'あなたについて覚えていることを読み込みました' 'DarkCyan'
     }
@@ -763,10 +758,8 @@ function Update-MemoryFromClosedCards {
 
         try {
             Set-WorkerState -Conn $conn -State 'working' -CurrentTaskId $tid -Message '覚えておくことを整理しています'
-            # 既に覚えていることを渡して、言い換えただけのものを積ませない。
-            # ここでは「使った」印は付けない (渡した先は判断ではなく重複の確認)。
-            $known = Get-MemoryText -Conn $conn -NoTouch -Query (
-                ($src.title, $src.summary, ($src.instructions -join ' '), $src.record) -join ' ')
+            # 既に覚えていることを全部渡して、言い換えただけのものを積ませない。
+            $known = Get-MemoryText -Conn $conn
             $res = (Invoke-ClaudeMemory -Policy $policy -Source $src -Existing $known).result
             $n = 0
             foreach ($m in @($res.memories)) {

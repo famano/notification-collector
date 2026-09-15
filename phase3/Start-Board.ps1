@@ -1023,7 +1023,6 @@ function Invoke-Route {
                         label = (Get-MemoryKindLabel ([string] $_['kind']))
                         topic = [string] $_['topic']
                         note  = [string] $_['note']
-                        hits  = [int] $_['hits']
                         updated_at = [string] $_['updated_at']
                     }
                 })
