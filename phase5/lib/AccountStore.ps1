@@ -208,12 +208,41 @@ function Get-SelfAccountName {
         ワーカーがその他人の名義で返信を書いてしまうことがあった。本人が誰かを
         モデルに推測させず、繋いだアカウントから決めて渡すために使う
         (組み立ては phase4\lib\Viewer.ps1)。
+        返すのは**このアカウント1つ**の名前で、それが名義になる。
+        「本人かどうか」の判定には足りない ―― 本人は複数のアカウントを
+        繋いでいることがあるので、そちらは Get-SelfAccountNames (複数) を使う。
       .OUTPUTS
         [string] 空のことがある (疎通確認より前に繋いだアカウント)
     #>
     param([Parameter(Mandatory)] [string] $Service, [string] $Id, [string] $Path)
     if (-not $Id) { $Id = Get-CurrentAccountId $Service }
     return [string] (Get-Secret -Name ("account.{0}" -f $Service) -AccountId $Id -Path $Path)
+}
+
+function Get-SelfAccountNames {
+    <#
+      .SYNOPSIS
+        その連携先に繋いである**全アカウント**の名前。メールならアドレスが並ぶ。
+      .DESCRIPTION
+        名義は1つに決まるが (カードが届いたアカウント)、**本人は1人**である。
+        仕事用と個人用の Gmail を両方繋いでいると、片方宛のメールがもう片方の
+        受信箱にも届く (両方が宛先、転送、メーリングリスト)。そのときに
+        このカードのアカウントのアドレスだけで「自分かどうか」を見ると、
+        **本人宛なのに「宛先は他人」と読む** ―― 症状は「自分宛のメールなのに
+        横で見ているだけの扱いになり、返さなくなる」で、静かに効く。
+
+        立場 (宛先か Cc か) の判定にはこちらを使う。名義そのものは
+        Get-SelfAccountName (単数) が返すカードのアカウントのままにする。
+      .OUTPUTS
+        [string[]] 空のことがある (疎通確認より前に繋いだアカウントだけの場合)
+    #>
+    param([Parameter(Mandatory)] [string] $Service, [string] $Path)
+    $out = @()
+    foreach ($a in @(Get-ServiceAccounts -Service $Service -Path $Path)) {
+        $n = [string] (Get-Secret -Name ("account.{0}" -f $Service) -AccountId ([string] $a.id) -Path $Path)
+        if ($n -and ($out -notcontains $n)) { $out += $n }
+    }
+    return @($out)
 }
 
 # ---------------------------------------------------------------- 経路との対応
