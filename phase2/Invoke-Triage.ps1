@@ -32,6 +32,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\TaskStore.ps1"
 . "$PSScriptRoot\lib\ClaudeClient.ps1"
 . "$PSScriptRoot\lib\Dossier.ps1"
+. "$PSScriptRoot\lib\Memory.ps1"
 # Slack / Teams のリンクから件のキーを作るのに使う (未設定なら無くても動く)
 $slackLibPath = Join-Path $PSScriptRoot '..\phase5\lib\SlackConnector.ps1'
 if (Test-Path $slackLibPath) { . $slackLibPath }
@@ -210,7 +211,15 @@ try {
         }
 
         try {
-            $res = Invoke-ClaudeTriage -Evt $e -Policy $policy
+            # 利用者について覚えていることのうち、この通知に関係するものだけを渡す。
+            # 「この種の通知は要らない」「これは急ぎ」を毎回言い直させないため。
+            # 判定は通知1件ごとに走るので、渡す量は作業のときより絞る。
+            $memBody = [string] $e['body']
+            if ($memBody.Length -gt 500) { $memBody = $memBody.Substring(0, 500) }
+            $memory = Get-MemoryText -Conn $conn -MaxChars 500 -Max 4 `
+                        -Query (([string] $e['title']) + ' ' + ([string] $e['app']) + ' ' + $memBody)
+
+            $res = Invoke-ClaudeTriage -Evt $e -Policy $policy -Memory $memory
             $t   = $res.result
             $stats.llm++
 

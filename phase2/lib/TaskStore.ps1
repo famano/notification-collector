@@ -237,6 +237,29 @@ CREATE TABLE IF NOT EXISTS dossier (
 CREATE INDEX IF NOT EXISTS idx_dossier_subject ON dossier(subject_key, id);
 '@)
 
+    # 覚え終わったカードの印。閉じたカードから「次に効くこと」を拾うのは
+    # 1回だけでよく、付け忘れると毎周回同じカードを読み直して費用だけがかかる。
+    if ($cols -notcontains 'memory_at') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN memory_at TEXT')
+    }
+
+    # 利用者について覚えておくこと。件ではなく**人**についての記録なので、
+    # 件が変わっても引かれる (台帳 dossier との違いはそこ)。
+    $Conn.Exec(@'
+CREATE TABLE IF NOT EXISTS memories (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind           TEXT NOT NULL,
+  topic          TEXT NOT NULL,
+  note           TEXT NOT NULL,
+  source_task_id INTEGER,
+  hits           INTEGER NOT NULL DEFAULT 0,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  last_used_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind, id);
+'@)
+
     # ワーカーがこのカードで実際に試したこと。
     # require_human_step を「試さずに呼ぶ」のを防ぐ判定に使い、
     # 承認画面と報告にも証跡として出す。

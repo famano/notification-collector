@@ -39,6 +39,10 @@ param(
     [int]    $MaxRepairs = 1,
     # 自己検証を行わない場合に指定
     [switch] $NoVerify,
+    # 閉じたカードから「次に効くこと」を覚えない場合に指定
+    [switch] $NoMemory,
+    # 覚える対象にする、閉じたカードの遡り幅 (日)
+    [int]    $MemoryLookbackDays = 30,
     # 成果物の出力先。カードごとにサブフォルダを切る。
     [string] $OutputRoot,
     [switch] $Once
@@ -48,6 +52,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\..\phase2\lib\ClaudeClient.ps1"
 . "$PSScriptRoot\..\phase2\lib\Dossier.ps1"
+. "$PSScriptRoot\..\phase2\lib\Memory.ps1"
 . "$PSScriptRoot\lib\WorkTools.ps1"
 # 外部サービス連携があればツールが増える (未設定なら黙って無効)
 $gmailLib = Join-Path $PSScriptRoot '..\phase5\lib\GmailConnector.ps1'
@@ -283,6 +288,21 @@ function Invoke-WorkItem {
     }
     if ($dossierText) {
         Write-Step $id 'step' 'この件の前回までの記録を読み込みました' 'DarkCyan'
+    }
+
+    # 利用者について覚えていること。台帳が「この件の前回」なのに対し、こちらは
+    # 「この人の事情」で、件が変わっても効く ―― 似た件で同じ間違いを繰り返さないため。
+    # 全部は渡さない (増えるほど判断の材料が薄まる)。関連するものと、
+    # その人が誰かだけを渡す。
+    $memoryQuery = ($Task['title'], $Task['summary']) -join ' '
+    if ($evt) {
+        $evtBody = [string] $evt['body']
+        if ($evtBody.Length -gt 500) { $evtBody = $evtBody.Substring(0, 500) }
+        $memoryQuery += ' ' + [string] $evt['title'] + ' ' + $evtBody
+    }
+    $memoryText = Get-MemoryText -Conn $conn -Query $memoryQuery
+    if ($memoryText) {
+        Write-Step $id 'step' 'あなたについて覚えていることを読み込みました' 'DarkCyan'
     }
 
     # 何度目の発生か。2回目以降は、前回と同じ調査を繰り返さないよう明示する。
@@ -604,7 +624,7 @@ function Invoke-WorkItem {
                         -HasBacklogTarget:([bool] $backlogIssueKey) -HasOutlet:$hasOutlet) `
             -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
             -RepairIssues $issues -Occurrence $occurrence -Dossier $dossierText `
-            -SourceText $sourceText -SourceNote $sourceNote
+            -SourceText $sourceText -SourceNote $sourceNote -Memory $memoryText
 
         if ($res.aborted) { Stop-IfCancelled $id | Out-Null; return }
         if (Stop-IfCancelled $id) { return }
@@ -712,6 +732,64 @@ function Invoke-WorkItem {
     Write-Step $id 'done' $msg 'Green'
 }
 
+# 閉じたカードから「次に効くこと」を覚える。
+#
+# なぜ「閉じたあと」か:
+#   一番はっきりした材料は、利用者が最後に書くもの ――「次からはこうして」という
+#   差し戻しの指示と、完了時の記録である。完了メモはカードを閉じるときに書かれるので、
+#   作業の直後に覚えると必ず取りこぼす。
+#
+# なぜ待機中か:
+#   要対応のカードより優先度が低い。人が待っているのは目の前の1枚であって、
+#   記憶の整理ではない。手が空いたときに1枚ずつ進める。
+$script:MemoryPauseUntil = [DateTime]::MinValue
+
+function Update-MemoryFromClosedCards {
+    param([int] $Max = 1)
+    if ($NoMemory) { return }
+    # 直前に失敗していたら間を置く。キーが無いなどの恒久的な失敗を、
+    # 待機のたびに叩き続けても何も進まない。
+    if ((Get-Date) -lt $script:MemoryPauseUntil) { return }
+
+    for ($i = 0; $i -lt $Max; $i++) {
+        $t = Get-NextMemoryTask -Conn $conn -LookbackDays $MemoryLookbackDays
+        if (-not $t) { return }
+        $tid = [int] $t['id']
+        $src = Get-MemorySource -Conn $conn -TaskId $tid
+
+        # 利用者が何も書かなかったカードからは覚えない。印だけ付けて次に行く
+        # (付けないと、同じカードを待機のたびに読み直すことになる)。
+        if (-not $src.hasMaterial) { Set-TaskMemoryDone -Conn $conn -TaskId $tid; continue }
+
+        try {
+            Set-WorkerState -Conn $conn -State 'working' -CurrentTaskId $tid -Message '覚えておくことを整理しています'
+            # 既に覚えていることを渡して、言い換えただけのものを積ませない。
+            # ここでは「使った」印は付けない (渡した先は判断ではなく重複の確認)。
+            $known = Get-MemoryText -Conn $conn -NoTouch -Query (
+                ($src.title, $src.summary, ($src.instructions -join ' '), $src.record) -join ' ')
+            $res = (Invoke-ClaudeMemory -Policy $policy -Source $src -Existing $known).result
+            $n = 0
+            foreach ($m in @($res.memories)) {
+                $r = Add-MemoryNote -Conn $conn -Kind ([string] $m.kind) -Topic ([string] $m.topic) `
+                        -Note ([string] $m.note) -TaskId $tid
+                if ($r.ok) { $n++ }
+            }
+            Set-TaskMemoryDone -Conn $conn -TaskId $tid
+            if ($n -gt 0) {
+                Add-TaskActivity -Conn $conn -TaskId $tid -Kind 'memory' -Message ("このカードから {0} 件覚えました" -f $n)
+                Write-Host ("  [#{0}] 覚えました ({1} 件)" -f $tid, $n) -ForegroundColor DarkCyan
+            }
+        }
+        catch {
+            # 覚えられなくても仕事は続く。印は付けない ―― 材料はカードに残っているので、
+            # 直ったあとにもう一度拾えるほうがよい。
+            $script:MemoryPauseUntil = (Get-Date).AddMinutes(10)
+            Write-Host ("  [#{0}] 覚えられませんでした: {1}" -f $tid, $_.Exception.Message) -ForegroundColor DarkYellow
+            return
+        }
+    }
+}
+
 Write-Host 'ワーカーを開始しました。停止するには Ctrl+C' -ForegroundColor Green
 Write-Host '(送信・投稿は承認を取ってから行います。生成物はレビュー待ちに置かれます)' -ForegroundColor DarkGray
 
@@ -736,6 +814,8 @@ try {
         try {
             $task = Get-NextWorkItem -Conn $conn -LeaseMinutes $LeaseMinutes
             if ($null -eq $task) {
+                # 手が空いたので、閉じたカードから覚えておくことを1枚ぶん拾う。
+                Update-MemoryFromClosedCards
                 Set-WorkerState -Conn $conn -State 'idle' -CurrentTaskId $null -Message '待機中'
                 if ($Once) { break }
                 Start-Sleep -Seconds $IdleSeconds

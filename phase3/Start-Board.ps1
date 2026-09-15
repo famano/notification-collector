@@ -39,6 +39,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib\RequestGuard.ps1"
 # トリアージ方針。カンバンから直せるようにする (気付いた場所で直せないと直されない)。
 . "$PSScriptRoot\..\phase2\lib\Policy.ps1"
+# 覚えていること。方針と同じ理由でカンバンから消せるようにする ――
+# 間違ったことを覚えたと分かるのもカードを見た瞬間で、そこで消せなければ
+# 間違ったまま毎回渡り続ける。
+. "$PSScriptRoot\..\phase2\lib\Memory.ps1"
 $script:PolicyPath = $PolicyPath
 
 # 送信経路。カンバンだけで仕事を終わらせるには、最後の一手 (送る) もここに要る。
@@ -997,6 +1001,44 @@ function Invoke-Route {
                 -Priorities (@($b.priorities | ForEach-Object { [string] $_ }))
             Save-Policy -Policy $policy -Path $script:PolicyPath
             Write-JsonResponse $Context ([pscustomobject]@{ ok = $true; policy = (Get-PolicyView $policy) })
+        }
+        catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500 }
+        return
+    }
+
+    # ---------------------------------------------------------------- 覚えていること
+    #
+    # 方針と同じ場所に出す。覚えたことは指示が無くても効くので、
+    # **間違って覚えたものを消せる口**が無いと、一度の言い間違いが延々と残る。
+    # 足す口は置かない ―― 覚える材料は利用者が書いた指示と完了メモで、
+    # それを書く場所はカードの上にすでにある。
+
+    if ($path -eq '/api/memory' -and $method -eq 'GET') {
+        try {
+            Write-JsonResponse $Context ([pscustomobject]@{
+                memories = @(Get-Memories -Conn $Conn | ForEach-Object {
+                    [pscustomobject]@{
+                        id    = [int] $_['id']
+                        kind  = [string] $_['kind']
+                        label = (Get-MemoryKindLabel ([string] $_['kind']))
+                        topic = [string] $_['topic']
+                        note  = [string] $_['note']
+                        hits  = [int] $_['hits']
+                        updated_at = [string] $_['updated_at']
+                    }
+                })
+            })
+        }
+        catch { Write-JsonResponse $Context @{ error = $_.Exception.Message } 500 }
+        return
+    }
+
+    if ($path -match '^/api/memory/(\d+)$' -and $method -eq 'DELETE') {
+        $mid = [int] $Matches[1]
+        try {
+            $ok = Remove-Memory -Conn $Conn -Id $mid
+            if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'not found' } 404; return }
+            Write-JsonResponse $Context @{ ok = $true }
         }
         catch { Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500 }
         return

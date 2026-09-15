@@ -464,7 +464,7 @@
   <span class="spacer"></span>
   <span id="status" style="font-size:11px;color:var(--faint)" title="最後にボードを読み込んだ時刻">—</span>
   <button id="yoloBtn" class="quiet" title="危険なツールの承認をどう扱うか">自動承認 OFF</button>
-  <button id="policyBtn" class="quiet" title="判断の方針（ふるい分けと背景情報）">方針</button>
+  <button id="policyBtn" class="quiet" title="判断の方針（ふるい分け・背景情報・覚えていること）">方針</button>
   <button id="archBtn" class="quiet">アーカイブ</button>
   <button id="newBtn">+ カード</button>
   <button id="connBtn" class="quiet" title="外部サービスとの接続">接続</button>
@@ -2271,6 +2271,42 @@
       box.appendChild(arow);
       box.appendChild(el('div', 'hintline',
         '効くのは次のトリアージから。すでに立っているカードは残る。'));
+
+      // --- 覚えていること ---
+      //
+      // 覚えたことは、指示が無くても次から効く。だからこそ**消せる口**が要る ――
+      // 間違って覚えたと分かるのもカードを見た瞬間で、そこで消せなければ
+      // 間違ったまま毎回渡り続ける。足す口は置かない (覚える材料はカードに書く)。
+      box.appendChild(el('h4', null, '覚えていること'));
+      box.appendChild(el('div', 'lead2',
+        'カードに書いた指示と「対応の記録」から覚えたもの。関係する件のときだけ渡る（本人については常に渡る）。違っていたら消す。'));
+      var memBox = el('div');
+      box.appendChild(memBox);
+      memBox.appendChild(el('div', 'empty', '読み込み中…'));
+      api('/api/memory').then(function (rm) {
+        memBox.textContent = '';
+        var list = (rm.status === 200 && rm.body.memories) ? rm.body.memories : [];
+        if (!list.length) {
+          memBox.appendChild(el('div', 'empty',
+            '（まだありません。カードに指示や「対応の記録」を書くと、そこから覚えます）'));
+          return;
+        }
+        list.forEach(function (m) {
+          var row = el('div', 'rule');
+          row.appendChild(el('span', 'p', '[' + m.label + '] ' + m.topic + ' — ' + m.note));
+          row.appendChild(actionButton('×', null, '…', function () {
+            return api('/api/memory/' + m.id, 'DELETE').then(function (r2) {
+              if (r2.status !== 200 || r2.body.ok === false) {
+                toast('消せませんでした: ' + (r2.body.error || r2.status), 'err');
+                return;
+              }
+              toast('忘れました', 'ok');
+              openPolicy();
+            });
+          }));
+          memBox.appendChild(row);
+        });
+      });
     });
   }
   // ---------------------------------------------------------------- ヘルプ
