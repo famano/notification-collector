@@ -195,6 +195,27 @@ function Get-AccountDisplayName {
     return ("アカウント {0}" -f $Id)
 }
 
+function Get-SelfAccountName {
+    <#
+      .SYNOPSIS
+        そのアカウントで「自分が誰として繋がっているか」。メールならアドレスが入る。
+      .DESCRIPTION
+        疎通確認が通ったときに保存した名前 (account.<連携先>) をそのまま返す。
+        ここでネットワークには出ない ―― カード1枚ごとに /me を叩くのは重すぎるし、
+        繋がっていない時間に「自分が誰か」を見失うのは困る。
+
+        これが要るのは**名義**のため。To: 他人 / Cc: 自分 で来たメールで、
+        ワーカーがその他人の名義で返信を書いてしまうことがあった。本人が誰かを
+        モデルに推測させず、繋いだアカウントから決めて渡すために使う
+        (組み立ては phase4\lib\Viewer.ps1)。
+      .OUTPUTS
+        [string] 空のことがある (疎通確認より前に繋いだアカウント)
+    #>
+    param([Parameter(Mandatory)] [string] $Service, [string] $Id, [string] $Path)
+    if (-not $Id) { $Id = Get-CurrentAccountId $Service }
+    return [string] (Get-Secret -Name ("account.{0}" -f $Service) -AccountId $Id -Path $Path)
+}
+
 # ---------------------------------------------------------------- 経路との対応
 
 # イベントの source → どの連携先のアカウントで取り直すか。
