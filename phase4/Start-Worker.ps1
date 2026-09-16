@@ -49,6 +49,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 の子として起動されたとき、logs\ に UTF-8 で書く。
+# 既定はコンソールの文字コード (日本語 Windows なら CP932) で、
+# リポジトリの他のすべて (スクリプト・JSON・DB) と食い違う。
+. "$PSScriptRoot\..\lib\LogText.ps1"
+Set-Utf8Output
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 . "$PSScriptRoot\..\phase2\lib\ClaudeClient.ps1"
 . "$PSScriptRoot\..\phase2\lib\Dossier.ps1"
@@ -846,7 +851,14 @@ try {
                 Start-Sleep -Seconds $IdleSeconds
                 continue
             }
+            # カード1枚で何トークン使ったかを出す。ワーカーは常駐なので
+            # 1枚ごとに数え直す。キャッシュが効いていれば「キャッシュヒット」が伸びる。
+            Reset-ClaudeUsage
             Invoke-WorkItem $task
+            $usage = Get-ClaudeUsageLine
+            if ($usage) {
+                Write-Host ("  [#{0}] トークン使用状況: {1}" -f [int] $task['id'], $usage) -ForegroundColor DarkGray
+            }
         }
         catch {
             $msg = $_.Exception.Message

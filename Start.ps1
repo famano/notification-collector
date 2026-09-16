@@ -14,7 +14,7 @@
       - 死活と現在の作業を1行にまとめて出し続ける
       - Ctrl+C で3つともまとめて止める
 
-    各プロセスの出力は logs\ に残る。画面に3本混ぜると読めなくなるため、
+    各プロセスの出力は logs\ に UTF-8 で残る。画面に3本混ぜると読めなくなるため、
     こちらは要約だけを出す。詳しく見たいときは -Follow か logs\ を直接見る。
 
 .PARAMETER Port
@@ -61,6 +61,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\phase2\lib\TaskStore.ps1"
 # API キーの置き場所 (環境変数 / 保管庫 / 配布設定) と配布設定の取り込み。
 . "$PSScriptRoot\lib\ApiKey.ps1"
+# logs\ の読み書きの文字コード。
+. "$PSScriptRoot\lib\LogText.ps1"
 
 if ($Port -le 0) { $Port = Get-AppConfigInt -Path 'startup.port' -Default 8787 }
 if (-not $PSBoundParameters.ContainsKey('NoBrowser') -and -not (Get-AppConfigBool -Path 'startup.openBrowser' -Default $true)) {
@@ -433,7 +435,7 @@ try {
             Write-Host ''
             Write-Host ("[{0}] {1} が終了しました (exit {2})。起動し直します ({3} 回目)" -f `
                 (Get-Date -Format 'HH:mm:ss'), $c.name, $code, ($c.starts + 1)) -ForegroundColor Yellow
-            $tail = @(Get-Content -LiteralPath $c.errlog -Encoding UTF8 -Tail 3 -ErrorAction SilentlyContinue)
+            $tail = @(Get-LogTail -Path $c.errlog -Tail 3)
             foreach ($t in $tail) { if ($t.Trim()) { Write-Host ("      " + $t) -ForegroundColor DarkRed } }
             Restart-Child -Child $c
             # pid が変わったので記録も更新する。古い pid のままだと
@@ -443,7 +445,7 @@ try {
 
         if ($Follow) {
             foreach ($c in $Children) {
-                $tail = @(Get-Content -LiteralPath $c.log -Encoding UTF8 -Tail 2 -ErrorAction SilentlyContinue)
+                $tail = @(Get-LogTail -Path $c.log -Tail 2)
                 foreach ($t in $tail) { if ($t.Trim()) { Write-Host ("[{0}] {1}" -f $c.name, $t) -ForegroundColor DarkGray } }
             }
             Start-Sleep -Seconds 3

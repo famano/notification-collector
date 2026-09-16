@@ -419,6 +419,169 @@ $script:InjectionGuard
 "@
 }
 
+# ---------------------------------------------------------------- プロンプトキャッシュ
+
+# system プロンプトとツール定義は、通知1件ごと・ツール往復1回ごとに、まったく同じ
+# ものを送り直している。ここが入力トークンの大半を占める。キャッシュに載せれば
+# 2回目からは約1/10の値段で読めるので、トークン代はそのぶん落ちる。
+#
+# キャッシュは「前方一致」でしか効かない。tools → system → messages の順に並べた
+# バイト列が、区切り (cache_control) の手前まで前回と1バイトでも違えば、そこから
+# 先は総入れ替えになる。だから区切りは「毎回変わらない部分の最後」に置く ――
+# system の末尾に1つ置けば、その手前にある tools ごと載る。通知本文・日時・記憶の
+# ように毎回変わるものは、すべて区切りより後ろ (messages) にあるので触らなくてよい。
+
+function Get-CacheControl {
+    <#
+      .SYNOPSIS
+        cache_control の中身を返す。キャッシュを使わない設定なら $null。
+      .DESCRIPTION
+        既定は 5 分。読み書きのたびに期限は延びるので、通知が固まって届く間や
+        ワーカーのツール往復の間は、これで繋がり続ける。
+        届き方がまばらで毎回書き込みから始まってしまうなら policy.json の
+        llm.cacheTtl に "1h" と書く (書き込みの値段が2倍になるので、1時間に
+        3回以上通らないと損になる)。"off" で完全に切れる。
+    #>
+    param($Policy)
+    $ttl = '5m'
+    if ($Policy -and $Policy.llm -and $Policy.llm.cacheTtl) { $ttl = [string] $Policy.llm.cacheTtl }
+    switch ($ttl) {
+        'off'   { return $null }
+        '1h'    { return @{ type = 'ephemeral'; ttl = '1h' } }
+        default { return @{ type = 'ephemeral' } }
+    }
+}
+
+function New-SystemBlocks {
+    <#
+      .SYNOPSIS
+        system を、区切りを置けるブロックの配列にする。
+      .DESCRIPTION
+        system は文字列でも渡せるが、その形では cache_control を置く場所が無い。
+    #>
+    param([string] $SystemPrompt, $CacheControl)
+    $block = [ordered]@{ type = 'text'; text = $SystemPrompt }
+    if ($CacheControl) { $block['cache_control'] = $CacheControl }
+    # 先頭のカンマが要る。付けないと1要素の配列は戻り値で展開されて中身そのものになり、
+    # system がブロックの配列ではなくオブジェクト1個として送られてしまう。
+    return ,@($block)
+}
+
+function Set-CacheBreakpoint {
+    <#
+      .SYNOPSIS
+        会話の末尾へ区切りを移す (エージェントループ用)。
+      .DESCRIPTION
+        ツールを1往復するたびに履歴は伸び、次のターンではその全部を送り直している。
+        末尾に区切りを置いておくと、前のターンまでの履歴はキャッシュから読まれ、
+        増えた分だけが新しく書かれる。往復が多いカードほど効く。
+
+        区切りは1リクエストに4つまでなので、増やさずに移す。前のターンに置いた
+        区切りは外してよい ―― 書き込まれたキャッシュはその位置に残っており、
+        新しい区切りからそこまで遡って読まれる。
+
+        cache_control は「このブロックを載せる」印ではなく「ここまでを載せる」
+        という区切りなので、手前にあるものは全部 ―― モデルが返した assistant の
+        応答も含めて ―― キャッシュに入る。
+      .OUTPUTS
+        区切りを付けたブロック。次の呼び出しで $Previous に渡す。
+    #>
+    param($Messages, $Previous, $CacheControl)
+    if (-not $CacheControl -or $Messages.Count -eq 0) { return $Previous }
+
+    # 置くのは user の末尾。送る時点で履歴の末尾は必ず user (最初の依頼か
+    # ツールの結果) なので、そこが一番後ろ = 載る範囲が一番広い。
+    # assistant のブロックに付けると、その後ろの tool_result が範囲から外れて
+    # 狭くなるうえ、モデルが返したものに手を入れることになる (thinking ブロックは
+    # 次のターンへ無改変で戻す必要があり、書き換えるとそこから先が無効になる)。
+    $last = $Messages[$Messages.Count - 1]
+    if ($last['role'] -ne 'user') { return $Previous }
+
+    $blocks = @($last['content'])
+    if ($blocks.Count -eq 0) { return $Previous }
+    $block = $blocks[$blocks.Count - 1]
+    if ($block -isnot [hashtable]) { return $Previous }
+
+    if ($Previous -and -not [object]::ReferenceEquals($Previous, $block)) { $Previous.Remove('cache_control') }
+    $block['cache_control'] = $CacheControl
+    return $block
+}
+
+# キャッシュが効いているかは、応答の usage でしか分からない。当たらなくなっても
+# エラーは出ず、請求額が上がるだけなので、黙っていると気付けない。
+#
+# 1回ごとに出すと量が多いので、ここでは足し込むだけにして、呼び出し側が区切り
+# (通知1巡・カード1枚) ごとに1行で出す。-Verbose に頼らないのは、通常の起動
+# (Start.ps1) が3本を別プロセスで立てており、親に付けた -Verbose が子に渡らない
+# ため ―― 一番見たい場面で一番出てこない出し方になる。
+$script:ClaudeUsage = $null
+
+function Reset-ClaudeUsage { $script:ClaudeUsage = $null }
+
+function Add-ClaudeUsage {
+    param($Usage)
+    if (-not $Usage) { return }
+    if (-not $script:ClaudeUsage) {
+        $script:ClaudeUsage = [ordered]@{ calls = 0; input = 0; cacheWrite = 0; cacheRead = 0; output = 0 }
+    }
+    $script:ClaudeUsage.calls      += 1
+    $script:ClaudeUsage.input      += [int] $Usage.input_tokens
+    $script:ClaudeUsage.cacheWrite += [int] $Usage.cache_creation_input_tokens
+    $script:ClaudeUsage.cacheRead  += [int] $Usage.cache_read_input_tokens
+    $script:ClaudeUsage.output     += [int] $Usage.output_tokens
+}
+
+function Get-ClaudeUsageLine {
+    <#
+      .SYNOPSIS
+        前回の Reset-ClaudeUsage からのトークン数を1行にする。1度も呼んでいなければ $null。
+      .DESCRIPTION
+        キャッシュヒットが伸びていれば効いている。2回目以降もキャッシング
+        (書き込み) ばかりでキャッシュヒットが 0 のままなら、区切りより手前が
+        毎回変わっている ―― プロンプトの組み立てを疑うこと。
+    #>
+    if (-not $script:ClaudeUsage) { return $null }
+    $u = $script:ClaudeUsage
+    return ("API呼び出し {0}回 / 入力 {1:N0} (キャッシュヒット {2:N0} ・キャッシング {3:N0}) / 出力 {4:N0}" -f `
+            $u.calls, ($u.input + $u.cacheRead + $u.cacheWrite), $u.cacheRead, $u.cacheWrite, $u.output)
+}
+
+function ConvertTo-StableOrder {
+    <#
+      .SYNOPSIS
+        ハッシュテーブルのキーの並びを固定する。
+      .DESCRIPTION
+        キャッシュは前方一致なので、同じ内容は同じバイト列にならないと当たらない。
+        ところが PowerShell の Hashtable は並びを約束していない (7.x では文字列の
+        ハッシュがプロセスごとに変わるため、同じ payload でも起動のたびに JSON の
+        キーの順が変わる)。それでは一度も当たらないので、書き出す直前にここで揃える。
+
+        [ordered] (OrderedDictionary) は書いた順そのものに意味がある
+        (ツールの引数をモデルに見せる順) ので、その並びは保つ。
+    #>
+    param($Value)
+
+    if ($Value -is [System.Collections.Specialized.OrderedDictionary]) {
+        $out = [ordered]@{}
+        foreach ($k in @($Value.Keys)) { $out[[string] $k] = ConvertTo-StableOrder $Value[$k] }
+        return $out
+    }
+    if ($Value -is [hashtable]) {
+        $out = [ordered]@{}
+        foreach ($k in (@($Value.Keys) | Sort-Object -CaseSensitive)) {
+            $out[[string] $k] = ConvertTo-StableOrder $Value[$k]
+        }
+        return $out
+    }
+    if ($Value -is [string]) { return $Value }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        # ここも先頭のカンマが要る。1要素の配列 (tools や messages) が展開されると、
+        # 配列で渡すべき場所にオブジェクトが入って API に弾かれる。
+        return ,@(foreach ($item in $Value) { ConvertTo-StableOrder $item })
+    }
+    return $Value
+}
+
 # ---------------------------------------------------------------- HTTP
 
 function Send-ClaudeRequest {
@@ -438,7 +601,9 @@ function Send-ClaudeRequest {
 
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    $json  = $Payload | ConvertTo-Json -Depth 12 -Compress
+    # 並びを固定してから JSON にする。キーの順が変わるとバイト列が変わり、
+    # 中身が同じでもキャッシュには当たらない。
+    $json  = ConvertTo-Json -InputObject (ConvertTo-StableOrder $Payload) -Depth 12 -Compress
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
     $headers = @{
         'x-api-key'         = $apiKey
@@ -455,6 +620,9 @@ function Send-ClaudeRequest {
             # PowerShell 5.1 の自動デコードは日本語を壊すことがあるので明示的に UTF-8 で読む
             $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
             $obj  = $text | ConvertFrom-Json
+
+            # 何トークン読めた / 書いたかを足し込む。出すのは呼び出し側。
+            Add-ClaudeUsage $obj.usage
 
             # 安全分類器による拒否は HTTP 200 で返る。content を読む前に必ず確認する。
             if ($obj.stop_reason -eq 'refusal') {
@@ -522,14 +690,23 @@ function Invoke-ClaudeAgent {
         [int] $MaxTurns = 12
     )
 
+    $cache  = Get-CacheControl $Policy
+    $sysBlk = New-SystemBlocks $System $cache
+    $mark   = $null
+
     $messages = [System.Collections.ArrayList]::new()
-    [void] $messages.Add(@{ role = 'user'; content = $UserText })
+    # 最初の user もブロックで積む。文字列のままだと区切りを置く場所が無い。
+    [void] $messages.Add(@{ role = 'user'; content = @(@{ type = 'text'; text = $UserText }) })
 
     for ($turn = 1; $turn -le $MaxTurns; $turn++) {
+        # 送る直前に、区切りを履歴の末尾へ移す。ここまでは前のターンで
+        # 書かれているので読み出しになり、増えた分だけが新しく書かれる。
+        $mark = Set-CacheBreakpoint -Messages $messages -Previous $mark -CacheControl $cache
+
         $payload = @{
             model         = $Policy.llm.model
             max_tokens    = [int] $Policy.llm.maxOutputTokens
-            system        = $System
+            system        = $sysBlk
             tools         = [object[]] $Tools
             messages      = [object[]] $messages.ToArray()
             output_config = @{ effort = $(if ($Policy.llm.effort) { $Policy.llm.effort } else { 'low' }) }
@@ -572,7 +749,10 @@ function New-BasePayload {
     return @{
         model       = $Policy.llm.model
         max_tokens  = [int] $Policy.llm.maxOutputTokens
-        system      = $SystemPrompt
+        # system の末尾に区切りを1つ。手前の tools ごとキャッシュに載る。
+        # 毎回変わるもの (通知本文・日時・記憶) は messages 側にあるので、
+        # 区切りより後ろにあり、ここを壊さない。
+        system      = New-SystemBlocks $SystemPrompt (Get-CacheControl $Policy)
         tools       = @($Tool)
         tool_choice = @{ type = 'tool'; name = $Tool.name }
         messages    = @(@{ role = 'user'; content = $UserText })
