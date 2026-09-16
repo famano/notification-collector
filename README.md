@@ -1,4 +1,4 @@
-# notification-collector
+﻿# notification-collector
 
 Windows の通知とメールを起点に、対応の要否を判断し、実際の作業まで行い、
 その進捗をカンバンで見ながら人間が割り込めるようにするシステム。
@@ -73,7 +73,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Start.ps1
 - どれかが落ちたら間隔を空けて起動し直す
 - 死活と現在の作業を1行にまとめて出し続ける
 - `Ctrl+C` で3つともまとめて止まる
-- 各プロセスの出力は `logs\` に残る (画面には要約だけ)
+- 各プロセスの出力は `logs\` に UTF-8 で残る (画面には要約だけ)
 
 ```powershell
 .\Start.ps1 -Port 9000      # カンバンのポートを変える

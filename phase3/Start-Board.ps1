@@ -33,6 +33,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Start.ps1 の子として起動されたとき、logs\ に UTF-8 で書く。
+# 既定はコンソールの文字コード (日本語 Windows なら CP932) で、
+# リポジトリの他のすべて (スクリプト・JSON・DB) と食い違う。
+. "$PSScriptRoot\..\lib\LogText.ps1"
+Set-Utf8Output
 . "$PSScriptRoot\..\phase2\lib\TaskStore.ps1"
 # 要求を通すかどうかの判定 (Host / Origin)。壊れても画面には何も出ない場所なので、
 # ボードを起動せずに確かめられる形にしてある。
