@@ -507,6 +507,45 @@ function Set-CacheBreakpoint {
     return $block
 }
 
+# キャッシュが効いているかは、応答の usage でしか分からない。当たらなくなっても
+# エラーは出ず、請求額が上がるだけなので、黙っていると気付けない。
+#
+# 1回ごとに出すと量が多いので、ここでは足し込むだけにして、呼び出し側が区切り
+# (通知1巡・カード1枚) ごとに1行で出す。-Verbose に頼らないのは、通常の起動
+# (Start.ps1) が3本を別プロセスで立てており、親に付けた -Verbose が子に渡らない
+# ため ―― 一番見たい場面で一番出てこない出し方になる。
+$script:ClaudeUsage = $null
+
+function Reset-ClaudeUsage { $script:ClaudeUsage = $null }
+
+function Add-ClaudeUsage {
+    param($Usage)
+    if (-not $Usage) { return }
+    if (-not $script:ClaudeUsage) {
+        $script:ClaudeUsage = [ordered]@{ calls = 0; input = 0; cacheWrite = 0; cacheRead = 0; output = 0 }
+    }
+    $script:ClaudeUsage.calls      += 1
+    $script:ClaudeUsage.input      += [int] $Usage.input_tokens
+    $script:ClaudeUsage.cacheWrite += [int] $Usage.cache_creation_input_tokens
+    $script:ClaudeUsage.cacheRead  += [int] $Usage.cache_read_input_tokens
+    $script:ClaudeUsage.output     += [int] $Usage.output_tokens
+}
+
+function Get-ClaudeUsageLine {
+    <#
+      .SYNOPSIS
+        前回の Reset-ClaudeUsage からのトークン数を1行にする。1度も呼んでいなければ $null。
+      .DESCRIPTION
+        読んだ分 (キャッシュ読み) が伸びていれば効いている。2回目以降も
+        書いた分 (キャッシュ書き) ばかりで読んだ分が 0 のままなら、区切りより
+        手前が毎回変わっている ―― プロンプトの組み立てを疑うこと。
+    #>
+    if (-not $script:ClaudeUsage) { return $null }
+    $u = $script:ClaudeUsage
+    return ("{0}回 / 入力 {1:N0} (読んだ分 {2:N0} ・書いた分 {3:N0}) / 出力 {4:N0}" -f `
+            $u.calls, ($u.input + $u.cacheRead + $u.cacheWrite), $u.cacheRead, $u.cacheWrite, $u.output)
+}
+
 function ConvertTo-StableOrder {
     <#
       .SYNOPSIS
@@ -582,15 +621,8 @@ function Send-ClaudeRequest {
             $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
             $obj  = $text | ConvertFrom-Json
 
-            # キャッシュが効いているかはこの数字でしか分からない。当たっていれば
-            # cache_read が伸び、input は区切りより後ろの分だけになる。
-            # 当たらなくなってもエラーは出ず請求額だけが上がるので、プロンプトの
-            # 組み立てを直したら -Verbose で確かめること。
-            if ($obj.usage) {
-                Write-Verbose ("Claude tokens: 入力 {0} / キャッシュ書き {1} / キャッシュ読み {2} / 出力 {3}" -f `
-                    $obj.usage.input_tokens, $obj.usage.cache_creation_input_tokens, `
-                    $obj.usage.cache_read_input_tokens, $obj.usage.output_tokens)
-            }
+            # 何トークン読めた / 書いたかを足し込む。出すのは呼び出し側。
+            Add-ClaudeUsage $obj.usage
 
             # 安全分類器による拒否は HTTP 200 で返る。content を読む前に必ず確認する。
             if ($obj.stop_reason -eq 'refusal') {

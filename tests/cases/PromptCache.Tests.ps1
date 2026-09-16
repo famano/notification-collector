@@ -103,6 +103,42 @@ Describe '並びの固定 (同じ内容は同じバイト列にする)' {
     }
 }
 
+Describe 'トークン数の記録 (効いているかを見る唯一の手段)' {
+
+    It '1度も呼んでいなければ何も出さない' {
+        Reset-ClaudeUsage
+        Assert-Null (Get-ClaudeUsageLine)
+    }
+
+    It '複数回ぶんを足して1行にする' {
+        Reset-ClaudeUsage
+        Add-ClaudeUsage ([pscustomobject]@{ input_tokens = 100; cache_creation_input_tokens = 900
+                                            cache_read_input_tokens = 0;  output_tokens = 50 })
+        Add-ClaudeUsage ([pscustomobject]@{ input_tokens = 100; cache_creation_input_tokens = 0
+                                            cache_read_input_tokens = 900; output_tokens = 50 })
+        $line = Get-ClaudeUsageLine
+        Assert-Match '2回' $line
+        Assert-Match '入力 2,000' $line          # (100+900) + (100+900)
+        Assert-Match '読んだ分 900' $line        # 2回目がキャッシュから読めている
+        Assert-Match '書いた分 900' $line
+        Assert-Match '出力 100' $line
+    }
+
+    It '数え直せる (ワーカーは常駐なのでカードごとに戻す)' {
+        Reset-ClaudeUsage
+        Add-ClaudeUsage ([pscustomobject]@{ input_tokens = 1; cache_creation_input_tokens = 2
+                                            cache_read_input_tokens = 3; output_tokens = 4 })
+        Reset-ClaudeUsage
+        Assert-Null (Get-ClaudeUsageLine)
+    }
+
+    It 'usage の無い応答では数えない' {
+        Reset-ClaudeUsage
+        Add-ClaudeUsage $null
+        Assert-Null (Get-ClaudeUsageLine)
+    }
+}
+
 Describe '区切りの置き場所 (エージェントループ)' {
 
     # Send-ClaudeRequest を差し替えて、送った payload をその場で JSON に固める。
