@@ -479,14 +479,21 @@ function Set-CacheBreakpoint {
         区切りは1リクエストに4つまでなので、増やさずに移す。前のターンに置いた
         区切りは外してよい ―― 書き込まれたキャッシュはその位置に残っており、
         新しい区切りからそこまで遡って読まれる。
+
+        cache_control は「このブロックを載せる」印ではなく「ここまでを載せる」
+        という区切りなので、手前にあるものは全部 ―― モデルが返した assistant の
+        応答も含めて ―― キャッシュに入る。
       .OUTPUTS
         区切りを付けたブロック。次の呼び出しで $Previous に渡す。
     #>
     param($Messages, $Previous, $CacheControl)
     if (-not $CacheControl -or $Messages.Count -eq 0) { return $Previous }
 
-    # 末尾が user のときだけ置く。assistant の応答はモデルが返したものを無改変で
-    # 戻す約束なので、こちらから鍵を足さない。
+    # 置くのは user の末尾。送る時点で履歴の末尾は必ず user (最初の依頼か
+    # ツールの結果) なので、そこが一番後ろ = 載る範囲が一番広い。
+    # assistant のブロックに付けると、その後ろの tool_result が範囲から外れて
+    # 狭くなるうえ、モデルが返したものに手を入れることになる (thinking ブロックは
+    # 次のターンへ無改変で戻す必要があり、書き換えるとそこから先が無効になる)。
     $last = $Messages[$Messages.Count - 1]
     if ($last['role'] -ne 'user') { return $Previous }
 
