@@ -280,7 +280,7 @@ try {
         Write-Host ("除外 {0} / 同期待ち {1} / 統合 {2} / 判定 {3} / タスク作成 {4} / 既存に集約 {5} / 失敗 {6}" -f `
             $stats.ignored, $stats.deferred, $stats.merged, $stats.llm, $stats.tasks, $stats.stacked, $stats.failed) -ForegroundColor Yellow
 
-        # 何トークン使ったか。キャッシュが効いていれば「読んだ分」が伸びる。
+        # 何トークン使ったか。キャッシュが効いていれば「キャッシュヒット」が伸びる。
         $usage = Get-ClaudeUsageLine
         if ($usage) { Write-Host ("トークン使用状況: " + $usage) -ForegroundColor DarkGray }
     }

@@ -536,9 +536,9 @@ function Get-ClaudeUsageLine {
       .SYNOPSIS
         前回の Reset-ClaudeUsage からのトークン数を1行にする。1度も呼んでいなければ $null。
       .DESCRIPTION
-        読んだ分 (キャッシュ読み) が伸びていれば効いている。2回目以降も
-        書いた分 (キャッシュ書き) ばかりで読んだ分が 0 のままなら、区切りより
-        手前が毎回変わっている ―― プロンプトの組み立てを疑うこと。
+        キャッシュヒットが伸びていれば効いている。2回目以降もキャッシング
+        (書き込み) ばかりでキャッシュヒットが 0 のままなら、区切りより手前が
+        毎回変わっている ―― プロンプトの組み立てを疑うこと。
     #>
     if (-not $script:ClaudeUsage) { return $null }
     $u = $script:ClaudeUsage

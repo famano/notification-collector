@@ -852,12 +852,12 @@ try {
                 continue
             }
             # カード1枚で何トークン使ったかを出す。ワーカーは常駐なので
-            # 1枚ごとに数え直す。キャッシュが効いていれば「読んだ分」が伸びる。
+            # 1枚ごとに数え直す。キャッシュが効いていれば「キャッシュヒット」が伸びる。
             Reset-ClaudeUsage
             Invoke-WorkItem $task
             $usage = Get-ClaudeUsageLine
             if ($usage) {
-                Write-Host ("  [#{0}] トークン: {1}" -f [int] $task['id'], $usage) -ForegroundColor DarkGray
+                Write-Host ("  [#{0}] トークン使用状況: {1}" -f [int] $task['id'], $usage) -ForegroundColor DarkGray
             }
         }
         catch {
