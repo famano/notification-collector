@@ -2,9 +2,10 @@
   "_comment": "トリアージ方針。コードを変えずにここだけ直せるようにしてある。",
 
   "llm": {
-    "_comment": "分類タスクなのでモデルは落とさず effort で費用を抑える。effort は low/medium/high/xhigh/max。Opus 5 は thinking が既定オンで max_tokens を消費するため余裕を持たせる。",
+    "_comment": "分類タスクなのでモデルは落とさず effort で費用を抑える。effort は low/medium/high/xhigh/max。Opus 5 は thinking が既定オンで max_tokens を消費するため余裕を持たせる。cacheTtl は毎回同じ部分 (system プロンプトとツール定義) をキャッシュに載せておく時間で、2回目以降はその分が約1/10の値段になる。既定の 5m は読み書きのたびに延びるので、通知が固まって届く間は繋がり続ける。通知がまばらで毎回書き込みから始まるなら 1h (書き込みは2倍の値段なので、1時間に3回以上通らないと損)。off で切れる。",
     "model": "claude-opus-5",
     "effort": "low",
+    "cacheTtl": "5m",
     "maxOutputTokens": 4096,
     "maxBodyChars": 4000
   },
