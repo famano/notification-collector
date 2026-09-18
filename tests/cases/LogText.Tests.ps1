@@ -62,3 +62,44 @@ Describe '子プロセスの出力' {
         Skip-It 'リダイレクト先には UTF-8 (BOM 無し) で書く' '画面に直接出しているため'
     }
 }
+
+Describe '前回のログを残す' {
+
+    $ldir = New-TestTempDir
+
+    It '起動し直す前のログを old\ へ移す (再起動で事故の記録を消さない)' {
+        $p = Join-Path $ldir 'worker.log'
+        [IO.File]::WriteAllText($p, "PUT https://api.github.com/x`n")
+        $dest = Save-PreviousLog -Path $p
+        Assert-NotNull $dest
+        Assert-False (Test-Path -LiteralPath $p)
+        Assert-Match 'PUT' ([IO.File]::ReadAllText($dest))
+        Assert-Match 'old[\\/]worker-\d{8}-\d{6}' $dest
+    }
+
+    It '空のログと無いログは移さない' {
+        $p = Join-Path $ldir 'board.log'
+        [IO.File]::WriteAllText($p, '')
+        Assert-Null (Save-PreviousLog -Path $p)
+        Assert-Null (Save-PreviousLog -Path (Join-Path $ldir 'none.log'))
+    }
+
+    It '同じ名前のログは Keep 本まで。別の名前 (err) は別に数える' {
+        for ($i = 0; $i -lt 5; $i++) {
+            $p = Join-Path $ldir 'collector.log'
+            [IO.File]::WriteAllText($p, "run $i")
+            (Get-Item $p).LastWriteTime = (Get-Date).AddMinutes(-10 + $i)
+            [void] (Save-PreviousLog -Path $p -Keep 3)
+            $e = Join-Path $ldir 'collector.err.log'
+            [IO.File]::WriteAllText($e, "err $i")
+            (Get-Item $e).LastWriteTime = (Get-Date).AddMinutes(-10 + $i)
+            [void] (Save-PreviousLog -Path $e -Keep 3)
+        }
+        $old = Join-Path $ldir 'old'
+        Assert-Equal 3 @(Get-ChildItem $old -Filter 'collector-*.log').Count
+        Assert-Equal 3 @(Get-ChildItem $old -Filter 'collector.err-*.log').Count
+        # 残るのは新しいほう
+        $newest = Get-ChildItem $old -Filter 'collector-*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        Assert-Equal 'run 4' ([IO.File]::ReadAllText($newest.FullName))
+    }
+}

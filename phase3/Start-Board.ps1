@@ -921,6 +921,10 @@ function Invoke-Route {
                 [pscustomobject]@{
                     id = $_['id']; task_id = $_['task_id']; tool = $_['tool']
                     summary = $_['summary']; detail = $_['detail']; created_at = $_['created_at']
+                    # 「まとめて許可」を押したときに何が束ねられるか。画面はこれを出す。
+                    grant_key = $(if ($_['grant_key']) { [string] $_['grant_key'] } else { [string] $_['tool'] })
+                    # 0 なら「まとめて許可」を出さない (影響を事前に確かめられない上書きなど)
+                    grantable = ([int] $_['grantable'] -ne 0)
                 }
             })
             grants = @(Get-ToolGrants -Conn $Conn | ForEach-Object {
@@ -939,10 +943,14 @@ function Invoke-Route {
         $r = Get-ToolRequest -Conn $Conn -RequestId $reqId
         if (-not $r) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
 
-        # 「まとめて許可」は許可のときだけ作る
-        if ($decision -eq 'approved' -and $b -and $b.grant) {
-            if ($b.grant -eq 'task')   { Add-ToolGrant -Conn $Conn -Scope 'task' -ScopeId ([int] $r['task_id']) -Tool ([string] $r['tool']) }
-            if ($b.grant -eq 'global') { Add-ToolGrant -Conn $Conn -Scope 'global' -ScopeId $null -Tool ([string] $r['tool']) }
+        # 「まとめて許可」は許可のときだけ作る。
+        # 束ねる単位は要求に記録された鍵 (http_request なら「種類 × ホスト」)。
+        # 画面から鍵を受け取らない ―― 受け取れば、どの要求からでも何でも許可できてしまう。
+        # 束ねてよくない要求 (影響を事前に確かめられない上書き) では作らない。
+        if ($decision -eq 'approved' -and $b -and $b.grant -and [int] $r['grantable'] -ne 0) {
+            $gk = if ($r['grant_key']) { [string] $r['grant_key'] } else { [string] $r['tool'] }
+            if ($b.grant -eq 'task')   { Add-ToolGrant -Conn $Conn -Scope 'task' -ScopeId ([int] $r['task_id']) -Tool $gk }
+            if ($b.grant -eq 'global') { Add-ToolGrant -Conn $Conn -Scope 'global' -ScopeId $null -Tool $gk }
         }
         $ok = Set-ToolRequestStatus -Conn $Conn -RequestId $reqId -Status $decision
         if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'すでに処理済みです' } 409; return }
