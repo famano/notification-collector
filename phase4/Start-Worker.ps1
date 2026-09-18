@@ -577,6 +577,8 @@ function Invoke-WorkItem {
                 url      = [string] $toolInput.url
                 deadline = [string] $toolInput.deadline
                 what_is_missing = [string] $toolInput.what_is_missing
+                # 引き渡し先のリポジトリ。形が正しいものだけ残す (画面で Claude Code に渡す入口になる)
+                repo     = $(if ($blocker -eq 'beyond_tools' -and ([string] $toolInput.repo) -match '^(?!\.{1,2}/)[A-Za-z0-9_.-]+/(?!\.{1,2}$)[A-Za-z0-9_.-]+$') { [string] $toolInput.repo } else { $null })
                 tried    = [string] $toolInput.tried
                 setup_task_id = $(if ($blocker -eq 'credential_missing') { $script:PendingSetupId } else { $null })
             }

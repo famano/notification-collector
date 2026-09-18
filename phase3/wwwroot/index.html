@@ -174,6 +174,8 @@
   }
   #drawer .humanstep .hs-go:hover { filter: brightness(1.08); }
   #drawer .humanstep .hs-sub { font-size: 12px; color: var(--muted); margin-top: 9px; word-break: break-word; }
+  #drawer .humanstep .delegate { margin-top: 12px; padding-top: 10px; border-top: 1px dashed color-mix(in srgb, var(--high) 30%, transparent); }
+  #drawer .humanstep .delegate pre { max-height: 240px; overflow: auto; font-size: 11.5px; }
   /* 外に出したあとで問題が見つかった印。本人の1手 (橙) と区別して赤で出す */
   .card .humanstep.alert, #drawer .humanstep.alert {
     background: color-mix(in srgb, var(--danger) 10%, var(--panel));
@@ -881,6 +883,7 @@
     var foot = el('div', 'foot');
     foot.appendChild(el('span', null, '#' + t.id));
     if (t.urgency === 'high') foot.appendChild(el('span', 'u-high', '緊急度 高'));
+    if (t.shape === 'delegated') foot.appendChild(el('span', 'recur', 'Claude Code が作業中'));
     // 同じ件が何度も来ていることは、カードを増やさない代わりにここで見せる。
     if (t.occurrence_count > 1) {
       var oc = el('span', 'recur', t.occurrence_count + ' 回目');
@@ -1241,6 +1244,44 @@
 
   function pre(text) { return el('pre', null, text); }
 
+  // Claude Code への引き渡し。新しいブランチの worktree で作業させ、
+  // 終わったらこちらで新しいブランチだけを push して下書きの PR にする。マージは人が決める。
+  function delegationBox(t) {
+    var box = el('div', 'delegate');
+    box.appendChild(el('div', 'hs-sub', '読み込んでいます…'));
+    api('/api/tasks/' + t.id + '/delegation').then(function (r) {
+      box.innerHTML = '';
+      var d = r.body || {};
+      if (d.running) {
+        box.appendChild(el('div', 'hs-sub', 'Claude Code が作業しています。終わるとやりとりに結果が残ります。'));
+        return;
+      }
+      if (!d.eligible) return;
+      if (!d.available) { box.appendChild(el('div', 'hs-sub', 'Claude Code に渡せません: ' + d.reason)); return; }
+      box.appendChild(el('div', 'hs-l', 'Claude Code に渡す (' + d.repo + ')'));
+      box.appendChild(el('div', 'hs-sub', '新しいブランチで作業させ、終わったら下書きの PR にします。マージするかはあなたが決めます。'
+        + ' push・gh・Web は止めますが、Windows ではコマンドからの通信までは止められません。渡す文面を読んでから押してください。'));
+      var det = el('details');
+      det.appendChild(el('summary', null, '渡す文面'));
+      det.appendChild(el('pre', null, d.prompt));
+      box.appendChild(det);
+      box.appendChild(el('div', 'hs-sub', '手元の clone のフォルダ（origin が ' + d.repo + ' を指していること）'));
+      var path = el('input'); path.type = 'text'; path.value = d.path || ''; path.style.width = '100%';
+      path.placeholder = 'C:\\Users\\...\\' + d.repo.split('/')[1];
+      box.appendChild(path);
+      var row = el('div', 'row'); row.style.marginTop = '8px';
+      row.appendChild(actionButton('Claude Code に渡す', 'primary', '渡しています…', function () {
+        return api('/api/tasks/' + t.id + '/delegate', 'POST', { path: path.value.trim() }).then(function (a) {
+          if (a.status !== 200 || !a.body || !a.body.ok) { toast('渡せませんでした: ' + ((a.body && a.body.error) || a.status), 'err'); return; }
+          toast('Claude Code に渡しました。終わるとやりとりに結果が残ります', 'ok');
+          return refresh(true);
+        });
+      }));
+      box.appendChild(row);
+    });
+    return box;
+  }
+
   function openDetail(id, keepScroll) {
     return api('/api/tasks/' + id).then(function (r) {
       if (r.status !== 200) return;
@@ -1345,6 +1386,9 @@
         if (hs.tried) {
           hbox.appendChild(el('div', 'hs-tried', 'ここに至るまでに試したこと: ' + hs.tried));
         }
+        // リポジトリのコード修正として引き渡されたなら、Claude Code に渡せる。
+        // 押す前に、渡す文面を全文見せる (ワーカーが第三者の文面から組み立てたものなので)。
+        if (hs.blocker === 'beyond_tools' && hs.repo) hbox.appendChild(delegationBox(t));
         pad.appendChild(hbox);
       }
 

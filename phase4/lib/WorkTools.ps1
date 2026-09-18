@@ -441,6 +441,10 @@ blocker は次から選ぶ:
             deadline = @{ type = 'string'; description = '期限があれば。例「30分以内」「9/18まで」' }
             what_is_missing = @{ type = 'string'; description = 'blocker=credential_missing のとき、何の権限が要るか。' }
             tried   = @{ type = 'string'; description = '何を試して何が返ったか。証跡として画面に出る。' }
+            repo    = @{
+                type = 'string'
+                description = 'blocker=beyond_tools で、GitHub のリポジトリのコードやテストを直す作業を引き渡すとき、その owner/name (例: famano/notification-collector)。利用者はこれを Claude Code に渡して直させられる。'
+            }
         }
         required = @('blocker', 'step')
     }

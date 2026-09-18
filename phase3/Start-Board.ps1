@@ -48,6 +48,8 @@ Set-Utf8Output
 # 間違ったことを覚えたと分かるのもカードを見た瞬間で、そこで消せなければ
 # 間違ったまま毎回渡り続ける。
 . "$PSScriptRoot\..\phase2\lib\Memory.ps1"
+# 道具が足りない作業の引き渡し先 (Claude Code)。画面から始めるので読み込む。
+. "$PSScriptRoot\..\phase4\lib\Delegation.ps1"
 $script:PolicyPath = $PolicyPath
 
 # 送信経路。カンバンだけで仕事を終わらせるには、最後の一手 (送る) もここに要る。
@@ -1196,6 +1198,13 @@ function Invoke-Route {
             return
         }
 
+        # Claude Code への引き渡し。押す前に「何を渡すか」を全文見せる。
+        # 渡す文面はワーカー (モデル) が第三者の文面から組み立てたものなので、読まずに押させない。
+        if ($method -eq 'GET' -and $action -eq 'delegation') {
+            Write-JsonResponse $Context (Get-DelegationInfo -Conn $Conn -TaskId $taskId)
+            return
+        }
+
         if ($method -eq 'DELETE' -and -not $action) {
             try { $ok = Remove-Task -Conn $Conn -TaskId $taskId }
             catch {
@@ -1227,6 +1236,39 @@ function Invoke-Route {
                     [void] (Set-TaskCancel -Conn $Conn -TaskId $taskId -Requested $false)
                 }
                 if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; conflict = $true } 409; return }
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            'delegate' {
+                $info = Get-DelegationInfo -Conn $Conn -TaskId $taskId
+                if (-not $info.eligible) { Write-JsonResponse $Context @{ ok = $false; error = $info.reason } 400; return }
+                if (-not $info.available) { Write-JsonResponse $Context @{ ok = $false; error = $info.reason } 400; return }
+                if ($info.running) { Write-JsonResponse $Context @{ ok = $false; error = 'すでに Claude Code が作業しています' } 409; return }
+                # 手元の clone。画面から受け取ったパスは、origin がそのリポジトリを指しているときだけ使う。
+                $path = if ($b -and $b.path) { [string] $b.path } else { [string] $info.path }
+                if (-not $path -or -not (Test-RepoMatchesRemote -Path $path -Repo $info.repo)) {
+                    Write-JsonResponse $Context @{ ok = $false; error = ("{0} の clone ではありません (origin が一致しません)" -f $info.repo) } 400
+                    return
+                }
+                Set-Setting -Conn $Conn -Key ('delegate.repo.' + $info.repo.ToLower()) -Value $path
+                [void] (Update-TaskFields -Conn $Conn -TaskId $taskId -Fields @{ shape = 'delegated' })
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message 'Claude Code に渡しました'
+                $script_ = Join-Path $PSScriptRoot '..\phase4\Start-Delegation.ps1'
+                $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $script_), '-TaskId', $taskId)
+                if ($DbPath) { $psArgs += @('-DbPath', ('"{0}"' -f [IO.Path]::GetFullPath($DbPath))) }
+                if ($script:PolicyPath) { $psArgs += @('-PolicyPath', ('"{0}"' -f [IO.Path]::GetFullPath($script:PolicyPath))) }
+                $logDir = Join-Path $PSScriptRoot '..\logs'
+                if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+                try {
+                    [void] (Start-Process -FilePath 'powershell' -ArgumentList $psArgs -WindowStyle Hidden `
+                        -RedirectStandardOutput (Join-Path $logDir ("delegation-{0}.log" -f $taskId)) `
+                        -RedirectStandardError (Join-Path $logDir ("delegation-{0}.err.log" -f $taskId)))
+                }
+                catch {
+                    [void] (Update-TaskFields -Conn $Conn -TaskId $taskId -Fields @{ shape = 'human' })
+                    Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500
+                    return
+                }
                 Write-JsonResponse $Context @{ ok = $true }
                 return
             }
