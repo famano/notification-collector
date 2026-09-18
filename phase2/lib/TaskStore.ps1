@@ -163,6 +163,16 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'user_record') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN user_record TEXT')
     }
+    # やりとりの種類。author だけでは足りなくなった。
+    #   (author=user)         … 利用者の指示
+    #   report                … ワーカーの報告。1回の作業ごとに1件残す
+    #   verify / (旧データ NULL) … 自己検証で解消しなかった指摘
+    # 報告は agent_output に上書きしていたので、差し戻して作業させるたびに
+    # 前回の報告が読めなくなっていた。やりとりに積めば経緯として読み返せる。
+    $ccols = @($Conn.Query('PRAGMA table_info(task_comments)')) | ForEach-Object { $_['name'] }
+    if ($ccols -notcontains 'kind') {
+        $Conn.Exec('ALTER TABLE task_comments ADD COLUMN kind TEXT')
+    }
     # 正規 API で本文を取り直したかの印 (Phase 5)
     $ecols = @($Conn.Query('PRAGMA table_info(events)')) | ForEach-Object { $_['name'] }
     if ($ecols -notcontains 'context_fetched') {
@@ -881,11 +891,14 @@ function Add-TaskComment {
         [Parameter(Mandatory)] $Conn,
         [Parameter(Mandatory)] [int] $TaskId,
         [Parameter(Mandatory)] [string] $Author,
-        [Parameter(Mandatory)] [string] $Body
+        [Parameter(Mandatory)] [string] $Body,
+        # ワーカーの発言の種類 ('report' / 'verify')。利用者の指示には付けない。
+        [string] $Kind
     )
+    $k = if ($Kind) { $Kind } else { $null }
     [void] $Conn.NonQuery(
-        'INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?,?,?,?)',
-        [object[]] @($TaskId, $Author, $Body, (Get-Now)))
+        'INSERT INTO task_comments (task_id, author, body, created_at, kind) VALUES (?,?,?,?,?)',
+        [object[]] @($TaskId, $Author, $Body, (Get-Now), $k))
     return $Conn.LastRowId
 }
 

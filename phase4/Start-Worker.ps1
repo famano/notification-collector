@@ -776,20 +776,23 @@ function Invoke-WorkItem {
         $summary += "`n`n送信済み ({0} 件):`n" -f $sentItems.Count
         foreach ($x in $sentItems) { $summary += ('- ' + (($x -split "`n")[0]) + "`n") }
     }
-    if ($verdict) {
-        $mark = if ($verdict.verdict -eq 'ok' -and $verdict.completed) { '問題なし' } else { '要確認' }
-        $summary += "`n`n[自己検証: $mark] " + $verdict.summary
-    }
+    # 自己検証の結果は報告に書かない。以前は末尾に「[自己検証: 問題なし] …」を
+    # 付けていたが、利用者が読んでも判断が変わらない (問題なしなら読み飛ばし、
+    # 要確認なら指摘そのものが要る)。結果は作業ログに、残った指摘は下で別に残す。
     [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ agent_output = $summary })
+    # 報告はやりとりにも積む。agent_output は最新の1件で上書きされるので、
+    # 差し戻して作業させるたびに前回の報告が読めなくなっていた。
+    [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'report' -Body $summary)
     Set-CommentsConsumed -Conn $conn -TaskId $id -UpToId $commentWatermark
 
-    # 解消しなかった指摘はコメントに残す。レビューする人がまずここを見る。
+    # 解消しなかった指摘は残す。次に作業するとき (再開・引き継ぎ) にワーカーへ渡し、
+    # 画面では報告とは別の折りたたみに出す。
     if ($verdict -and @($verdict.issues | Where-Object { $_.severity -eq 'high' }).Count -gt 0) {
         $body = "検証で残った指摘:`n"
         foreach ($i in @($verdict.issues | Where-Object { $_.severity -eq 'high' })) {
             $body += "- $($i.where): $($i.problem)`n  → $($i.fix)`n"
         }
-        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Body $body)
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'verify' -Body $body)
     }
 
     [void] $conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($id))

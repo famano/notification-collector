@@ -1642,21 +1642,39 @@
       // やりとりは履歴として読むだけ。指示を書く欄は「この後どうするか」の
       // 「差し戻す」に1つだけ置く ―― 同じことをする欄が2か所にあると、
       // どちらがカードを動かすのか分からなくなる (どちらも動かしていた)。
-      pad.appendChild(foldable('comments', 'やりとり', comments.length, function (b) {
-        if (comments.length === 0) {
+      // やりとりに出すのは、利用者の指示とワーカーの報告だけ。
+      // 報告は上の「ワーカーの報告」で最新の1件を読むが、差し戻すたびに上書きされるので、
+      // 前回までの報告はここで読み返す。自己検証で残った指摘は、利用者に宛てた
+      // 文章ではないので混ぜない (下の「自己検証の指摘」に分けて畳んでおく)。
+      var isVerify = function (c) { return c.author === 'agent' && c.kind !== 'report'; };
+      var thread = comments.filter(function (c) { return !isVerify(c); });
+      var verifyNotes = comments.filter(isVerify);
+      pad.appendChild(foldable('comments', 'やりとり', thread.length, function (b) {
+        if (thread.length === 0) {
           b.appendChild(el('div', 'note', 'まだやりとりはありません。指示は上の「差し戻す」から送れます。'));
           return;
         }
         // 新しい順。増えても直近のものが手前にあり、下までスクロールしなくてよい。
-        comments.slice().reverse().forEach(function (c) {
+        thread.slice().reverse().forEach(function (c) {
           var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
-          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
+          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカーの報告') + ' · ' + hhmm(c.created_at)));
           // ワーカーの発言は報告と同じ書式で出す。書いているものは同じ性質のもの。
           if (c.author === 'agent') { d.appendChild(mdRender(c.body)); }
           else { d.appendChild(el('div', 'bd', c.body)); }
           b.appendChild(d);
         });
       }));
+      if (verifyNotes.length) {
+        pad.appendChild(foldable('verify', '自己検証の指摘', verifyNotes.length, function (b) {
+          b.appendChild(el('div', 'note', '別の担当者がワーカーの作業を点検し、直しきれなかった点です。次にこのカードを作業するとき、ワーカーにも渡ります。'));
+          verifyNotes.slice().reverse().forEach(function (c) {
+            var d = el('div', 'cmt agent');
+            d.appendChild(el('div', 'who', '自己検証 · ' + hhmm(c.created_at)));
+            d.appendChild(mdRender(c.body));
+            b.appendChild(d);
+          });
+        }));
+      }
 
       if (ev) {
         pad.appendChild(foldable('event', '元の通知', null, function (b) {
@@ -2406,7 +2424,7 @@
       ['何をするか', '作成後に別の会話で成果物を点検する。途中終了・空欄・依頼との食い違いを見る'],
       ['要修正なら', '指摘をワーカーに戻して直させ、再度検証する'],
       ['送信済みなら', '直しには回さない。送ったものは取り消せず、二通目が出かねないため。指摘はコメントに残る'],
-      ['残った指摘', 'カードのコメントに残り、報告にも「要確認」と出る']
+      ['残った指摘', 'カード詳細の「自己検証の指摘」に畳んで残る。報告には書かない (報告は利用者宛ての文章)。次にそのカードを作業するときワーカーに渡る']
     ]));
     helpEl.appendChild(box);
     helpEl.hidden = false;
