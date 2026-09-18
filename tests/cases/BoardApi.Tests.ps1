@@ -424,6 +424,24 @@ Describe '編集' {
         Assert-Equal 0 ([int] $t.cancel_requested)
     }
 
+    It '差し戻しは既定で会話を残す (ワーカーは続きから直す)' {
+        $c = Open-TaskStore -Path $dbPath
+        try { Save-TaskSession -Conn $c -TaskId $slackId -MessagesJson '{"messages":[]}' } finally { $c.Dispose() }
+        Assert-Equal 200 (Invoke-Board $board ("/api/tasks/$slackId/comment") 'POST' @{ body = '直して' }).status
+        $c = Open-TaskStore -Path $dbPath
+        try { Assert-NotNull (Get-TaskSession -Conn $c -TaskId $slackId) } finally { $c.Dispose() }
+    }
+
+    It '「最初からやり直す」を選ぶと会話を捨てる' {
+        $c = Open-TaskStore -Path $dbPath
+        try { Save-TaskSession -Conn $c -TaskId $mailId -MessagesJson '{"messages":[]}' } finally { $c.Dispose() }
+        $r = Invoke-Board $board ("/api/tasks/$mailId/comment") 'POST' @{ body = '前提が違う。やり直して'; restart = $true }
+        Assert-Equal 200 $r.status
+        Assert-Equal 'todo' $r.body.column
+        $c = Open-TaskStore -Path $dbPath
+        try { Assert-Null (Get-TaskSession -Conn $c -TaskId $mailId) } finally { $c.Dispose() }
+    }
+
     It 'カードを手で起票できる' {
         $r = Invoke-Board $board '/api/tasks' 'POST' @{ title = '手で作ったカード' }
         Assert-Equal 200 $r.status

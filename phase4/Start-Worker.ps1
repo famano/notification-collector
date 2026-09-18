@@ -30,8 +30,12 @@ param(
     # 同じカードで連続して失敗した回数がこれに達したら棚上げする
     [int]    $MaxFailures = 3,
     [int]    $ErrorBackoffSeconds = 30,
-    # 1カードあたりのツール実行ターン上限
-    [int]    $MaxTurns = 12,
+    # 1回の作業でツールを使える回数の上限。0 なら policy.json の worker.maxTurns (無ければ 40)。
+    # 12 だった頃は、CI の失敗を調べるだけ (runs → jobs → 注釈 → ログ → コミット → ファイル)
+    # で使い切っていた。上限に達しても例外にはせず、そこまでの報告を書かせて止める。
+    [int]    $MaxTurns = 0,
+    # 残した会話がこの文字数を超えたら、続きからではなく記録からの引き継ぎで始め直す。
+    [int]    $MaxSessionChars = 2000000,
     # 危険なツールの承認を待つ秒数。過ぎたら実行しない。
     [int]    $ApprovalTimeoutSec = 600,
     [int]    $CommandTimeoutSec = 120,
@@ -59,6 +63,7 @@ Set-Utf8Output
 . "$PSScriptRoot\..\phase2\lib\Dossier.ps1"
 . "$PSScriptRoot\..\phase2\lib\Memory.ps1"
 . "$PSScriptRoot\lib\WorkTools.ps1"
+. "$PSScriptRoot\lib\WorkSession.ps1"
 # 外部サービス連携があればツールが増える (未設定なら黙って無効)
 $gmailLib = Join-Path $PSScriptRoot '..\phase5\lib\GmailConnector.ps1'
 if (Test-Path $gmailLib) { . $gmailLib }
@@ -79,6 +84,9 @@ $OutputRoot = (Resolve-Path $OutputRoot).Path
 
 if (-not $PolicyPath) { $PolicyPath = Join-Path $PSScriptRoot '..\phase2\config\policy.json' }
 $policy = Get-Content -LiteralPath $PolicyPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($MaxTurns -le 0) {
+    $MaxTurns = if ($policy.worker -and $policy.worker.maxTurns) { [int] $policy.worker.maxTurns } else { 40 }
+}
 
 $conn = Open-TaskStore -Path $DbPath
 
@@ -642,23 +650,61 @@ function Invoke-WorkItem {
         return $r
     }.GetNewClosure()
 
+    $tools = Get-WorkTools -HasSlackTarget:([bool] $slackChannel) `
+                -HasTeamsTarget:([bool] $teamsChatId) `
+                -HasChatworkTarget:([bool] $chatworkRoomId) `
+                -HasBacklogTarget:([bool] $backlogIssueKey) -HasOutlet:$hasOutlet
+
+    # --- 会話は続きから。続けられなければ記録から引き継ぐ ---
+    $plan = Get-SessionPlan -Conn $conn -TaskId $id -Task $Task -Occurrence $occurrence -Tools $tools `
+                -SourceText $sourceText -MaxSessionChars $MaxSessionChars
+    $messages = $plan.messages
+    $resumeText = ''
+    $handoffText = ''
+    switch ($plan.mode) {
+        'resume' {
+            $resumeText = Get-ResumeText -Instructions $instructions -Since $plan.since `
+                            -ChangedSource $plan.changedSource -OpenIssues $plan.openIssues `
+                            -Partial:($plan.state -eq 'partial') -Interrupted:($plan.state -eq 'running')
+            Write-Step $id 'step' '前回の会話の続きから再開します' 'DarkCyan'
+        }
+        'handoff' {
+            $handoffText = Get-HandoffText -Attempts (Get-AttemptSummary -Conn $conn -TaskId $id) `
+                            -LastReport ([string] $Task['agent_output']) -OpenIssues $plan.openIssues
+            Write-Step $id 'step' ('前回までの記録を引き継いで始めます (' + $plan.reason + ')') 'DarkCyan'
+        }
+    }
+    $sourceHash = Get-TextHash $sourceText
+    $onSave = {
+        param($json)
+        Save-TaskSession -Conn $conn -TaskId $id -MessagesJson $json -Occurrence $occurrence `
+            -SourceHash $sourceHash -State 'running'
+    }.GetNewClosure()
+
     $issues = $null
     $verdict = $null
     $round = 0
 
     while ($true) {
         $res = Invoke-ClaudeWork -Task $Task -Evt $evt -Policy $policy -Instructions $instructions `
-            -Tools (Get-WorkTools -HasSlackTarget:([bool] $slackChannel) `
-                        -HasTeamsTarget:([bool] $teamsChatId) `
-                        -HasChatworkTarget:([bool] $chatworkRoomId) `
-                        -HasBacklogTarget:([bool] $backlogIssueKey) -HasOutlet:$hasOutlet) `
-            -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
+            -Tools $tools -OnTool $onTool -OnProgress $onProgress -MaxTurns $MaxTurns `
+            -Messages $messages -OnSave $onSave -ResumeText $resumeText -Handoff $handoffText `
             -RepairIssues $issues -Occurrence $occurrence -Dossier $dossierText `
             -SourceText $sourceText -SourceNote $sourceNote `
             -Memory $memoryText -Viewer $viewerText
+        # 再開の文面は最初の1回だけ。直しの回は指摘を足す。
+        $resumeText = ''
 
         if ($res.aborted) { Stop-IfCancelled $id | Out-Null; return }
         if (Stop-IfCancelled $id) { return }
+
+        # 回数の上限で止めた。途中の報告は点検しても「終わっていない」と言われるだけで、
+        # 直しに回すとまた上限まで走る。そのまま利用者に渡して、続けるかを決めてもらう。
+        if ($res.partial) {
+            Write-Step $id 'step' ("ツールを使える回数の上限 ({0} 回) に達したため、ここまでの報告で止めました" -f $MaxTurns) 'Yellow'
+            $verdict = $null
+            break
+        }
 
         if (-not $VerifyResults) { $verdict = $null; break }
 
@@ -705,8 +751,14 @@ function Invoke-WorkItem {
         $issues = $high
     }
 
+    Set-TaskSessionState -Conn $conn -TaskId $id -State $(if ($res.partial) { 'partial' } else { 'done' })
+
     $files = @(Get-TaskArtifacts -Conn $conn -TaskId $id)
     $summary = $res.text
+    if ($res.partial) {
+        $summary = ("【途中で止まっています】ツールを使える回数の上限 ({0} 回) に達しました。" -f $MaxTurns) +
+                   "続けるときは「差し戻す」で指示を送ってください。この会話の続きから再開します。`n`n---`n`n" + $summary
+    }
 
     # 本人の1手は報告の先頭に置く。これがこのカードの結論なので、
     # 経過の下に埋めると読まれない。

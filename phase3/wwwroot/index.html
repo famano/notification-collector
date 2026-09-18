@@ -1518,10 +1518,19 @@
             : 'やってほしいことを書いて渡します。カードは要対応に戻り、ワーカーが着手します。'));
         var ins = bindArea(t.id, 'instruct',
           '', (canReject ? '何を直してほしいか' : '何をしてほしいか') + '（改行できます／Ctrl+Enter で送信）', 4);
+        // 差し戻すと、ワーカーは前回の会話の続きから作業する (何をしたかを覚えたまま直す)。
+        // 間違った思い込みごと続いてしまうときのために、会話を捨てる口を残す。
+        var restart = null;
+        if (canReject && t.board_column !== 'doing') {
+          var rl = el('label', 'note');
+          restart = el('input'); restart.type = 'checkbox';
+          rl.appendChild(restart);
+          rl.appendChild(document.createTextNode(' 前回の会話を捨てて、最初からやり直す（試したことと前回の報告は引き継ぐ）'));
+        }
         var doRework = function () {
           if (!ins.value.trim()) { toast('指示が空です', 'err'); return; }
           var wasColumn = t.board_column;
-          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ins.value })
+          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ins.value, restart: !!(restart && restart.checked) })
             .then(function (r2) {
               if (r2.status !== 200) { toast('送れませんでした: ' + r2.status, 'err'); return refresh(true); }
               clearScratch(t.id, 'instruct');
@@ -1537,6 +1546,7 @@
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doRework(); }
         };
         panel.appendChild(ins);
+        if (restart) panel.appendChild(restart.parentNode);
         var rr = el('div', 'row'); rr.style.marginTop = '8px';
         rr.appendChild(actionButton(TAB_LABEL.rework, 'primary', '送信中…', doRework));
         panel.appendChild(rr);

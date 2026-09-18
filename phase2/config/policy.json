@@ -10,6 +10,15 @@
     "maxBodyChars": 4000
   },
 
+  "worker": {
+    "_comment": "ワーカー (phase4) の作業の枠。maxTurns は1回の作業でツールを使える回数で、上限に達すると例外にせず、そこまでの報告を書かせて止める (続きは差し戻すと同じ会話から再開)。maxOutputTokens は1回の応答の上限で、thinking と共用なので判定より大きく取る (小さいと長い本文を書く途中で切れる)。clearToolResults は古いツール結果を API 側で消す設定 (context editing)。会話の入力が clearTrigger トークンを超えたら、直近 clearKeep 回ぶんを残して古い結果を消す。要約はしない。",
+    "maxTurns": 40,
+    "maxOutputTokens": 16000,
+    "clearToolResults": true,
+    "clearTrigger": 80000,
+    "clearKeep": 8
+  },
+
   "ignore": {
     "_comment": "ここに一致した通知は LLM に渡さず捨てる。前段でコストを落とすためのルール。",
     "appIdPatterns": [

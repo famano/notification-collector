@@ -1225,6 +1225,16 @@ function Invoke-Route {
             'comment' {
                 if (-not $b -or -not $b.body) { Write-JsonResponse $Context @{ error = 'body is required' } 400; return }
                 [void] (Add-TaskComment -Conn $Conn -TaskId $taskId -Author 'user' -Body $b.body)
+                # 「最初からやり直す」。ワーカーは差し戻しを前回の会話の続きとして受けるが、
+                # 間違った前提ごと続いてしまうときは会話を捨てられるようにする。
+                # 実行中のカードでは捨てない ―― ワーカーが書き続けている最中で、すぐに書き戻される。
+                if ($b.restart) {
+                    $cur = @($Conn.Query('SELECT board_column FROM tasks WHERE id = ?', [object[]] @($taskId)))
+                    if ($cur.Count -gt 0 -and [string] $cur[0]['board_column'] -ne 'doing' -and
+                        (Clear-TaskSession -Conn $Conn -TaskId $taskId)) {
+                        Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '前回の会話を捨てて、最初からやり直します'
+                    }
+                }
                 # 指示を書く = やり直してほしい。要対応に戻してワーカーに拾わせる。
                 $col = Request-TaskRework -Conn $Conn -TaskId $taskId
                 Write-JsonResponse $Context @{ ok = $true; column = $col }

@@ -11,6 +11,8 @@ $script:ApiUrl       = 'https://api.anthropic.com/v1/messages'
 $script:ApiVersion   = '2023-06-01'
 # fallbacks: "default" のスカラー形式に対応するベータ。配列形式とはヘッダが異なる。
 $script:FallbackBeta = 'server-side-fallback-2026-07-01'
+# 古いツール結果を消す (context editing)。payload に context_management があるときだけ付ける。
+$script:ContextEditBeta = 'context-management-2025-06-27'
 
 # ---------------------------------------------------------------- ツール定義
 
@@ -593,7 +595,9 @@ function Send-ClaudeRequest {
     #>
     param(
         [Parameter(Mandatory)] [hashtable] $Payload,
-        [int] $MaxRetries = 2
+        [int] $MaxRetries = 2,
+        # ワーカーは出力の上限を大きく取るので、1回の応答に数分かかることがある。
+        [int] $TimeoutSec = 600
     )
 
     $apiKey = Get-AnthropicApiKey
@@ -603,12 +607,16 @@ function Send-ClaudeRequest {
 
     # 並びを固定してから JSON にする。キーの順が変わるとバイト列が変わり、
     # 中身が同じでもキャッシュには当たらない。
-    $json  = ConvertTo-Json -InputObject (ConvertTo-StableOrder $Payload) -Depth 12 -Compress
+    # 深さは会話の入れ子 (messages → content → tool_use.input → その中身) に足りるだけ取る。
+    # 足りないと深いところが型名の文字列に化けて、黙って別の入力が送られる。
+    $json  = ConvertTo-Json -InputObject (ConvertTo-StableOrder $Payload) -Depth 30 -Compress
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    $betas = @($script:FallbackBeta)
+    if ($Payload.ContainsKey('context_management')) { $betas += $script:ContextEditBeta }
     $headers = @{
         'x-api-key'         = $apiKey
         'anthropic-version' = $script:ApiVersion
-        'anthropic-beta'    = $script:FallbackBeta
+        'anthropic-beta'    = ($betas -join ',')
     }
 
     $attempt = 0
@@ -616,7 +624,7 @@ function Send-ClaudeRequest {
         $attempt++
         try {
             $resp = Invoke-WebRequest -Uri $script:ApiUrl -Method Post -Headers $headers `
-                        -ContentType 'application/json' -Body $bytes -UseBasicParsing -TimeoutSec 120
+                        -ContentType 'application/json' -Body $bytes -UseBasicParsing -TimeoutSec $TimeoutSec
             # PowerShell 5.1 の自動デコードは日本語を壊すことがあるので明示的に UTF-8 で読む
             $text = [Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray())
             $obj  = $text | ConvertFrom-Json
@@ -669,6 +677,144 @@ function Invoke-ClaudeApi {
     return [pscustomobject]@{ result = $toolUse.input; model = $obj.model; raw = $obj._raw }
 }
 
+# ---------------------------------------------------------------- 会話の保存と再開
+#
+# 会話はカードごとに DB に残し、やり直しは続きから行う (Start-Worker が
+# task_sessions に書く)。ここにあるのは、その会話を JSON と行き来させる部品と、
+# 続きを足すときの決まりごと。
+#
+# 決まりごとは1つ: **過去の発言は書き換えない。足すだけにする。**
+# thinking ブロックは無改変で返す必要があり、最近のモデルは会話の書き換えを
+# 検出して弾く方向にある。古いツール結果を消すのも自前ではやらず、
+# API の context editing に任せる (サーバ側で、送った会話を見て消す)。
+
+function ConvertTo-SessionJson {
+    <#
+      .SYNOPSIS
+        会話を保存用の JSON にする。区切り (cache_control) は外す。
+      .DESCRIPTION
+        区切りは送る直前に末尾へ置き直すもので、会話の一部ではない。
+        残したまま保存すると、再開のたびに1つずつ増えて4つの上限を超える。
+    #>
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] $Messages, $Mark)
+    $had = ($Mark -is [hashtable]) -and $Mark.ContainsKey('cache_control')
+    $cc = $null
+    if ($had) { $cc = $Mark['cache_control']; $Mark.Remove('cache_control') }
+    try {
+        # 配列1つを直に書くと、読み戻すときに PowerShell 5.1 が1要素に畳むことがある。
+        # 包んでおけば形が揺れない。
+        return (ConvertTo-Json -InputObject (ConvertTo-StableOrder @{ messages = [object[]] @($Messages) }) -Depth 30 -Compress)
+    }
+    finally { if ($had) { $Mark['cache_control'] = $cc } }
+}
+
+function ConvertFrom-SessionJson {
+    param([Parameter(Mandatory)] [string] $Json)
+    $list = [System.Collections.ArrayList]::new()
+    $o = $Json | ConvertFrom-Json
+    foreach ($m in @($o.messages)) { [void] $list.Add($m) }
+    # 返すのは ArrayList そのもの。先頭のカンマが無いと中身が展開されて配列に化ける。
+    return ,$list
+}
+
+function Get-SessionToolNames {
+    <#
+      .SYNOPSIS
+        会話の中で呼ばれたツールの名前 (重複なし)。
+      .DESCRIPTION
+        続きから再開できるかの判定に使う。過去に呼んだツールが今の一覧に無いと、
+        その呼び出しは宙に浮く (コードの更新でツールが消えた / 連携を外した)。
+    #>
+    param([Parameter(Mandatory)] [AllowEmptyCollection()] $Messages)
+    $names = @{}
+    foreach ($m in @($Messages)) {
+        if ($m.role -ne 'assistant') { continue }
+        foreach ($b in @($m.content)) {
+            if ($b.type -eq 'tool_use' -and $b.name) { $names[[string] $b.name] = $true }
+        }
+    }
+    return @($names.Keys | Sort-Object)
+}
+
+function Add-ConversationText {
+    <#
+      .SYNOPSIS
+        会話の末尾に利用者側の文面を足す。宙に浮いたツール呼び出しがあれば先に埋める。
+      .DESCRIPTION
+        末尾の形は3通りある。
+          - 空 / assistant の最終応答 … user の発言を1つ足す
+          - user (ツールの結果) …… その発言の後ろに文面を足す (user が2つ続かないように)
+          - assistant のツール呼び出し … 結果が残っていない。途中で落ちた実行の跡。
+            **実行されたかどうか分からない**ので、再実行はせず、その旨を結果として返す。
+            書き込みや送信をもう一度流すより、確かめさせるほうが安全。
+    #>
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [System.Collections.ArrayList] $Messages,
+        [Parameter(Mandatory)] [string] $Text
+    )
+    $textBlock = @{ type = 'text'; text = $Text }
+    if ($Messages.Count -eq 0) {
+        [void] $Messages.Add(@{ role = 'user'; content = [object[]] @($textBlock) })
+        return
+    }
+    $last = $Messages[$Messages.Count - 1]
+    if ($last.role -eq 'assistant') {
+        $pending = @(@($last.content) | Where-Object { $_.type -eq 'tool_use' })
+        if ($pending.Count -eq 0) {
+            [void] $Messages.Add(@{ role = 'user'; content = [object[]] @($textBlock) })
+            return
+        }
+        $blocks = @()
+        foreach ($tu in $pending) {
+            $blocks += @{
+                type = 'tool_result'; tool_use_id = [string] $tu.id; is_error = $true
+                content = '結果が記録されていません。前回の実行はこの呼び出しの途中で止まりました。' +
+                          '実行されたかどうかは分かりません。同じ操作をそのまま繰り返さず、' +
+                          '相手の状態を読んで確かめてから進めてください。'
+            }
+        }
+        $blocks += $textBlock
+        [void] $Messages.Add(@{ role = 'user'; content = [object[]] $blocks })
+        return
+    }
+    # user で終わっている。中身は保ったまま末尾に足した新しい発言に差し替える
+    # (読み戻した発言は PSCustomObject なので、区切りを置ける hashtable にする)。
+    $Messages[$Messages.Count - 1] = @{ role = 'user'; content = [object[]] (@($last.content) + $textBlock) }
+}
+
+function Get-ContextEditing {
+    <#
+      .SYNOPSIS
+        古いツール結果を消す設定 (context editing)。使わない設定なら $null。
+      .DESCRIPTION
+        要約はしない。消すだけにする。SWE-bench の比較では、古い観測を隠すだけの
+        方式が LLM 要約と同等以上の解決率で、費用はおよそ半分だった。
+        消したものを後から要る事実 (何を書き込んだか・利用者の指示・検証の指摘) は、
+        会話ではなく DB から毎回渡しているので、ここで消えても失われない。
+
+        消すたびにキャッシュが壊れるので、少しずつではなくまとめて消す (clear_at_least)。
+    #>
+    param($Policy)
+    $w = if ($Policy) { $Policy.worker } else { $null }
+    if ($w -and $null -ne $w.clearToolResults -and -not $w.clearToolResults) { return $null }
+    $trigger = 80000; $keep = 8; $atLeast = 20000
+    if ($w -and $w.clearTrigger) { $trigger = [int] $w.clearTrigger }
+    if ($w -and $w.clearKeep)    { $keep    = [int] $w.clearKeep }
+    return @{
+        edits = @(@{
+            type           = 'clear_tool_uses_20250919'
+            trigger        = @{ type = 'input_tokens'; value = $trigger }
+            keep           = @{ type = 'tool_uses'; value = $keep }
+            clear_at_least = @{ type = 'input_tokens'; value = $atLeast }
+        })
+    }
+}
+
+# context editing を API に断られたら、このプロセスでは以後付けない。
+# ベータなので、使えない組み合わせ (フォールバック先のモデルなど) がありうる。
+# 付けられないことで作業全体を止めるほうが害が大きい。
+$script:ContextEditingRejected = $false
+
 function Invoke-ClaudeAgent {
     <#
       .SYNOPSIS
@@ -677,8 +823,13 @@ function Invoke-ClaudeAgent {
         ツール1件を実行する。引数: 名前, 入力。戻り値に text と isError を持つこと。
       .PARAMETER OnProgress
         各ツール実行の直前に呼ばれる。$false を返すとその場で中断する (割り込み用)。
+      .PARAMETER Messages
+        続きから進めるときの会話。渡せばそこへ足していく (呼び出し側の ArrayList が伸びる)。
+      .PARAMETER OnSave
+        会話が伸びるたびに呼ばれる。引数: 保存用の JSON。途中で落ちても続きから始めるため。
       .OUTPUTS
-        [pscustomobject] text (最後のテキスト) / turns / aborted / model
+        [pscustomobject] text (最後のテキスト) / turns / aborted / partial / model / messages
+        partial … ターンの上限で止めた。text はツールを使わずに書かせた途中の報告。
     #>
     param(
         [Parameter(Mandatory)] $Policy,
@@ -687,49 +838,99 @@ function Invoke-ClaudeAgent {
         [Parameter(Mandatory)] [string] $UserText,
         [Parameter(Mandatory)] [scriptblock] $OnTool,
         [scriptblock] $OnProgress,
-        [int] $MaxTurns = 12
+        [int] $MaxTurns = 40,
+        [System.Collections.ArrayList] $Messages,
+        [scriptblock] $OnSave,
+        # 出力の上限。ワーカーは判定より長く書く (報告・ファイル・thinking) ので別に持つ。
+        [int] $MaxOutputTokens = 0
     )
 
     $cache  = Get-CacheControl $Policy
     $sysBlk = New-SystemBlocks $System $cache
     $mark   = $null
+    $maxOut = if ($MaxOutputTokens -gt 0) { $MaxOutputTokens } else { [int] $Policy.llm.maxOutputTokens }
+    $ctxEdit = Get-ContextEditing $Policy
 
-    $messages = [System.Collections.ArrayList]::new()
+    if ($null -eq $Messages) { $Messages = [System.Collections.ArrayList]::new() }
     # 最初の user もブロックで積む。文字列のままだと区切りを置く場所が無い。
-    [void] $messages.Add(@{ role = 'user'; content = @(@{ type = 'text'; text = $UserText }) })
+    Add-ConversationText -Messages $Messages -Text $UserText
+    $save = {
+        if ($OnSave) { & $OnSave (ConvertTo-SessionJson -Messages $Messages -Mark $mark) }
+    }
+    & $save
 
+    # 1回ぶんの送信。context editing を断られたら外して送り直す。
+    $send = {
+        param([hashtable] $Payload)
+        if ($ctxEdit -and -not $script:ContextEditingRejected) { $Payload['context_management'] = $ctxEdit }
+        try { return (Send-ClaudeRequest -Payload $Payload) }
+        catch {
+            if ($Payload.ContainsKey('context_management') -and $_.Exception.Message -match 'context_management|context-management|clear_tool_uses') {
+                $script:ContextEditingRejected = $true
+                $Payload.Remove('context_management')
+                return (Send-ClaudeRequest -Payload $Payload)
+            }
+            throw
+        }
+    }
+
+    $lastModel = $null
     for ($turn = 1; $turn -le $MaxTurns; $turn++) {
         # 送る直前に、区切りを履歴の末尾へ移す。ここまでは前のターンで
         # 書かれているので読み出しになり、増えた分だけが新しく書かれる。
-        $mark = Set-CacheBreakpoint -Messages $messages -Previous $mark -CacheControl $cache
+        $mark = Set-CacheBreakpoint -Messages $Messages -Previous $mark -CacheControl $cache
 
         $payload = @{
             model         = $Policy.llm.model
-            max_tokens    = [int] $Policy.llm.maxOutputTokens
+            max_tokens    = $maxOut
             system        = $sysBlk
             tools         = [object[]] $Tools
-            messages      = [object[]] $messages.ToArray()
+            messages      = [object[]] $Messages.ToArray()
             output_config = @{ effort = $(if ($Policy.llm.effort) { $Policy.llm.effort } else { 'low' }) }
             fallbacks     = 'default'
         }
 
-        $obj = Send-ClaudeRequest -Payload $payload
+        $obj = & $send $payload
+        $lastModel = $obj.model
 
         # thinking ブロックを含め、応答はそのまま履歴に戻す (同一モデルでは無改変で返す必要がある)
-        [void] $messages.Add(@{ role = 'assistant'; content = [object[]] @($obj.content) })
+        [void] $Messages.Add(@{ role = 'assistant'; content = [object[]] @($obj.content) })
+        & $save
 
-        if ($obj.stop_reason -ne 'tool_use') {
+        $toolUses = @(@($obj.content) | Where-Object { $_.type -eq 'tool_use' })
+        if ($toolUses.Count -eq 0) {
             $text = (@($obj.content | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text })) -join "`n"
-            return [pscustomobject]@{ text = $text; turns = $turn; aborted = $false; model = $obj.model }
+            return [pscustomobject]@{ text = $text; turns = $turn; aborted = $false; partial = $false
+                                      model = $obj.model; messages = $Messages }
+        }
+
+        # 出力の上限で切れた応答のツール呼び出しは実行しない。
+        # 入力の JSON が途中で閉じられていて、中身は書こうとしたものの一部でしかない
+        # (長い本文を送る PUT なら、ファイルの頭だけで全体を置き換えることになる)。
+        if ($obj.stop_reason -eq 'max_tokens') {
+            $results = foreach ($tu in $toolUses) {
+                @{ type = 'tool_result'; tool_use_id = $tu.id; is_error = $true
+                   content = '出力の上限で応答が途中で切れたため、この呼び出しは実行していません。' +
+                             '入力が途中までしか書かれていない可能性があります。一度に書く量を減らしてください。' }
+            }
+            [void] $Messages.Add(@{ role = 'user'; content = [object[]] @($results) })
+            & $save
+            continue
         }
 
         $results = @()
-        foreach ($tu in @($obj.content | Where-Object { $_.type -eq 'tool_use' })) {
-            if ($OnProgress) {
+        $stopped = $false
+        foreach ($tu in $toolUses) {
+            # 中止された後の呼び出しにも結果を付ける。付けないと会話が宙に浮き、
+            # 再開したときに「実行されたか分からない」扱いになってしまう。
+            if (-not $stopped -and $OnProgress) {
                 $go = & $OnProgress $tu.name $tu.input
-                if ($go -eq $false) {
-                    return [pscustomobject]@{ text = ''; turns = $turn; aborted = $true; model = $obj.model }
-                }
+                if ($go -eq $false) { $stopped = $true }
+            }
+            if ($stopped) {
+                $results += @{ type = 'tool_result'; tool_use_id = $tu.id; is_error = $true
+                               content = '利用者が作業を中止したため、実行していません。' }
+                continue
             }
             $r = & $OnTool $tu.name $tu.input
             $block = @{ type = 'tool_result'; tool_use_id = $tu.id; content = [string] $r.text }
@@ -738,10 +939,37 @@ function Invoke-ClaudeAgent {
         }
         # 並列で呼ばれたツールの結果は必ず1つの user メッセージにまとめて返す。
         # 分割すると以後の並列呼び出しが行われなくなる。
-        [void] $messages.Add(@{ role = 'user'; content = [object[]] $results })
+        [void] $Messages.Add(@{ role = 'user'; content = [object[]] $results })
+        & $save
+        if ($stopped) {
+            return [pscustomobject]@{ text = ''; turns = $turn; aborted = $true; partial = $false
+                                      model = $obj.model; messages = $Messages }
+        }
     }
 
-    throw ("ツール実行が {0} ターンを超えました。処理を打ち切ります。" -f $MaxTurns)
+    # ターンの上限。例外にして最初からやり直させると、その間に外へ出したもの
+    # (コメント・書き込み) だけが増えていく。ツールを外して、ここまでの報告を書かせる。
+    Add-ConversationText -Messages $Messages -Text (
+        "ツールを使える回数の上限 ($MaxTurns 回) に達しました。ここで作業を止めてください。" +
+        'ツールは使わずに、ここまでに分かったこと・実際に行ったこと・まだ残っていることを、' +
+        '利用者への報告として書いてください。続きは利用者が指示すれば、この会話の続きから再開します。')
+    $mark = Set-CacheBreakpoint -Messages $Messages -Previous $mark -CacheControl $cache
+    $payload = @{
+        model         = $Policy.llm.model
+        max_tokens    = $maxOut
+        system        = $sysBlk
+        tools         = [object[]] $Tools
+        tool_choice   = @{ type = 'none' }
+        messages      = [object[]] $Messages.ToArray()
+        output_config = @{ effort = $(if ($Policy.llm.effort) { $Policy.llm.effort } else { 'low' }) }
+        fallbacks     = 'default'
+    }
+    $obj = & $send $payload
+    [void] $Messages.Add(@{ role = 'assistant'; content = [object[]] @($obj.content) })
+    & $save
+    $text = (@($obj.content | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text })) -join "`n"
+    return [pscustomobject]@{ text = $text; turns = $MaxTurns; aborted = $false; partial = $true
+                              model = $obj.model; messages = $Messages }
 }
 
 function New-BasePayload {
@@ -871,7 +1099,15 @@ function Invoke-ClaudeWork {
         [Parameter(Mandatory)] $Tools,
         [Parameter(Mandatory)] [scriptblock] $OnTool,
         [scriptblock] $OnProgress,
-        [int] $MaxTurns = 12,
+        [int] $MaxTurns = 40,
+        # 続きから進める会話 (無ければ新しく始める)。直しも再開もここに足していく。
+        [System.Collections.ArrayList] $Messages,
+        [scriptblock] $OnSave,
+        # 再開のときに足す文面 (Get-ResumeText)。渡すと最初の依頼は組み立てない ――
+        # 依頼も元のやり取りも、会話の頭にすでにある。
+        [string] $ResumeText,
+        # 会話を続けられなかったときの引き継ぎ (Get-HandoffText)。新しい会話の依頼に添える。
+        [string] $Handoff,
         # 検証で指摘された問題。直しの回で渡す。
         $RepairIssues,
         # 同じ件が何度目か。2回目以降は前回の調査をなぞらせない。
@@ -890,6 +1126,39 @@ function Invoke-ClaudeWork {
         # 書き始める。名義は繋いだアカウントから決まるので、ここで束縛して渡す。
         [string] $Viewer
     )
+
+    $maxOut = 16000
+    if ($Policy.worker -and $Policy.worker.maxOutputTokens) { $maxOut = [int] $Policy.worker.maxOutputTokens }
+    $agentArgs = @{
+        Policy = $Policy; System = (Get-WorkSystemPrompt $Policy.context); Tools = $Tools
+        OnTool = $OnTool; OnProgress = $OnProgress; MaxTurns = $MaxTurns
+        Messages = $Messages; OnSave = $OnSave; MaxOutputTokens = $maxOut
+    }
+    $continuing = ($null -ne $Messages -and $Messages.Count -gt 0)
+
+    # 直しの回は、同じ会話の続きとして指摘を渡す。
+    #
+    # 以前は新しい会話で最初から作業させていたので、直す側は自分が何をしたかを
+    # 知らなかった (ファイルを読み直して推測するしかない)。
+    # 報告の宛先も明示する。指摘をそのまま渡すと、最後の文章が
+    # 「ご指摘の点を修正しました」という検証役への返事になり、それが利用者に届く。
+    if ($continuing -and $RepairIssues -and @($RepairIssues).Count -gt 0) {
+        $list = ''
+        foreach ($i in @($RepairIssues)) { $list += "- [$($i.severity)] $($i.where): $($i.problem) → $($i.fix)`n" }
+        $text = @"
+[点検の結果] 別の担当者があなたの作業を点検し、以下の問題を指摘しました。これを直してください。
+問題のないところは作り直さなくて構いません。
+
+$list
+直し終えたら、最後の文章は**利用者に向けた報告**として書き直してください。
+利用者にはこの指摘は見えていません。「ご指摘の点を修正しました」のような点検役への返事ではなく、
+このカードで最終的に何をしたか・何を確認してほしいかを、最初から読める形で書いてください。
+"@
+        return Invoke-ClaudeAgent @agentArgs -UserText $text
+    }
+    if ($continuing -and $ResumeText) {
+        return Invoke-ClaudeAgent @agentArgs -UserText $ResumeText
+    }
 
     $maxBody = if ($Policy.llm.maxBodyChars) { [int] $Policy.llm.maxBodyChars } else { 4000 }
     $body = if ($Evt) { [string] $Evt['body'] } else { '' }
@@ -963,7 +1232,7 @@ $(if ($SourceText) {
 "※元のやり取りを取り直せませんでした: $SourceNote
   上の body は取り込んだ時点のもので、途中で切れている可能性があります。"
 })
-$prior$recur$mem$instr
+$prior$recur$mem$(if ($Handoff) { "`n" + $Handoff + "`n" })$instr
 このカードを閉じてください。
 まず「相手のサービスを操作すれば終わるか」を検討し、終わるなら http_request で実行してください。
 終わらないなら、送る文面を載せるか、本人にしかできない1手を提示してください。
@@ -982,6 +1251,111 @@ list_files と read_file で現状を確認したうえで、**これらを直�
 $list
 "@
     }
-    return Invoke-ClaudeAgent -Policy $Policy -System (Get-WorkSystemPrompt $Policy.context) `
-        -Tools $Tools -UserText $userText -OnTool $OnTool -OnProgress $OnProgress -MaxTurns $MaxTurns
+    return Invoke-ClaudeAgent @agentArgs -UserText $userText
+}
+
+function Get-ResumeText {
+    <#
+      .SYNOPSIS
+        止まった会話を続きから再開するときに足す文面。
+      .DESCRIPTION
+        前回から時間が経っている。そのあいだに外の状態は変わりうる ―― #295 では、
+        ワーカーが壊したファイルを利用者が手で直していた。古い会話の前提のまま
+        続けると、直ったものをもう一度「直し」にいく。だから書く前に読み直させる。
+        利用者の新しい指示は、会話の中で一番新しく一番優先されるものとして渡す。
+    #>
+    param(
+        [string[]] $Instructions,
+        # 前回の会話の最後の更新時刻
+        [string] $Since,
+        # 取り直した出自が前回と違っていれば、その全文
+        [string] $ChangedSource,
+        # 前回の作業の点検で解消しなかった指摘 (利用者の画面には出していない)
+        [string] $OpenIssues,
+        # 回数の上限で止めた
+        [switch] $Partial,
+        # 作業の途中でワーカーが止まった (落ちた・再起動した)。終わり方が記録されていない
+        [switch] $Interrupted
+    )
+    $sb = New-Object Text.StringBuilder
+    [void] $sb.AppendLine('[再開] このカードの作業を、前回の会話の続きから再開します。')
+    if ($Since) {
+        $ago = ''
+        try {
+            $span = (Get-Date) - [DateTimeOffset]::Parse($Since).LocalDateTime
+            $ago = if ($span.TotalHours -ge 24) { '{0:N0} 日' -f $span.TotalDays }
+                   elseif ($span.TotalMinutes -ge 60) { '{0:N0} 時間' -f $span.TotalHours }
+                   else { '{0:N0} 分' -f [Math]::Max(1, $span.TotalMinutes) }
+        } catch { }
+        if ($ago) { [void] $sb.AppendLine("前回の作業から $ago 経っています。") }
+    }
+    [void] $sb.AppendLine('そのあいだに相手のサービスの状態や、利用者の手元は変わっている可能性があります。' +
+                          '前回の結果を前提に書き込む前に、いまの状態を読んで確かめてください。')
+    if ($Partial) {
+        [void] $sb.AppendLine('前回はツールの回数の上限で途中で止めました。残っていた作業から続けてください。')
+    }
+    if ($Interrupted) {
+        [void] $sb.AppendLine('前回の作業は途中で止まっています (ワーカーが停止しました)。' +
+                              'どこまで進んでいたかを確かめてから続けてください。')
+    }
+    if ($ChangedSource) {
+        [void] $sb.AppendLine()
+        [void] $sb.AppendLine('元のやり取りを取り直したところ、前回から変わっていました。いまの全文です:')
+        [void] $sb.AppendLine('<thread>')
+        [void] $sb.AppendLine($ChangedSource)
+        [void] $sb.AppendLine('</thread>')
+    }
+    if ($OpenIssues) {
+        [void] $sb.AppendLine()
+        [void] $sb.AppendLine('前回の作業を点検した担当者が、次の問題を残しています (利用者の画面には出ていません):')
+        [void] $sb.AppendLine($OpenIssues)
+    }
+    if ($Instructions -and $Instructions.Count -gt 0) {
+        [void] $sb.AppendLine()
+        [void] $sb.AppendLine('利用者からの新しい指示 (最優先で反映すること):')
+        foreach ($i in $Instructions) { [void] $sb.AppendLine("- $i") }
+    }
+    [void] $sb.AppendLine()
+    [void] $sb.AppendLine('最後の文章は、利用者に向けて、今回の依頼に対して何をしたかを報告してください。')
+    return $sb.ToString()
+}
+
+function Get-HandoffText {
+    <#
+      .SYNOPSIS
+        会話を続けられないときに、新しい会話へ渡す「前回までの経過」。
+      .DESCRIPTION
+        要約をモデルに書かせるのではなく、DB に残っている事実から組み立てる。
+        モデルの書いた経過は、自分に都合よく欠ける ―― #295 の3回目は、実際には
+        PUT していたのに「GET しか出していない」と書いた。何を叩いて何が返ったかは
+        task_attempts が、何を報告したかは前回の報告が、何が問題だったかは
+        点検の記録が持っている。
+    #>
+    param(
+        [string] $Attempts,
+        [string] $LastReport,
+        [string] $OpenIssues
+    )
+    if (-not ($Attempts -or $LastReport -or $OpenIssues)) { return '' }
+    $sb = New-Object Text.StringBuilder
+    [void] $sb.AppendLine('このカードでは、以前にも作業が行われています。前回までの経過 (記録から):')
+    if ($Attempts) {
+        [void] $sb.AppendLine()
+        [void] $sb.AppendLine('実際に試したこと (○=成功 ×=失敗):')
+        [void] $sb.AppendLine($Attempts)
+    }
+    if ($LastReport) {
+        [void] $sb.AppendLine()
+        [void] $sb.AppendLine('前回の報告:')
+        [void] $sb.AppendLine($LastReport)
+    }
+    if ($OpenIssues) {
+        [void] $sb.AppendLine()
+        [void] $sb.AppendLine('前回の作業の点検で残った問題:')
+        [void] $sb.AppendLine($OpenIssues)
+    }
+    [void] $sb.AppendLine()
+    [void] $sb.AppendLine('上に書き込み (POST / PUT / PATCH / DELETE) や送信があれば、それはすでに相手に届いています。' +
+                          '繰り返さないでください。状態が変わっている可能性があるので、読んで確かめてから進めてください。')
+    return $sb.ToString()
 }

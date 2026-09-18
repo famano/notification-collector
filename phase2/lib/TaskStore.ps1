@@ -276,6 +276,27 @@ CREATE TABLE IF NOT EXISTS task_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_task ON task_attempts(task_id, id);
 '@)
+
+    # ワーカーとモデルの会話そのもの。カード1枚につき1本。
+    #
+    # やり直しのたびに会話を捨てていたので、差し戻すと最初から調べ直し、
+    # 自分が前回何をしたか (何を書き込んだか) も知らないまま作業していた ――
+    # 「これをやったのはきみか」と聞かれて「GET しかしていない」と答えたのはこのため。
+    # いまは会話を残し、再開は続きから行う。
+    #   occurrence … この会話を始めたときの occurrence_count。同じ件の新しい発生
+    #                (次の CI の失敗など) は別の出来事なので、会話を分ける目印にする
+    #   source_hash … 渡した出自の指紋。再開時に取り直したものと違えば、差分として渡す
+    #   state       … running (作業中。落ちたらこのまま残る) / done / partial (回数の上限で止めた)
+    $Conn.Exec(@'
+CREATE TABLE IF NOT EXISTS task_sessions (
+  task_id     INTEGER PRIMARY KEY,
+  messages    TEXT NOT NULL,
+  occurrence  INTEGER NOT NULL DEFAULT 1,
+  source_hash TEXT,
+  state       TEXT NOT NULL DEFAULT 'running',
+  updated_at  TEXT NOT NULL
+);
+'@)
 }
 
 function Get-Now { return (Get-Date).ToString('o') }
@@ -1078,6 +1099,8 @@ function Remove-TaskRows {
     [void] $Conn.NonQuery('DELETE FROM tool_requests WHERE task_id = ?',  [object[]] @($TaskId))
     # 外部キーではないが、残すと消えたカード向けの許可が居座る
     [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE scope = 'task' AND scope_id = ?", [object[]] @($TaskId))
+    # 会話にはメールの本文がそのまま入っている。カードと一緒に消す。
+    [void] $Conn.NonQuery('DELETE FROM task_sessions WHERE task_id = ?', [object[]] @($TaskId))
     return ($Conn.NonQuery('DELETE FROM tasks WHERE id = ?', [object[]] @($TaskId)) -gt 0)
 }
 
@@ -1219,6 +1242,54 @@ function Get-NextWorkItem {
         return $t
     }
     catch { $Conn.Rollback(); throw }
+}
+
+# ---------------------------------------------------------------- 会話の保存
+
+function Get-TaskSession {
+    <#
+      .OUTPUTS
+        行 (messages は JSON 文字列のまま)。無ければ $null。
+    #>
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $r = @($Conn.Query('SELECT * FROM task_sessions WHERE task_id = ?', [object[]] @($TaskId)))
+    if ($r.Count -eq 0) { return $null }
+    return $r[0]
+}
+
+function Save-TaskSession {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [string] $MessagesJson,
+        [int] $Occurrence = 1,
+        [string] $SourceHash,
+        [ValidateSet('running', 'done', 'partial')] [string] $State = 'running'
+    )
+    [void] $Conn.NonQuery(
+        'INSERT INTO task_sessions (task_id, messages, occurrence, source_hash, state, updated_at) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(task_id) DO UPDATE SET messages=excluded.messages, occurrence=excluded.occurrence,
+                                            source_hash=excluded.source_hash, state=excluded.state,
+                                            updated_at=excluded.updated_at',
+        [object[]] @($TaskId, $MessagesJson, $Occurrence, $SourceHash, $State, (Get-Now)))
+}
+
+# 作業の終わり方だけを書き換える。会話の中身はツールを1回使うごとに保存済み。
+function Set-TaskSessionState {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [ValidateSet('running', 'done', 'partial')] [string] $State
+    )
+    [void] $Conn.NonQuery('UPDATE task_sessions SET state = ? WHERE task_id = ?', [object[]] @($State, $TaskId))
+}
+
+# 会話を捨てる。利用者の「最初からやり直す」。
+# 間違った前提ごと会話が続いてしまうことはある (「自分には書き込む手段が無い」と
+# 思い込んだまま、など)。そのときに捨てられる口が要る。
+function Clear-TaskSession {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    return ($Conn.NonQuery('DELETE FROM task_sessions WHERE task_id = ?', [object[]] @($TaskId)) -gt 0)
 }
 
 # カードに載っている「あなたにしかできない1手」。無ければ $null。

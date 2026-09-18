@@ -21,6 +21,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `Memory.Tests.ps1` | 利用者について覚えること。どんな文面のカードにも渡ること、増え続けないこと |
 | `TaskStore.Tests.ps1` | 通知と同期の突き合わせ、楽観ロック、ワーカーへの受け渡し、削除、承認 |
 | `WorkTools.Tests.ps1` | 危険度の判定 (承認の要否) と人間送りのゲート |
+| `WorkerSession.Tests.ps1` | ワーカーの会話を残し、やり直しを続きから行うこと。回数の上限で例外にしないこと、途中で切れた呼び出しを実行しないこと |
 | `HttpAction.Tests.ps1` | 資格情報をホストから決めること、送信の口を汎用ツールから塞ぐこと |
 | `GoogleToken.Tests.ps1` | 再認可した新しいトークンを、別プロセス (ワーカー・収集) が期限を待たずに使うこと |
 | `Graph.Tests.ps1` | Microsoft 365。デバイスコード、入れ替わるリフレッシュトークンの保存、掃き寄せの取捨、投稿先の束縛 |
