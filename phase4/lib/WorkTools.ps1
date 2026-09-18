@@ -48,6 +48,7 @@ $script:HumanStepBlockers = @{
     'physical_presence'  = '本人の身体が要る (生体認証、本人確認リンク、来訪など)'
     'payment_or_legal'   = '支払い・契約・本人の意思決定そのもの'
     'no_api'             = '相手側に操作する手段が存在しない'
+    'beyond_tools'       = '手持ちの道具では正しく・確かめながらできない (引き渡す)'
 }
 
 function Get-TaskWorkspace {
@@ -413,6 +414,7 @@ $script:HumanStepTool = @{
 **先にやること。** このツールを呼ぶ前に、open_source で出自を全部読み、
 http_request で実際に操作を試みること。試さずにこれを呼ぶと差し戻される。
 「自分にはできない」と判断する前に、API で state を変えられないか必ず調べる。
+(beyond_tools だけは例外。試すこと自体が壊す危険になるので、試さずに呼んでよい)
 
 blocker は次から選ぶ:
   credential_missing … 権限・資格情報が足りないだけ。設定カードに変換され、
@@ -420,13 +422,18 @@ blocker は次から選ぶ:
   physical_presence  … 生体認証・本人確認リンク・来訪など、本人の身体が要る
   payment_or_legal   … 支払い・契約・本人の意思決定そのもの
   no_api             … 相手側に操作する手段が存在しない (試したうえで)
+  beyond_tools       … 手段はあるが、手持ちの道具では正しく・結果を確かめながらできない作業。
+                       例: リポジトリのコードやテストを直す (差分の適用・テストの実行・
+                       レビューの手順が要る)、画面操作が要るもの。
+                       下位の道具 (http_request) を組み合わせて別の操作を再現しないこと。
+                       これは失敗ではなく引き渡し。step に「何をどう直せばよいか」を具体的に書く。
 '@
     input_schema = @{
         type       = 'object'
         properties = [ordered]@{
             blocker = @{
                 type = 'string'
-                enum = @('credential_missing', 'physical_presence', 'payment_or_legal', 'no_api')
+                enum = @('credential_missing', 'physical_presence', 'payment_or_legal', 'no_api', 'beyond_tools')
                 description = 'なぜ人間でなければならないか。'
             }
             step    = @{ type = 'string'; description = '利用者がやる1手。一文で、具体的に。' }
@@ -533,6 +540,8 @@ function Test-HumanStepAllowed {
 
     # physical_presence と payment_or_legal は、性質上いくら叩いても解決しない
     # (生体認証や支払いの意思決定)。出自を読んでいれば通す。
+    # beyond_tools も同じ。道具が足りない作業で「試した証跡」を求めると、
+    # 試すこと自体 (HTTP でファイル編集を組み立てる) が壊す原因になる (#295)。
     return [pscustomobject]@{ ok = $true; reason = '' }
 }
 
@@ -547,7 +556,10 @@ function Get-HumanStepHeadline {
         # Get-AttemptSummary の出力。無ければ省く。
         [string] $Tried
     )
-    $head = "【あなたの操作が必要です】`n" + [string] $HumanStep.step
+    $label = if ($HumanStep.blocker -eq 'beyond_tools') {
+        '【手持ちの道具では正しくできないため、引き渡します】'
+    } else { '【あなたの操作が必要です】' }
+    $head = $label + "`n" + [string] $HumanStep.step
     if ($HumanStep.url)      { $head += "`n→ " + [string] $HumanStep.url }
     if ($HumanStep.deadline) { $head += "`n期限: " + [string] $HumanStep.deadline }
     if ($HumanStep.blocker -eq 'credential_missing' -and $HumanStep.setup_task_id) {

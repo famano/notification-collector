@@ -233,6 +233,13 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'human_step') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN human_step TEXT')
     }
+    # 外に出した操作 (書き込み・送信) のあとで、点検が問題を見つけたカードの印。
+    # #295 では、点検は「ファイルを1行にして壊した」と正しく見つけていたのに、
+    # 送信済みなので直しには回さず、ほかのカードと同じ見た目でレビュー待ちに置いていた。
+    # 利用者が「確認した」と押すまで赤く出し続ける。
+    if ($cols -notcontains 'alert') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN alert TEXT')
+    }
 
     # 件ごとの台帳。カードをまたいで「前回こう分かった」を持ち越す。
     $Conn.Exec(@'
@@ -1390,7 +1397,7 @@ function Get-TaskDetail {
 # 更新できるカラムはホワイトリストで固定する。キーを SQL に埋めるため、
 # 呼び出し側の入力をそのまま通してはいけない。
 $script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'user_record', 'agent_output', 'draft_text',
-                            'shape', 'human_step', 'subject_key')
+                            'shape', 'human_step', 'subject_key', 'alert')
 
 function Update-TaskFields {
     param(

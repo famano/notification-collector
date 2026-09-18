@@ -1230,6 +1230,16 @@ function Invoke-Route {
                 Write-JsonResponse $Context @{ ok = $true }
                 return
             }
+            # 「外に出したあとで問題が見つかった」の赤い印を、利用者が確認して外す。
+            # 印はワーカーが立て、利用者が見たと言うまで消さない ―― 見落とされたまま
+            # ほかのカードに紛れるのが、#295 で起きたこと。
+            'ack' {
+                $ok = Update-TaskFields -Conn $Conn -TaskId $taskId -Fields @{ alert = $null }
+                if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'not found' } 404; return }
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '書き込み・送信のあとの問題を確認しました'
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
             'comment' {
                 if (-not $b -or -not $b.body) { Write-JsonResponse $Context @{ error = 'body is required' } 400; return }
                 [void] (Add-TaskComment -Conn $Conn -TaskId $taskId -Author 'user' -Body $b.body)

@@ -442,6 +442,16 @@ Describe '編集' {
         try { Assert-Null (Get-TaskSession -Conn $c -TaskId $mailId) } finally { $c.Dispose() }
     }
 
+    It '外に出したあとの問題の印は、一覧にも詳細にも出て、「確認した」で外れる' {
+        $c = Open-TaskStore -Path $dbPath
+        try { [void] (Update-TaskFields -Conn $c -TaskId $slackId -Fields @{ alert = '書き込みのあとで問題' }) } finally { $c.Dispose() }
+        $all = @((Invoke-Board $board '/api/board').body.columns | ForEach-Object { $_.tasks } | Where-Object { $_.id -eq $slackId })
+        Assert-Equal '書き込みのあとで問題' $all[0].alert
+        Assert-Equal '書き込みのあとで問題' (Invoke-Board $board ("/api/tasks/$slackId")).body.task.alert
+        Assert-Equal 200 (Invoke-Board $board ("/api/tasks/$slackId/ack") 'POST' @{}).status
+        Assert-Null (Invoke-Board $board ("/api/tasks/$slackId")).body.task.alert
+    }
+
     It 'カードを手で起票できる' {
         $r = Invoke-Board $board '/api/tasks' 'POST' @{ title = '手で作ったカード' }
         Assert-Equal 200 $r.status
