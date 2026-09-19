@@ -140,3 +140,35 @@ Describe '渡せるカードか' {
 
     Close-TestStore $conn
 }
+
+Describe 'git の呼び出し (標準エラーを失敗と取り違えない)' {
+
+    # PowerShell 5.1 は Stop のもとで外部コマンドの標準エラーを 2>&1 で受けると、
+    # 成功していても例外にする。git worktree add は成功時にも
+    # 「Preparing worktree (new branch ...)」を標準エラーに書くので、
+    # 引き渡しが毎回「失敗しました: Preparing worktree ...」で止まっていた。
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Skip-It 'git' 'git がありません'; return }
+    $ErrorActionPreference = 'Stop'
+    $root = New-TestTempDir
+    $repo = Join-Path $root 'repo'
+    [void] (New-Item -ItemType Directory -Path $repo)
+    [void] (Invoke-Git $repo @('init', '-q', '-b', 'main'))
+    [void] (Invoke-Git $repo @('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'init'))
+
+    It '成功した worktree add (標準エラーに進捗を書く) を失敗にしない' {
+        $wt = Join-Path $root 'wt'
+        $out = Invoke-Git $repo @('worktree', 'add', '-b', 'nc/task-0435', $wt, 'main')
+        Assert-Match 'Preparing worktree' $out
+        Assert-Equal 'nc/task-0435' (Invoke-Git $wt @('rev-parse', '--abbrev-ref', 'HEAD'))
+    }
+
+    It '本当の失敗は、git の理由つきで例外にする' {
+        $msg = ''
+        try { [void] (Invoke-Git $repo @('rev-parse', '--verify', 'refs/heads/no-such-branch')) } catch { $msg = $_.Exception.Message }
+        Assert-Match 'git rev-parse --verify refs/heads/no-such-branch が失敗しました' $msg
+    }
+
+    It 'origin の無いリポジトリは、例外にせず「一致しない」と返す' {
+        Assert-False (Test-RepoMatchesRemote -Path $repo -Repo 'famano/notification-collector')
+    }
+}

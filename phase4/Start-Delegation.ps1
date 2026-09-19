@@ -50,13 +50,6 @@ function Write-Step {
     Write-Host ("  [#{0}] {1}" -f $TaskId, $Message)
 }
 
-function Invoke-Git {
-    param([Parameter(Mandatory)] [string] $Dir, [Parameter(Mandatory)] [string[]] $GitArgs)
-    $out = & git -C $Dir @GitArgs 2>&1
-    if ($LASTEXITCODE -ne 0) { throw ("git {0} が失敗しました: {1}" -f ($GitArgs -join ' '), (($out | Out-String).Trim())) }
-    return (($out | Out-String).Trim())
-}
-
 function Invoke-ClaudeCode {
     <#
       .SYNOPSIS
@@ -114,6 +107,18 @@ try {
     $base = $baseRef -replace '^origin/', ''
     if (-not (Test-Path -LiteralPath $WorktreeRoot)) { New-Item -ItemType Directory -Path $WorktreeRoot -Force | Out-Null }
     $wt = Join-Path $WorktreeRoot ('task-{0:D4}' -f $TaskId)
+    # 前回の作業ツリーが途中までしかできていない (作成の途中で止まった) なら、
+    # 消さずに脇へ退けて作り直す。中身は利用者が確かめられるように残す。
+    if (Test-Path -LiteralPath $wt) {
+        $valid = $false
+        try { $valid = ((Invoke-Git $wt @('rev-parse', '--abbrev-ref', 'HEAD')) -eq $branch) } catch { }
+        if (-not $valid) {
+            $aside = $wt + '.broken-' + (Get-Date).ToString('yyyyMMdd-HHmmss')
+            Move-Item -LiteralPath $wt -Destination $aside
+            try { [void] (Invoke-Git $repoPath @('worktree', 'prune')) } catch { }
+            Write-Step 'step' "途中までしかできていない前回の作業ツリーを退けました: $aside"
+        }
+    }
     if (Test-Path -LiteralPath $wt) {
         # 前回渡したときの worktree。同じブランチの続きとして使う。
         Write-Step 'step' "前回の作業ツリーを使います: $wt"

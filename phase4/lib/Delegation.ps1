@@ -58,11 +58,34 @@ function Test-RepoMatchesRemote {
     if (-not (Test-RepoName $Repo)) { return $false }
     if (-not (Test-Path -LiteralPath (Join-Path $Path '.git'))) { return $false }
     $url = ''
+    # 標準エラーを例外にしない (Invoke-Git の説明を参照)
+    $ErrorActionPreference = 'Continue'
     try { $url = [string] (& git -C $Path remote get-url origin 2>$null) } catch { return $false }
+    if ($LASTEXITCODE -ne 0) { return $false }
     if (-not $url) { return $false }
     $u = $url.Trim().ToLower() -replace '\.git$', ''
     $r = $Repo.ToLower()
     return ($u.EndsWith('/' + $r) -or $u.EndsWith(':' + $r))
+}
+
+function Invoke-Git {
+    <#
+      .DESCRIPTION
+        成否は終了コードだけで決める。
+        PowerShell 5.1 は、$ErrorActionPreference = 'Stop' のもとで外部コマンドの標準エラーを
+        2>&1 で受けると、成功していても標準エラーの1行目を例外にして投げる。git は進捗
+        (worktree add の「Preparing worktree (new branch ...)」など) を標準エラーに書くので、
+        成功した呼び出しが「引き渡しに失敗しました: Preparing worktree ...」で止まっていた。
+        この関数の中だけ Continue にして、標準エラーは出力として受け取る。
+    #>
+    param([Parameter(Mandatory)] [string] $Dir, [Parameter(Mandatory)] [string[]] $GitArgs)
+    $ErrorActionPreference = 'Continue'
+    $out = @(& git -C $Dir @GitArgs 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { [string] $_ }
+    })
+    $text = ($out -join "`n").Trim()
+    if ($LASTEXITCODE -ne 0) { throw ("git {0} が失敗しました: {1}" -f ($GitArgs -join ' '), $text) }
+    return $text
 }
 
 function Get-DelegationBranch {
