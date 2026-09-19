@@ -567,3 +567,27 @@ YOLO を有効にすると、この壁は無くなる。有効化時に確認ダ
 
 つまり、通知単体では文脈が足りないという Phase 1 の結論は下書きの質にも表れている。
 Slack / メールの本文を正規 API で取得できれば、ここが改善する見込み。
+
+## Claude Code への引き渡し
+
+`beyond_tools` で引き渡されたカードのうち、GitHub のリポジトリのコード修正（`repo` に
+`owner/name` が書かれたもの）は、カードを開くと「Claude Code に渡す」が出る。
+
+ワーカーにファイル編集の道具を足していくのは、Claude Code の作り直しになる
+（差分の適用・テストの実行・書いたものの確認）。ワーカーは引き渡すところまでにして、
+その先を手元の Claude Code（`claude -p`）に任せる。
+
+| 段 | 何をするか |
+|---|---|
+| 押す前 | 渡す文面を全文見せる。文面はワーカーが第三者の文面（通知・CI のログ）から組み立てたもの |
+| 手元の clone | 初回だけフォルダを入れる。**origin がそのリポジトリを指していなければ断る**（画面から来たパスを信じない）。以後は覚える |
+| 作業場所 | `%LOCALAPPDATA%\notification-collector\worktrees\task-NNNN` に、新しいブランチ `nc/task-NNNN` の worktree を切る。利用者の作業ツリーにも既存のブランチにも触らない |
+| Claude Code | `claude -p --output-format json --permission-mode acceptEdits`。`git push`・`gh`・ブランチの切り替え・WebFetch・WebSearch は止める。費用の上限 `delegation.maxBudgetUsd`（既定 5 ドル）、`delegation.timeoutMinutes`（既定 30 分）で止める |
+| push と PR | コミットがあれば、**このスクリプトが新しいブランチだけを push し、下書きの PR にする**（GitHub トークンがあれば）。マージは人が決める ―― 壊れるとしても PR の中まで |
+| 結果 | やりとりに報告として残し、PR のリンクを出す。カードはレビュー待ちのまま |
+
+**Windows ではコマンドからの通信は止められない。** Claude Code のサンドボックスは
+macOS / Linux / WSL2 だけで、Bash（テストの実行に要る）を許すと、そこからの通信は制限できない。
+押す前の画面にもそう書いてある。渡す文面を読んでから押すこと。
+
+実行の本体は `Start-Delegation.ps1`（カンバンが別プロセスで起動し、ログは `logs\delegation-NNN.log`）。

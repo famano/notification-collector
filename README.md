@@ -24,7 +24,7 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 | [phase1](phase1/README.md) | 通知の取得。`wpndatabase.db` をポーリングして JSONL に出す |
 | [phase2](phase2/README.md) | 判断層とタスクストア。ルールで足切りしてから Claude で判定 |
 | [phase3](phase3/README.md) | カンバン UI。承認・割り込み・修正・アーカイブ |
-| [phase4](phase4/README.md) | ワーカー。出自を取り直し、API で実際に操作し、自己検証する |
+| [phase4](phase4/README.md) | ワーカー。出自を取り直し、API で実際に操作し、自己検証する。道具が足りないコード修正は Claude Code に引き渡す |
 | [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub / Microsoft 365 (Outlook・Teams) / Chatwork / Backlog |
 | [tests](tests/README.md) | テスト。追加インストールもキーも要らない |
 | [docs/配布手順.md](docs/配布手順.md) | 配る側と使う側の手順。`Install.cmd` と `config\app-config.json` |

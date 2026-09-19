@@ -19,6 +19,12 @@
     "clearKeep": 8
   },
 
+  "delegation": {
+    "_comment": "道具が足りない作業 (リポジトリのコード修正) を Claude Code に渡すときの枠。カードの「Claude Code に渡す」から始まる。maxBudgetUsd は1回の費用の上限 (claude --max-budget-usd)、timeoutMinutes を過ぎたら止める。",
+    "maxBudgetUsd": 5,
+    "timeoutMinutes": 30
+  },
+
   "ignore": {
     "_comment": "ここに一致した通知は LLM に渡さず捨てる。前段でコストを落とすためのルール。",
     "appIdPatterns": [

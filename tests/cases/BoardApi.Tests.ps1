@@ -452,6 +452,26 @@ Describe '編集' {
         Assert-Null (Invoke-Board $board ("/api/tasks/$slackId")).body.task.alert
     }
 
+    It 'リポジトリの引き渡しでないカードは Claude Code に渡せない' {
+        $r = Invoke-Board $board ("/api/tasks/$todoId/delegate") 'POST' @{ path = $RepoRoot }
+        Assert-Equal 400 $r.status
+        Assert-False ([bool] (Invoke-Board $board ("/api/tasks/$todoId/delegation")).body.eligible)
+    }
+
+    It '画面から来たパスは、origin がそのリポジトリでなければ使わない (起動もしない)' {
+        $c = Open-TaskStore -Path $dbPath
+        try {
+            $hs = @{ blocker = 'beyond_tools'; step = '直す'; repo = 'famano/notification-collector' } | ConvertTo-Json -Compress
+            [void] (Update-TaskFields -Conn $c -TaskId $keepId -Fields @{ human_step = $hs; shape = 'human' })
+        } finally { $c.Dispose() }
+        $info = (Invoke-Board $board ("/api/tasks/$keepId/delegation")).body
+        Assert-True ([bool] $info.eligible)
+        Assert-Match '直す' $info.prompt
+        $r = Invoke-Board $board ("/api/tasks/$keepId/delegate") 'POST' @{ path = (New-TestTempDir) }
+        Assert-Equal 400 $r.status
+        Assert-Equal 'human' (Invoke-Board $board ("/api/tasks/$keepId")).body.task.shape
+    }
+
     It 'カードを手で起票できる' {
         $r = Invoke-Board $board '/api/tasks' 'POST' @{ title = '手で作ったカード' }
         Assert-Equal 200 $r.status

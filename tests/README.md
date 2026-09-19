@@ -21,6 +21,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Tests.ps1
 | `Memory.Tests.ps1` | 利用者について覚えること。どんな文面のカードにも渡ること、増え続けないこと |
 | `TaskStore.Tests.ps1` | 通知と同期の突き合わせ、楽観ロック、ワーカーへの受け渡し、削除、承認 |
 | `WorkTools.Tests.ps1` | 危険度の判定 (承認の要否) と人間送りのゲート |
+| `Delegation.Tests.ps1` | Claude Code への引き渡し。新しいブランチで push させないこと、第三者の文面を指示として渡さないこと、画面から来たパスを origin で確かめること |
 | `WritePreview.Tests.ps1` | 書き込みの前の突き合わせ (#295 の PUT が止まること)、許可が「種類 × ホスト」で効くこと、base64 を手で書かせないこと |
 | `WorkerSession.Tests.ps1` | ワーカーの会話を残し、やり直しを続きから行うこと。回数の上限で例外にしないこと、途中で切れた呼び出しを実行しないこと |
 | `HttpAction.Tests.ps1` | 資格情報をホストから決めること、送信の口を汎用ツールから塞ぐこと |
