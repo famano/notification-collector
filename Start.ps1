@@ -255,6 +255,10 @@ function Start-Child {
     )
     $log = Join-Path $LogDir ($Name + '.log')
     $err = Join-Path $LogDir ($Name + '.err.log')
+    # 前回のログは消さずに logs\old\ へ移す。同じ名前にリダイレクトするので、
+    # 残さないと起動し直した時点で事故の当時の記録が消える。
+    [void] (Save-PreviousLog -Path $log)
+    [void] (Save-PreviousLog -Path $err)
     $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Script) + $Arguments
     $p = Start-Process -FilePath 'powershell' -ArgumentList $psArgs -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput $log -RedirectStandardError $err

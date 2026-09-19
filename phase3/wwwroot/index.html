@@ -174,6 +174,15 @@
   }
   #drawer .humanstep .hs-go:hover { filter: brightness(1.08); }
   #drawer .humanstep .hs-sub { font-size: 12px; color: var(--muted); margin-top: 9px; word-break: break-word; }
+  #drawer .humanstep .delegate { margin-top: 12px; padding-top: 10px; border-top: 1px dashed color-mix(in srgb, var(--high) 30%, transparent); }
+  #drawer .humanstep .delegate pre { max-height: 240px; overflow: auto; font-size: 11.5px; }
+  /* 外に出したあとで問題が見つかった印。本人の1手 (橙) と区別して赤で出す */
+  .card .humanstep.alert, #drawer .humanstep.alert {
+    background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  }
+  #drawer .humanstep.alert { border-left-color: var(--danger); }
+  .card .humanstep.alert .hs-l, #drawer .humanstep.alert .hs-l { color: var(--danger); }
   #drawer .humanstep .hs-link {
     display: block; margin-top: 9px; padding: 0; border: none; background: none;
     font: inherit; font-size: 12px; font-weight: 600; color: var(--accent);
@@ -279,6 +288,7 @@
   /* 送信は取り消せない。作業ログを流し読みしても目に留まるようにする */
   .act.sent .k { color: var(--high); font-weight: 700; }
   .act.sent { font-weight: 600; }
+  .act.alert .k, .act.alert { color: var(--danger); font-weight: 700; }
   .act.error .k, .act.cancelled .k { color: var(--danger); font-weight: 600; }
 
   .cmt { padding: 7px 0 7px 10px; border-left: 2px solid var(--line); margin-bottom: 8px; }
@@ -526,7 +536,7 @@
   var ACT_KIND = {
     start: '開始', step: '経過', llm: '検討', tool: '実行', file: '成果物', sent: '送信済み',
     approve: '承認待ち', deny: '不許可', verify: '検証', issue: '指摘', repair: '修正',
-    done: '完了', error: 'エラー', cancelled: '中止', user: '操作'
+    done: '完了', error: 'エラー', cancelled: '中止', user: '操作', alert: '要確認'
   };
   var WORKER_STATE = {
     working: '作業中', waiting: '承認待ち', idle: '待機中',
@@ -716,10 +726,18 @@
         }));
       }
       decide('許可', '許可中…', 'approved', null, 'primary');
-      decide('このカードでは以後許可', '設定中…', 'approved', 'task', null);
-      decide('今後すべて許可', '設定中…', 'approved', 'global', null);
+      // 「まとめて許可」は、何が束ねられるかを見せたうえで出す。以前はツール名で束ねていて、
+      // GET を通すつもりで押した「今後すべて許可」が PUT まで無承認にしていた。
+      // 影響を事前に確かめられない上書き・大きく減る上書きには出さない (毎回ここで判断する)。
+      if (p.grantable !== false) {
+        decide('このカードでは以後許可', '設定中…', 'approved', 'task', null);
+        decide('今後すべて許可', '設定中…', 'approved', 'global', null);
+      }
       decide('拒否', '拒否中…', 'denied', null, 'danger');
       box.appendChild(row);
+      box.appendChild(el('div', 'sub', p.grantable !== false
+        ? 'まとめて許可の対象: ' + grantLabel(p.grant_key || p.tool)
+        : 'この操作はまとめて許可できません（影響を事前に確かめられない、または大きく消える上書き・削除です）'));
       permEl.appendChild(box);
     });
 
@@ -729,7 +747,7 @@
       d.grants.forEach(function (x) {
         var chip = el('span', 'g');
         chip.appendChild(el('span', null,
-          (TOOL_LABEL[x.tool] || x.tool) + '（' + (x.scope === 'global' ? '全体' : 'カード #' + x.scope_id) + '）'));
+          grantLabel(x.tool) + '（' + (x.scope === 'global' ? '全体' : 'カード #' + x.scope_id) + '）'));
         var rm = el('button', null, '×');
         rm.title = 'この許可を取り消す';
         rm.onclick = function () {
@@ -743,6 +761,15 @@
       });
       permEl.appendChild(g);
     }
+  }
+
+  // 許可の鍵を読める形にする。http_request は「種類 × ホスト」で束ねている
+  // (http_request:add:api.github.com → 「api.github.com への追加 (POST)」)。
+  function grantLabel(key) {
+    var m = /^http_request:(\w+):(.*)$/.exec(key || '');
+    if (!m) return TOOL_LABEL[key] || key;
+    var kind = { read: '読み取り', add: '追加 (POST)', change: '上書き・削除 (PUT/PATCH/DELETE)' }[m[1]] || m[1];
+    return (m[2] === '*' ? 'すべてのホストへの' : m[2] + ' への') + kind;
   }
 
   function loadApprovals() {
@@ -822,13 +849,23 @@
     card.appendChild(el('div', 't', t.title));
     if (t.summary) card.appendChild(el('div', 's', t.summary));
 
+    // 書き込み・送信のあとで点検が問題を見つけたカード。ほかのカードに紛れさせない。
+    // 利用者が開いて「確認した」を押すまで出し続ける。
+    if (t.alert) {
+      var ab = el('div', 'humanstep alert');
+      ab.appendChild(el('div', 'hs-l', '外に出したあとで問題が見つかりました'));
+      ab.appendChild(el('div', 'hs-s', '開いて内容を確かめてください'));
+      card.appendChild(ab);
+    }
+
     // 「あなたにしかできない1手」はカードの表で出す。開かないと分からないのでは
     // 意味がない ―― 期限のあるもの (本人確認リンクなど) を取り逃がす。
     if (t.human_step_obj && t.human_step_obj.step) {
       var hs = t.human_step_obj;
       var box = el('div', 'humanstep');
       box.appendChild(el('div', 'hs-l', hs.blocker === 'credential_missing'
-        ? '設定すれば自動で進みます' : 'あなたの操作が必要です'));
+        ? '設定すれば自動で進みます'
+        : hs.blocker === 'beyond_tools' ? '引き渡し: 手持ちの道具では正しくできません' : 'あなたの操作が必要です'));
       // カンバンで入力できるサービスなら、端末に戻る指示より先にそれを出す。
       box.appendChild(el('div', 'hs-s', t.setup_ready ? 'このカードを開くと、ここで設定できます' : hs.step));
       if (hs.deadline) box.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
@@ -846,6 +883,7 @@
     var foot = el('div', 'foot');
     foot.appendChild(el('span', null, '#' + t.id));
     if (t.urgency === 'high') foot.appendChild(el('span', 'u-high', '緊急度 高'));
+    if (t.shape === 'delegated') foot.appendChild(el('span', 'recur', 'Claude Code が作業中'));
     // 同じ件が何度も来ていることは、カードを増やさない代わりにここで見せる。
     if (t.occurrence_count > 1) {
       var oc = el('span', 'recur', t.occurrence_count + ' 回目');
@@ -1206,6 +1244,44 @@
 
   function pre(text) { return el('pre', null, text); }
 
+  // Claude Code への引き渡し。新しいブランチの worktree で作業させ、
+  // 終わったらこちらで新しいブランチだけを push して下書きの PR にする。マージは人が決める。
+  function delegationBox(t) {
+    var box = el('div', 'delegate');
+    box.appendChild(el('div', 'hs-sub', '読み込んでいます…'));
+    api('/api/tasks/' + t.id + '/delegation').then(function (r) {
+      box.innerHTML = '';
+      var d = r.body || {};
+      if (d.running) {
+        box.appendChild(el('div', 'hs-sub', 'Claude Code が作業しています。終わるとやりとりに結果が残ります。'));
+        return;
+      }
+      if (!d.eligible) return;
+      if (!d.available) { box.appendChild(el('div', 'hs-sub', 'Claude Code に渡せません: ' + d.reason)); return; }
+      box.appendChild(el('div', 'hs-l', 'Claude Code に渡す (' + d.repo + ')'));
+      box.appendChild(el('div', 'hs-sub', '新しいブランチで作業させ、終わったら下書きの PR にします。マージするかはあなたが決めます。'
+        + ' push・gh・Web は止めますが、Windows ではコマンドからの通信までは止められません。渡す文面を読んでから押してください。'));
+      var det = el('details');
+      det.appendChild(el('summary', null, '渡す文面'));
+      det.appendChild(el('pre', null, d.prompt));
+      box.appendChild(det);
+      box.appendChild(el('div', 'hs-sub', '手元の clone のフォルダ（origin が ' + d.repo + ' を指していること）'));
+      var path = el('input'); path.type = 'text'; path.value = d.path || ''; path.style.width = '100%';
+      path.placeholder = 'C:\\Users\\...\\' + d.repo.split('/')[1];
+      box.appendChild(path);
+      var row = el('div', 'row'); row.style.marginTop = '8px';
+      row.appendChild(actionButton('Claude Code に渡す', 'primary', '渡しています…', function () {
+        return api('/api/tasks/' + t.id + '/delegate', 'POST', { path: path.value.trim() }).then(function (a) {
+          if (a.status !== 200 || !a.body || !a.body.ok) { toast('渡せませんでした: ' + ((a.body && a.body.error) || a.status), 'err'); return; }
+          toast('Claude Code に渡しました。終わるとやりとりに結果が残ります', 'ok');
+          return refresh(true);
+        });
+      }));
+      box.appendChild(row);
+    });
+    return box;
+  }
+
   function openDetail(id, keepScroll) {
     return api('/api/tasks/' + id).then(function (r) {
       if (r.status !== 200) return;
@@ -1280,7 +1356,8 @@
         var isCred = hs.blocker === 'credential_missing';
         var hbox = el('div', 'humanstep');
         hbox.appendChild(el('div', 'hs-l',
-          isCred ? '設定すれば、以後は自動で進みます' : 'あなたの操作が必要です'));
+          isCred ? '設定すれば、以後は自動で進みます'
+            : hs.blocker === 'beyond_tools' ? '引き渡し: 手持ちの道具では正しくできないため、ここで止めました' : 'あなたの操作が必要です'));
         hbox.appendChild(el('div', 'hs-s', hs.step));
 
         if (hs.deadline) hbox.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
@@ -1309,7 +1386,29 @@
         if (hs.tried) {
           hbox.appendChild(el('div', 'hs-tried', 'ここに至るまでに試したこと: ' + hs.tried));
         }
+        // リポジトリのコード修正として引き渡されたなら、Claude Code に渡せる。
+        // 押す前に、渡す文面を全文見せる (ワーカーが第三者の文面から組み立てたものなので)。
+        if (hs.blocker === 'beyond_tools' && hs.repo) hbox.appendChild(delegationBox(t));
         pad.appendChild(hbox);
+      }
+
+      // --- 外に出したあとで見つかった問題 ---
+      // 報告より上に置く。報告はワーカーの言い分で、ここは別の担当者の点検の結果。
+      // #295 では点検が「ファイルを1行にして壊した」と見つけていたのに、報告の下に
+      // 埋もれたまま普段どおりのカードとして置かれていた。
+      if (t.alert) {
+        var al = el('div', 'humanstep alert');
+        al.appendChild(el('div', 'hs-l', '外に出したあとで問題が見つかりました'));
+        al.appendChild(el('div', 'hs-s', t.alert));
+        var issues = comments.filter(function (c) { return c.author === 'agent' && c.kind !== 'report'; });
+        if (issues.length) al.appendChild(mdRender(issues[issues.length - 1].body));
+        al.appendChild(el('div', 'hs-sub', '書き込みや送信は取り消せません。相手の状態を確かめ、必要なら差し戻して直させてください。'));
+        var ackRow = el('div', 'row'); ackRow.style.marginTop = '8px';
+        ackRow.appendChild(actionButton('確認した', null, '…', function () {
+          return api('/api/tasks/' + t.id + '/ack', 'POST', {}).then(function () { return refresh(true); });
+        }));
+        al.appendChild(ackRow);
+        pad.appendChild(al);
       }
 
       // --- 主役1: ワーカーの報告 ---
@@ -1518,10 +1617,19 @@
             : 'やってほしいことを書いて渡します。カードは要対応に戻り、ワーカーが着手します。'));
         var ins = bindArea(t.id, 'instruct',
           '', (canReject ? '何を直してほしいか' : '何をしてほしいか') + '（改行できます／Ctrl+Enter で送信）', 4);
+        // 差し戻すと、ワーカーは前回の会話の続きから作業する (何をしたかを覚えたまま直す)。
+        // 間違った思い込みごと続いてしまうときのために、会話を捨てる口を残す。
+        var restart = null;
+        if (canReject && t.board_column !== 'doing') {
+          var rl = el('label', 'note');
+          restart = el('input'); restart.type = 'checkbox';
+          rl.appendChild(restart);
+          rl.appendChild(document.createTextNode(' 前回の会話を捨てて、最初からやり直す（試したことと前回の報告は引き継ぐ）'));
+        }
         var doRework = function () {
           if (!ins.value.trim()) { toast('指示が空です', 'err'); return; }
           var wasColumn = t.board_column;
-          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ins.value })
+          return api('/api/tasks/' + t.id + '/comment', 'POST', { body: ins.value, restart: !!(restart && restart.checked) })
             .then(function (r2) {
               if (r2.status !== 200) { toast('送れませんでした: ' + r2.status, 'err'); return refresh(true); }
               clearScratch(t.id, 'instruct');
@@ -1537,6 +1645,7 @@
           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doRework(); }
         };
         panel.appendChild(ins);
+        if (restart) panel.appendChild(restart.parentNode);
         var rr = el('div', 'row'); rr.style.marginTop = '8px';
         rr.appendChild(actionButton(TAB_LABEL.rework, 'primary', '送信中…', doRework));
         panel.appendChild(rr);
@@ -1609,11 +1718,20 @@
         pad.appendChild(foldable('attempts', '試したこと', attempts.length, function (b) {
           attempts.forEach(function (a) {
             var row = el('div', 'att ' + a.outcome);
-            row.appendChild(el('span', 'o', a.outcome === 'ok' ? '○' : (a.outcome === 'denied' ? '×' : '×')));
+            row.appendChild(el('span', 'o', a.outcome === 'ok' ? '○' : (a.outcome === 'held' ? '△' : '×')));
             row.appendChild(el('span', 'tl', a.tool));
             if (a.target) row.appendChild(el('span', 'tg', a.target));
             if (a.detail) row.appendChild(el('span', 'dt', a.detail));
             b.appendChild(row);
+            // 書き込みは、書く前の突き合わせ・読み直しと、送った本文まで残してある。
+            // 「何を書いたのか」はここでしか確かめられない (承認画面は決着すると消える)。
+            if (a.preview) b.appendChild(el('pre', 'att-pv', a.preview));
+            if (a.request) {
+              var rq = el('details', 'att-rq');
+              rq.appendChild(el('summary', null, '送った本文'));
+              rq.appendChild(el('pre', null, a.request));
+              b.appendChild(rq);
+            }
           });
         }));
       }
@@ -1632,21 +1750,39 @@
       // やりとりは履歴として読むだけ。指示を書く欄は「この後どうするか」の
       // 「差し戻す」に1つだけ置く ―― 同じことをする欄が2か所にあると、
       // どちらがカードを動かすのか分からなくなる (どちらも動かしていた)。
-      pad.appendChild(foldable('comments', 'やりとり', comments.length, function (b) {
-        if (comments.length === 0) {
+      // やりとりに出すのは、利用者の指示とワーカーの報告だけ。
+      // 報告は上の「ワーカーの報告」で最新の1件を読むが、差し戻すたびに上書きされるので、
+      // 前回までの報告はここで読み返す。自己検証で残った指摘は、利用者に宛てた
+      // 文章ではないので混ぜない (下の「自己検証の指摘」に分けて畳んでおく)。
+      var isVerify = function (c) { return c.author === 'agent' && c.kind !== 'report'; };
+      var thread = comments.filter(function (c) { return !isVerify(c); });
+      var verifyNotes = comments.filter(isVerify);
+      pad.appendChild(foldable('comments', 'やりとり', thread.length, function (b) {
+        if (thread.length === 0) {
           b.appendChild(el('div', 'note', 'まだやりとりはありません。指示は上の「差し戻す」から送れます。'));
           return;
         }
         // 新しい順。増えても直近のものが手前にあり、下までスクロールしなくてよい。
-        comments.slice().reverse().forEach(function (c) {
+        thread.slice().reverse().forEach(function (c) {
           var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
-          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
+          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカーの報告') + ' · ' + hhmm(c.created_at)));
           // ワーカーの発言は報告と同じ書式で出す。書いているものは同じ性質のもの。
           if (c.author === 'agent') { d.appendChild(mdRender(c.body)); }
           else { d.appendChild(el('div', 'bd', c.body)); }
           b.appendChild(d);
         });
       }));
+      if (verifyNotes.length) {
+        pad.appendChild(foldable('verify', '自己検証の指摘', verifyNotes.length, function (b) {
+          b.appendChild(el('div', 'note', '別の担当者がワーカーの作業を点検し、直しきれなかった点です。次にこのカードを作業するとき、ワーカーにも渡ります。'));
+          verifyNotes.slice().reverse().forEach(function (c) {
+            var d = el('div', 'cmt agent');
+            d.appendChild(el('div', 'who', '自己検証 · ' + hhmm(c.created_at)));
+            d.appendChild(mdRender(c.body));
+            b.appendChild(d);
+          });
+        }));
+      }
 
       if (ev) {
         pad.appendChild(foldable('event', '元の通知', null, function (b) {
@@ -2385,7 +2521,8 @@
     box.appendChild(rows([
       ['許可 / 拒否', 'その1回だけの判断。拒否した場合ワーカーには理由が伝わり、別の手を考える'],
       ['このカードでは以後許可', 'そのカードに限り、同じ種類のツールを確認なしにする'],
-      ['今後すべて許可', 'すべてのカードで、その種類のツールを確認なしにする'],
+      ['今後すべて許可', 'すべてのカードで、その種類の操作を確認なしにする。HTTP は「ホスト × 読み取り / 追加 / 上書き・削除」の組で束ね、GET の許可で PUT は通らない'],
+      ['上書き・削除', '書く前にいまの状態と突き合わせ、差分を承認画面に出す。突き合わせられないものはまとめて許可できない。大きく消えるものは許可や自動承認があっても止まる'],
       ['許可済み', 'ヘッダ下に一覧が出る。× で取り消せる'],
       ['自動承認 ON', 'いわゆる YOLO。すべて確認なし。通知本文に混ぜられた指示も素通りする'],
       ['注意', '承認画面は実行内容を省略せず表示する。コマンドや URL は必ず読むこと']
@@ -2396,7 +2533,7 @@
       ['何をするか', '作成後に別の会話で成果物を点検する。途中終了・空欄・依頼との食い違いを見る'],
       ['要修正なら', '指摘をワーカーに戻して直させ、再度検証する'],
       ['送信済みなら', '直しには回さない。送ったものは取り消せず、二通目が出かねないため。指摘はコメントに残る'],
-      ['残った指摘', 'カードのコメントに残り、報告にも「要確認」と出る']
+      ['残った指摘', 'カード詳細の「自己検証の指摘」に畳んで残る。報告には書かない (報告は利用者宛ての文章)。次にそのカードを作業するときワーカーに渡る']
     ]));
     helpEl.appendChild(box);
     helpEl.hidden = false;

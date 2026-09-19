@@ -167,8 +167,46 @@ Describe 'ツール一覧の出し分け' {
     It '人間送りの理由は閉じた集合から選ばせる' {
         $tool = @((Get-WorkTools) | Where-Object { $_.name -eq 'require_human_step' })[0]
         $enum = @($tool.input_schema.properties.blocker.enum)
-        Assert-Equal 4 $enum.Count
+        Assert-Equal 5 $enum.Count
         Assert-True ($enum -contains 'credential_missing')
+        Assert-True ($enum -contains 'beyond_tools')
+    }
+
+    It '引き渡し (beyond_tools) は試した証跡を求めない。試すこと自体が壊す原因になるため' {
+        $read = @(@{ tool = 'open_source'; outcome = 'ok' })
+        Assert-True (Test-HumanStepAllowed -Attempts $read -Blocker 'beyond_tools').ok
+    }
+
+    It '引き渡しでも、出自を読まずには閉じさせない' {
+        Assert-False (Test-HumanStepAllowed -Attempts @() -Blocker 'beyond_tools').ok
+    }
+
+    It '引き渡しは「あなたの操作」ではなく引き渡しとして報告の先頭に出る' {
+        $t = Get-HumanStepHeadline -HumanStep ([pscustomobject]@{ blocker = 'beyond_tools'; step = 'テストの期待値2行を直す' })
+        Assert-Match '^【手持ちの道具では正しくできないため、引き渡します】' $t
+    }
+}
+
+Describe 'やりすぎを止める指示 (#295)' {
+
+    . "$RepoRoot\phase2\lib\ClaudeClient.ps1"
+    $work = Get-WorkSystemPrompt $null
+    $verify = Get-VerifySystemPrompt $null
+
+    It '承認があるから大丈夫、とは言わない (許可があれば承認画面は出ない)' {
+        Assert-False ($work -match '過度に恐れる必要はありません')
+        Assert-Match '承認画面を経ずに' $work
+    }
+
+    It '下位の道具を組み合わせて別の作業を再現しない、と伝える' {
+        Assert-Match 'git の操作' $work
+        Assert-Match 'beyond_tools' $work
+    }
+
+    It '点検役は、手を尽くさないことと同じ重さでやりすぎを見る' {
+        Assert-Match 'やりすぎていないか' $verify
+        Assert-Match '依頼の範囲を超えた書き込み' $verify
+        Assert-Match "blocker='beyond_tools' で" $verify
     }
 }
 
