@@ -716,10 +716,18 @@
         }));
       }
       decide('許可', '許可中…', 'approved', null, 'primary');
-      decide('このカードでは以後許可', '設定中…', 'approved', 'task', null);
-      decide('今後すべて許可', '設定中…', 'approved', 'global', null);
+      // 「まとめて許可」は、何が束ねられるかを見せたうえで出す。以前はツール名で束ねていて、
+      // GET を通すつもりで押した「今後すべて許可」が PUT まで無承認にしていた。
+      // 影響を事前に確かめられない上書き・大きく減る上書きには出さない (毎回ここで判断する)。
+      if (p.grantable !== false) {
+        decide('このカードでは以後許可', '設定中…', 'approved', 'task', null);
+        decide('今後すべて許可', '設定中…', 'approved', 'global', null);
+      }
       decide('拒否', '拒否中…', 'denied', null, 'danger');
       box.appendChild(row);
+      box.appendChild(el('div', 'sub', p.grantable !== false
+        ? 'まとめて許可の対象: ' + grantLabel(p.grant_key || p.tool)
+        : 'この操作はまとめて許可できません（影響を事前に確かめられない、または大きく消える上書き・削除です）'));
       permEl.appendChild(box);
     });
 
@@ -729,7 +737,7 @@
       d.grants.forEach(function (x) {
         var chip = el('span', 'g');
         chip.appendChild(el('span', null,
-          (TOOL_LABEL[x.tool] || x.tool) + '（' + (x.scope === 'global' ? '全体' : 'カード #' + x.scope_id) + '）'));
+          grantLabel(x.tool) + '（' + (x.scope === 'global' ? '全体' : 'カード #' + x.scope_id) + '）'));
         var rm = el('button', null, '×');
         rm.title = 'この許可を取り消す';
         rm.onclick = function () {
@@ -743,6 +751,15 @@
       });
       permEl.appendChild(g);
     }
+  }
+
+  // 許可の鍵を読める形にする。http_request は「種類 × ホスト」で束ねている
+  // (http_request:add:api.github.com → 「api.github.com への追加 (POST)」)。
+  function grantLabel(key) {
+    var m = /^http_request:(\w+):(.*)$/.exec(key || '');
+    if (!m) return TOOL_LABEL[key] || key;
+    var kind = { read: '読み取り', add: '追加 (POST)', change: '上書き・削除 (PUT/PATCH/DELETE)' }[m[1]] || m[1];
+    return (m[2] === '*' ? 'すべてのホストへの' : m[2] + ' への') + kind;
   }
 
   function loadApprovals() {
@@ -1619,11 +1636,20 @@
         pad.appendChild(foldable('attempts', '試したこと', attempts.length, function (b) {
           attempts.forEach(function (a) {
             var row = el('div', 'att ' + a.outcome);
-            row.appendChild(el('span', 'o', a.outcome === 'ok' ? '○' : (a.outcome === 'denied' ? '×' : '×')));
+            row.appendChild(el('span', 'o', a.outcome === 'ok' ? '○' : (a.outcome === 'held' ? '△' : '×')));
             row.appendChild(el('span', 'tl', a.tool));
             if (a.target) row.appendChild(el('span', 'tg', a.target));
             if (a.detail) row.appendChild(el('span', 'dt', a.detail));
             b.appendChild(row);
+            // 書き込みは、書く前の突き合わせ・読み直しと、送った本文まで残してある。
+            // 「何を書いたのか」はここでしか確かめられない (承認画面は決着すると消える)。
+            if (a.preview) b.appendChild(el('pre', 'att-pv', a.preview));
+            if (a.request) {
+              var rq = el('details', 'att-rq');
+              rq.appendChild(el('summary', null, '送った本文'));
+              rq.appendChild(el('pre', null, a.request));
+              b.appendChild(rq);
+            }
           });
         }));
       }
@@ -1642,21 +1668,39 @@
       // やりとりは履歴として読むだけ。指示を書く欄は「この後どうするか」の
       // 「差し戻す」に1つだけ置く ―― 同じことをする欄が2か所にあると、
       // どちらがカードを動かすのか分からなくなる (どちらも動かしていた)。
-      pad.appendChild(foldable('comments', 'やりとり', comments.length, function (b) {
-        if (comments.length === 0) {
+      // やりとりに出すのは、利用者の指示とワーカーの報告だけ。
+      // 報告は上の「ワーカーの報告」で最新の1件を読むが、差し戻すたびに上書きされるので、
+      // 前回までの報告はここで読み返す。自己検証で残った指摘は、利用者に宛てた
+      // 文章ではないので混ぜない (下の「自己検証の指摘」に分けて畳んでおく)。
+      var isVerify = function (c) { return c.author === 'agent' && c.kind !== 'report'; };
+      var thread = comments.filter(function (c) { return !isVerify(c); });
+      var verifyNotes = comments.filter(isVerify);
+      pad.appendChild(foldable('comments', 'やりとり', thread.length, function (b) {
+        if (thread.length === 0) {
           b.appendChild(el('div', 'note', 'まだやりとりはありません。指示は上の「差し戻す」から送れます。'));
           return;
         }
         // 新しい順。増えても直近のものが手前にあり、下までスクロールしなくてよい。
-        comments.slice().reverse().forEach(function (c) {
+        thread.slice().reverse().forEach(function (c) {
           var d = el('div', 'cmt' + (c.author === 'agent' ? ' agent' : ''));
-          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカー') + ' · ' + hhmm(c.created_at)));
+          d.appendChild(el('div', 'who', (c.author === 'user' ? '自分' : 'ワーカーの報告') + ' · ' + hhmm(c.created_at)));
           // ワーカーの発言は報告と同じ書式で出す。書いているものは同じ性質のもの。
           if (c.author === 'agent') { d.appendChild(mdRender(c.body)); }
           else { d.appendChild(el('div', 'bd', c.body)); }
           b.appendChild(d);
         });
       }));
+      if (verifyNotes.length) {
+        pad.appendChild(foldable('verify', '自己検証の指摘', verifyNotes.length, function (b) {
+          b.appendChild(el('div', 'note', '別の担当者がワーカーの作業を点検し、直しきれなかった点です。次にこのカードを作業するとき、ワーカーにも渡ります。'));
+          verifyNotes.slice().reverse().forEach(function (c) {
+            var d = el('div', 'cmt agent');
+            d.appendChild(el('div', 'who', '自己検証 · ' + hhmm(c.created_at)));
+            d.appendChild(mdRender(c.body));
+            b.appendChild(d);
+          });
+        }));
+      }
 
       if (ev) {
         pad.appendChild(foldable('event', '元の通知', null, function (b) {
@@ -2395,7 +2439,8 @@
     box.appendChild(rows([
       ['許可 / 拒否', 'その1回だけの判断。拒否した場合ワーカーには理由が伝わり、別の手を考える'],
       ['このカードでは以後許可', 'そのカードに限り、同じ種類のツールを確認なしにする'],
-      ['今後すべて許可', 'すべてのカードで、その種類のツールを確認なしにする'],
+      ['今後すべて許可', 'すべてのカードで、その種類の操作を確認なしにする。HTTP は「ホスト × 読み取り / 追加 / 上書き・削除」の組で束ね、GET の許可で PUT は通らない'],
+      ['上書き・削除', '書く前にいまの状態と突き合わせ、差分を承認画面に出す。突き合わせられないものはまとめて許可できない。大きく消えるものは許可や自動承認があっても止まる'],
       ['許可済み', 'ヘッダ下に一覧が出る。× で取り消せる'],
       ['自動承認 ON', 'いわゆる YOLO。すべて確認なし。通知本文に混ぜられた指示も素通りする'],
       ['注意', '承認画面は実行内容を省略せず表示する。コマンドや URL は必ず読むこと']
@@ -2406,7 +2451,7 @@
       ['何をするか', '作成後に別の会話で成果物を点検する。途中終了・空欄・依頼との食い違いを見る'],
       ['要修正なら', '指摘をワーカーに戻して直させ、再度検証する'],
       ['送信済みなら', '直しには回さない。送ったものは取り消せず、二通目が出かねないため。指摘はコメントに残る'],
-      ['残った指摘', 'カードのコメントに残り、報告にも「要確認」と出る']
+      ['残った指摘', 'カード詳細の「自己検証の指摘」に畳んで残る。報告には書かない (報告は利用者宛ての文章)。次にそのカードを作業するときワーカーに渡る']
     ]));
     helpEl.appendChild(box);
     helpEl.hidden = false;

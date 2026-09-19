@@ -163,6 +163,16 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'user_record') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN user_record TEXT')
     }
+    # やりとりの種類。author だけでは足りなくなった。
+    #   (author=user)         … 利用者の指示
+    #   report                … ワーカーの報告。1回の作業ごとに1件残す
+    #   verify / (旧データ NULL) … 自己検証で解消しなかった指摘
+    # 報告は agent_output に上書きしていたので、差し戻して作業させるたびに
+    # 前回の報告が読めなくなっていた。やりとりに積めば経緯として読み返せる。
+    $ccols = @($Conn.Query('PRAGMA table_info(task_comments)')) | ForEach-Object { $_['name'] }
+    if ($ccols -notcontains 'kind') {
+        $Conn.Exec('ALTER TABLE task_comments ADD COLUMN kind TEXT')
+    }
     # 正規 API で本文を取り直したかの印 (Phase 5)
     $ecols = @($Conn.Query('PRAGMA table_info(events)')) | ForEach-Object { $_['name'] }
     if ($ecols -notcontains 'context_fetched') {
@@ -276,6 +286,28 @@ CREATE TABLE IF NOT EXISTS task_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_task ON task_attempts(task_id, id);
 '@)
+
+    # 書き込みの監査。以前は応答の先頭1行しか残しておらず、#295 で実際に何を
+    # PUT したのかは後から分からなかった (ログは再起動で上書きされていた)。
+    #   request … 書き込み (POST/PUT/PATCH/DELETE) の本文。符号化する前の平文で残す
+    #   preview … 書く前に突き合わせた結果と、書いたあとの読み直し
+    $acols = @($Conn.Query('PRAGMA table_info(task_attempts)')) | ForEach-Object { $_['name'] }
+    if ($acols -notcontains 'request') { $Conn.Exec('ALTER TABLE task_attempts ADD COLUMN request TEXT') }
+    if ($acols -notcontains 'preview') { $Conn.Exec('ALTER TABLE task_attempts ADD COLUMN preview TEXT') }
+
+    # 「まとめて許可」の単位。http_request はツール名ではなく「種類 × ホスト」で持つ
+    # (http_request:add:api.github.com)。承認要求には、許可したときに何が束ねられるかと、
+    # そもそも束ねてよい操作かを持たせる。影響を事前に確かめられない上書きは束ねない。
+    $rcols = @($Conn.Query('PRAGMA table_info(tool_requests)')) | ForEach-Object { $_['name'] }
+    if ($rcols -notcontains 'grant_key') { $Conn.Exec('ALTER TABLE tool_requests ADD COLUMN grant_key TEXT') }
+    if ($rcols -notcontains 'grantable') {
+        $Conn.Exec('ALTER TABLE tool_requests ADD COLUMN grantable INTEGER NOT NULL DEFAULT 1')
+    }
+    # 以前の「http_request を今後すべて許可」は、GET を通すつもりで押されたものでも
+    # PUT・DELETE まで無承認にしていた (#295)。読み取りだけの許可に置き換える。
+    # 書き込みを通したければ、次に承認画面が出たときに種類とホストを見て許可し直せばよい。
+    [void] $Conn.NonQuery("UPDATE OR IGNORE tool_grants SET tool = 'http_request:read:*' WHERE tool = 'http_request'")
+    [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE tool = 'http_request'")
 
     # ワーカーとモデルの会話そのもの。カード1枚につき1本。
     #
@@ -677,11 +709,17 @@ function Add-TaskAttempt {
         [Parameter(Mandatory)] [string] $Tool,
         [string] $Target,
         [Parameter(Mandatory)] [string] $Outcome,   # 'ok' / 'failed' / 'denied'
-        [string] $Detail
+        [string] $Detail,
+        # 書き込みの本文 (全文)。読み取りでは渡さない。
+        [string] $Request,
+        # 書く前の突き合わせと、書いたあとの読み直し
+        [string] $Preview
     )
+    $rq = if ($Request) { $Request } else { $null }
+    $pv = if ($Preview) { $Preview } else { $null }
     [void] $Conn.NonQuery(
-        'INSERT INTO task_attempts (task_id, tool, target, outcome, detail, created_at) VALUES (?,?,?,?,?,?)',
-        [object[]] @($TaskId, $Tool, $Target, $Outcome, $Detail, (Get-Now)))
+        'INSERT INTO task_attempts (task_id, tool, target, outcome, detail, created_at, request, preview) VALUES (?,?,?,?,?,?,?,?)',
+        [object[]] @($TaskId, $Tool, $Target, $Outcome, $Detail, (Get-Now), $rq, $pv))
 }
 
 function Get-TaskAttempts {
@@ -701,9 +739,18 @@ function Get-AttemptSummary {
         $mark = switch ([string] $r['outcome']) {
             'ok'     { '○' }
             'denied' { '×(不許可)' }
+            'held'   { '△(実行せず差し戻し)' }
             default  { '×' }
         }
-        ("{0} {1} {2} {3}" -f $mark, [string] $r['tool'], [string] $r['target'], [string] $r['detail']).Trim()
+        $line = ("{0} {1} {2} {3}" -f $mark, [string] $r['tool'], [string] $r['target'], [string] $r['detail']).Trim()
+        # 書き込みは「何が起きたか」まで残す。再開・引き継ぎのときに、
+        # 自分が何を書き込んだのかをこれで知る。
+        if ($r['preview']) {
+            $pv = ([string] $r['preview']) -replace "`r?`n", ' / '
+            if ($pv.Length -gt 300) { $pv = $pv.Substring(0, 300) + '…' }
+            $line += "`n    → " + $pv
+        }
+        $line
     }
     return ($lines -join "`n")
 }
@@ -881,11 +928,14 @@ function Add-TaskComment {
         [Parameter(Mandatory)] $Conn,
         [Parameter(Mandatory)] [int] $TaskId,
         [Parameter(Mandatory)] [string] $Author,
-        [Parameter(Mandatory)] [string] $Body
+        [Parameter(Mandatory)] [string] $Body,
+        # ワーカーの発言の種類 ('report' / 'verify')。利用者の指示には付けない。
+        [string] $Kind
     )
+    $k = if ($Kind) { $Kind } else { $null }
     [void] $Conn.NonQuery(
-        'INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?,?,?,?)',
-        [object[]] @($TaskId, $Author, $Body, (Get-Now)))
+        'INSERT INTO task_comments (task_id, author, body, created_at, kind) VALUES (?,?,?,?,?)',
+        [object[]] @($TaskId, $Author, $Body, (Get-Now), $k))
     return $Conn.LastRowId
 }
 
@@ -953,12 +1003,23 @@ function Test-YoloMode {
 }
 
 function Test-ToolGranted {
+    <#
+      .PARAMETER Tool
+        許可の鍵。http_request は「種類 × ホスト」(http_request:add:api.github.com)、
+        ほかはツール名。ホストが * の許可 (以前の許可を置き換えたもの) は
+        同じ種類のどのホストにも効く。
+    #>
     param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [Parameter(Mandatory)] [string] $Tool)
-    $r = @($Conn.Query(
-        "SELECT 1 AS x FROM tool_grants
-          WHERE tool = ? AND (scope = 'global' OR (scope = 'task' AND scope_id = ?)) LIMIT 1",
-        [object[]] @($Tool, $TaskId)))
-    return ($r.Count -gt 0)
+    $keys = @($Tool)
+    if ($Tool -match '^(http_request:\w+):') { $keys += ($Matches[1] + ':*') }
+    foreach ($k in $keys) {
+        $r = @($Conn.Query(
+            "SELECT 1 AS x FROM tool_grants
+              WHERE tool = ? AND (scope = 'global' OR (scope = 'task' AND scope_id = ?)) LIMIT 1",
+            [object[]] @($k, $TaskId)))
+        if ($r.Count -gt 0) { return $true }
+    }
+    return $false
 }
 
 function Add-ToolGrant {
@@ -989,11 +1050,16 @@ function New-ToolRequest {
         [Parameter(Mandatory)] [int] $TaskId,
         [Parameter(Mandatory)] [string] $Tool,
         [Parameter(Mandatory)] [string] $Summary,
-        [Parameter(Mandatory)] [string] $Detail
+        [Parameter(Mandatory)] [string] $Detail,
+        # 「まとめて許可」を押したときに記録する鍵。省略時はツール名。
+        [string] $GrantKey,
+        # $false なら、この要求には「まとめて許可」を出さない (1回ごとに判断させる)。
+        [bool] $Grantable = $true
     )
+    $gk = if ($GrantKey) { $GrantKey } else { $Tool }
     [void] $Conn.NonQuery(
-        'INSERT INTO tool_requests (task_id, tool, summary, detail, status, created_at) VALUES (?,?,?,?,?,?)',
-        [object[]] @($TaskId, $Tool, $Summary, $Detail, 'pending', (Get-Now)))
+        'INSERT INTO tool_requests (task_id, tool, summary, detail, status, created_at, grant_key, grantable) VALUES (?,?,?,?,?,?,?,?)',
+        [object[]] @($TaskId, $Tool, $Summary, $Detail, 'pending', (Get-Now), $gk, [int] $Grantable))
     return $Conn.LastRowId
 }
 

@@ -467,3 +467,50 @@ Describe '続きから / 記録から引き継ぐ / 新しく の決め方' {
 
     Close-TestStore $conn
 }
+
+Describe '報告はやりとりに積む。自己検証の指摘とは分ける' {
+
+    if (-not (Test-SqliteAvailable)) { Skip-It '報告' 'winsqlite3 が使えません'; return }
+    $conn = New-TestStore
+    $id = [int] (New-Task -Conn $conn -Title 'r' -Column 'todo')
+
+    It 'やりとりに種類を付けて残せる' {
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'report' -Body '1回目の報告')
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'user' -Body '直して')
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'report' -Body '2回目の報告')
+        $c = @((Get-TaskDetail -Conn $conn -TaskId $id).comments)
+        Assert-Equal 3 $c.Count
+        Assert-Equal 'report' $c[0]['kind']
+        Assert-Null $c[1]['kind']
+    }
+
+    It '前回の報告は上書きされずに残る (差し戻しても読み返せる)' {
+        $bodies = @((Get-TaskDetail -Conn $conn -TaskId $id).comments | ForEach-Object { [string] $_['body'] })
+        Assert-True ($bodies -contains '1回目の報告')
+        Assert-True ($bodies -contains '2回目の報告')
+    }
+
+    It '報告は「残った指摘」として次の作業に渡さない' {
+        Assert-Equal '' (Get-OpenIssuesText -Conn $conn -TaskId $id)
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'verify' -Body '検証で残った指摘: X')
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'report' -Body '3回目の報告')
+        Assert-Equal '検証で残った指摘: X' (Get-OpenIssuesText -Conn $conn -TaskId $id)
+    }
+
+    It 'ワーカーへの指示として読むのは利用者の発言だけ' {
+        $u = @(Get-UnconsumedComments -Conn $conn -TaskId $id)
+        Assert-Equal 1 $u.Count
+        Assert-Equal '直して' $u[0]['body']
+    }
+
+    Close-TestStore $conn
+}
+
+Describe '報告の宛先' {
+
+    It 'システムプロンプトで、報告は利用者宛てで点検役への返事にしないと伝える' {
+        $p = Get-WorkSystemPrompt $null
+        Assert-Match '最後の文章は利用者への報告です' $p
+        Assert-Match 'ご指摘の点を修正しました' $p
+    }
+}

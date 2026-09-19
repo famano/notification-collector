@@ -31,6 +31,7 @@
 
 . "$PSScriptRoot\SourceAccess.ps1"
 . "$PSScriptRoot\HttpAction.ps1"
+. "$PSScriptRoot\WritePreview.ps1"
 
 $script:SafeExtensions  = @('.txt', '.md', '.eml', '.csv', '.json', '.html', '.log', '.yml', '.yaml')
 $script:MaxContentBytes = 1048576   # 1MB
@@ -171,9 +172,20 @@ Claude 自身の API (api.anthropic.com) も叩ける。版のヘッダ (anthrop
 組織全体の口 (/v1/organizations/... 利用状況など) もそのまま書けばよい ――
 どの組織かはワーカーが付ける鍵が決めるので、URL に組織 ID は要らない。
 
-GET 以外は必ず利用者の承認を求める。承認画面には実際に飛ぶリクエストが全文出る。
+書き込み (POST/PUT/PATCH/DELETE) は、利用者が許可していなければ承認画面で止まる。
 人に届くメッセージの送信 (Slack への投稿、メールの送信) はこのツールでは行えない。
 宛先がカードから束縛される専用ツールを使うこと。
+
+PUT / PATCH / DELETE (上書き・削除) の前には、ワーカーが同じ URL を読んで、
+送る本文といまの状態をフィールドごとに突き合わせる。大きく減る (半分以下になる) ときは
+実行せずに差分を返すので、意図どおりなら confirm_large_change を true にして呼び直す
+(その場合も利用者の承認が要る)。書いたあとは読み直して、送った値と一致したかを返す。
+PUT は多くの API で「全体の置き換え」で、送らなかった部分は消える。
+一部だけ直したいときは、いまの全体を読んでから、直した全体を送ること。
+
+base64 を手で書かないこと。ファイルの中身など base64 で送る値は、本文には平文で書き、
+encode で符号化するフィールドを指定する (例: {"content": "base64"})。
+手で書いた長い base64 は送らずに差し戻す (1文字の誤りで中身が壊れ、長さの分だけ出力も食う)。
 '@
         input_schema = @{
             type       = 'object'
@@ -182,6 +194,15 @@ GET 以外は必ず利用者の承認を求める。承認画面には実際に�
                 url     = @{ type = 'string' }
                 headers = @{ type = 'object'; description = '追加ヘッダ。認証は不要 (自動で付く)。Accept など。' }
                 body    = @{ type = 'string'; description = 'リクエストボディ。JSON なら文字列化して渡す。' }
+                encode  = @{
+                    type = 'object'
+                    description = '本文 (JSON) のうち、ワーカーが符号化するトップレベルのフィールド。値は "base64" か "base64url"。本文にはそのフィールドを平文で書く。'
+                    additionalProperties = @{ type = 'string'; enum = @('base64', 'base64url') }
+                }
+                confirm_large_change = @{
+                    type = 'boolean'
+                    description = '上書きで中身が大きく減ると差し戻されたあと、それが意図どおりのときだけ true にする。'
+                }
                 purpose = @{ type = 'string'; description = '何のために叩くのかの一文。承認画面に出る。' }
             }
             required = @('url', 'purpose')
@@ -577,7 +598,9 @@ function Get-ToolRisk {
         # 誰の名義で出るか。モデルの入力ではなく、繋いだアカウントから決まる。
         # 承認画面は「本人の発言として読まれるもの」を見せる場所なので、
         # 差出人もそこに出す (名義を取り違えたまま通るのを、人の目でも止められる)。
-        [string] $SelfName
+        [string] $SelfName,
+        # 上書き・削除の前の突き合わせ (Get-WritePreview)。http_request の承認画面に出す。
+        $Preview
     )
 
     # 「差出人: あなた (me@example.com)」の一行。名前が取れていなければ「あなた」だけ。
@@ -681,8 +704,15 @@ function Get-ToolRisk {
                 return [pscustomobject]@{ risky = $false; summary = ''; detail = '' }
             }
 
+            # 書き込みの本文は切らない。取り消せない操作の、唯一の事前確認になる。
+            # 符号化するフィールド (encode) は平文のまま見せる ―― base64 のままでは
+            # 人が読んで「中身が 1/400 になる」ことに気付けない (#295)。
             $body = [string] $ToolInput.body
-            if ($body.Length -gt 2000) { $body = $body.Substring(0, 2000) + "`n…(以下省略)" }
+            if (-not $isWrite -and $body.Length -gt 2000) { $body = $body.Substring(0, 2000) + "`n…(以下省略)" }
+            $encoded = @()
+            if ($ToolInput.encode) {
+                $encoded = if ($ToolInput.encode -is [hashtable]) { @($ToolInput.encode.Keys) } else { @($ToolInput.encode.PSObject.Properties.Name) }
+            }
             $warn = if ($isWrite) {
                 "`n`n※これは相手側の状態を変える操作です。取り消せない場合があります。"
             } else {
@@ -692,13 +722,33 @@ function Get-ToolRisk {
                       "メソッド: $method`n" +
                       "URL: $url`n" +
                       "認証: $credLabel (ワーカーが付与。モデルはトークンを保持していません)"
-            if ($body) { $detail += "`n`n--- 本文 ---`n$body" }
+            if ($Preview) {
+                $detail += "`n`n--- 書く前の突き合わせ ---`n" + (@($Preview.lines) -join "`n")
+            }
+            if ($body) {
+                $head = if ($encoded.Count -gt 0) { "--- 本文 (" + ($encoded -join ', ') + " は送る前に符号化します。ここでは平文) ---" } else { '--- 本文 ---' }
+                $detail += "`n`n$head`n$body"
+            }
             $detail += $warn
 
+            # 許可で通してよいか。
+            #   上書き・削除で、影響を事前に確かめられなかったもの → 束ねない (毎回判断してもらう)
+            #   大きく減るもの → 許可があっても、自動承認でも止める
+            $kind = Get-HttpOpKind $method
+            $grantable = $true
+            $mustAsk = $false
+            if ($kind -eq 'change') {
+                if (-not $Preview -or @('compared', 'new') -notcontains [string] $Preview.level) { $grantable = $false }
+                if ($Preview -and $Preview.largeLoss) { $grantable = $false; $mustAsk = $true }
+            }
+
             return [pscustomobject]@{
-                risky   = $true
-                summary = ("{0} {1}" -f $method, $url)
-                detail  = $detail
+                risky     = $true
+                summary   = ("{0} {1}" -f $method, $url)
+                detail    = $detail
+                grantKey  = (Get-GrantKey -Name 'http_request' -ToolInput $ToolInput)
+                grantable = $grantable
+                mustAsk   = $mustAsk
             }
         }
         'require_human_step' {
@@ -1007,8 +1057,11 @@ function Invoke-WorkTool {
 
             'http_request' {
                 $method = if ($ToolInput.method) { [string] $ToolInput.method } else { 'GET' }
+                # base64 で送る値は、ワーカーがここで符号化する (モデルには平文で書かせる)。
+                $enc = ConvertTo-EncodedBody -Body ([string] $ToolInput.body) -Encode $ToolInput.encode
+                if ($enc.error) { return [pscustomobject]@{ text = $enc.error; artifact = $null; isError = $true } }
                 $r = Invoke-HttpAction -Method $method -Url ([string] $ToolInput.url) `
-                        -Headers $ToolInput.headers -Body ([string] $ToolInput.body)
+                        -Headers $ToolInput.headers -Body $enc.body
                 return [pscustomobject]@{ text = $r.text; artifact = $null; isError = $r.isError }
             }
 

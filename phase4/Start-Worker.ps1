@@ -102,16 +102,25 @@ function Write-Step {
 function Wait-ToolApproval {
     param([int] $TaskId, [string] $Tool, $Risk)
 
-    if (Test-YoloMode -Conn $conn) {
+    # 許可の鍵。http_request は「種類 × ホスト」で、ツール名では束ねない。
+    # 以前はツール名で束ねていたので、GET のために押した「今後すべて許可」が
+    # GitHub への PUT まで無承認にしていた (#295)。
+    $key = if ($Risk.grantKey) { [string] $Risk.grantKey } else { $Tool }
+    $grantable = if ($null -ne $Risk.grantable) { [bool] $Risk.grantable } else { $true }
+    # 大きく減る上書き・削除は、許可があっても自動承認でも止める。
+    $mustAsk = [bool] $Risk.mustAsk
+
+    if (-not $mustAsk -and (Test-YoloMode -Conn $conn)) {
         Write-Step $TaskId 'tool' ("YOLOのため承認なしで実行: " + $Risk.summary) 'DarkYellow'
         return 'approved'
     }
-    if (Test-ToolGranted -Conn $conn -TaskId $TaskId -Tool $Tool) {
+    if (-not $mustAsk -and $grantable -and (Test-ToolGranted -Conn $conn -TaskId $TaskId -Tool $key)) {
         Write-Step $TaskId 'tool' ("許可済みのため実行: " + $Risk.summary) 'DarkCyan'
         return 'approved'
     }
 
-    $reqId = New-ToolRequest -Conn $conn -TaskId $TaskId -Tool $Tool -Summary $Risk.summary -Detail $Risk.detail
+    $reqId = New-ToolRequest -Conn $conn -TaskId $TaskId -Tool $Tool -Summary $Risk.summary -Detail $Risk.detail `
+                -GrantKey $key -Grantable $grantable
     Write-Step $TaskId 'approve' ("承認待ち: " + $Risk.summary) 'Yellow'
     Set-WorkerState -Conn $conn -State 'waiting' -CurrentTaskId $TaskId -Message ('承認待ち: ' + $Risk.summary)
 
@@ -586,13 +595,59 @@ function Invoke-WorkItem {
             }
         }
 
+        # --- 書き込みの前に「何が起きるか」を確かめる (http_request) ---
+        # 送る本文 (符号化後) を作り、上書き・削除ならいまの状態と突き合わせる。
+        # 大きく減るなら実行せずに差分をモデルに返す。モデル自身が取り違えに気付ける
+        # 最後の機会で、#295 の PUT (10,361 → 24 バイト) はここで止まる。
+        $preview = $null
+        $httpTarget = ''
+        $httpKind = ''
+        if ($toolName -eq 'http_request') {
+            $hm = if ($toolInput.method) { ([string] $toolInput.method).ToUpper() } else { 'GET' }
+            $httpTarget = "$hm $($toolInput.url)"
+            $httpKind = Get-HttpOpKind $hm
+            $enc = ConvertTo-EncodedBody -Body ([string] $toolInput.body) -Encode $toolInput.encode
+            if ($enc.error) { return [pscustomobject]@{ text = $enc.error; artifact = $null; isError = $true } }
+            $encNames = @()
+            if ($toolInput.encode) { $encNames = @($toolInput.encode.PSObject.Properties.Name) }
+            $hand = Find-HandWrittenBase64 -Body $enc.body -Except $encNames
+            if ($hand) {
+                Write-Step $id 'step' ("手で書いた base64 ($hand) を差し戻しました") 'Yellow'
+                return [pscustomobject]@{
+                    text = ("本文のフィールド '{0}' に長い base64 が手で書かれていたため、送っていません。" -f $hand) +
+                           '1文字の誤りで中身が壊れます。そのフィールドは平文で書き、' +
+                           ('encode に {{"{0}": "base64"}} を指定してください。ワーカーが符号化します。' -f $hand)
+                    artifact = $null; isError = $true
+                }
+            }
+            if ($httpKind -eq 'change') {
+                $current = Get-CurrentState -Url ([string] $toolInput.url)
+                $preview = Get-WritePreview -Method $hm -Body $enc.body -Current $current
+                Write-Step $id 'step' ('書く前の突き合わせ: ' + $preview.summary) $(if ($preview.largeLoss) { 'Yellow' } else { 'DarkCyan' })
+                if ($preview.largeLoss -and -not $toolInput.confirm_large_change) {
+                    Add-TaskAttempt -Conn $conn -TaskId $id -Tool $toolName -Target $httpTarget -Outcome 'held' `
+                        -Detail '大きく減るため実行せずに差し戻しました' -Request ([string] $toolInput.body) `
+                        -Preview (@($preview.lines) -join "`n")
+                    return [pscustomobject]@{
+                        text = "実行していません。送る前にいまの状態と突き合わせたところ、次のようになります:`n" +
+                               (@($preview.lines) -join "`n") + "`n`n" +
+                               '一部だけ直すつもりだったなら、いまの全体を読んで、直した全体を送ってください ' +
+                               '(PUT は全体の置き換えで、送らなかった部分は消えます)。' +
+                               '本当にこのとおり減らす・消すのが意図なら、confirm_large_change を true にして呼び直してください。' +
+                               'その場合も利用者の承認が要ります。'
+                        artifact = $null; isError = $true
+                    }
+                }
+            }
+        }
+
         # 危険なツールは承認を取ってから実行する。
         # 拒否は例外にせずモデルに返す。理由が伝われば別の手を考えられる。
         $risk = Get-ToolRisk -Name $toolName -ToolInput $toolInput -Workspace $workspace `
                     -SlackChannelName $slackChannelName -GmailThreadLabel $gmailThreadLabel `
                     -TeamsChatName $teamsChatName -OutlookThreadLabel $outlookThreadLabel `
                     -ChatworkRoomName $chatworkRoomName -BacklogIssueKey $backlogIssueKey `
-                    -SelfName $selfName
+                    -SelfName $selfName -Preview $preview
         if ($risk.risky) {
             $decision = Wait-ToolApproval -TaskId $id -Tool $toolName -Risk $risk
             if ($decision -ne 'approved') {
@@ -623,8 +678,20 @@ function Invoke-WorkItem {
                 -ChatworkAccountId $chatworkAccountId -BacklogIssueKey $backlogIssueKey `
                 -SourceEvent $evt -SourceAttachments $sourceAttachments -DossierText $dossierText
 
+        # 上書きしたら読み直して、送った値と一致しているかを返す。
+        # 書いたつもりのものと実際に入ったものの食い違いに、その場で気付けるようにする。
+        $readback = ''
+        if ($toolName -eq 'http_request' -and $httpKind -eq 'change' -and -not $r.isError -and
+            @('PUT', 'PATCH') -contains ($httpTarget -split ' ')[0]) {
+            $after = Get-CurrentState -Url ([string] $toolInput.url)
+            $sent = (ConvertTo-EncodedBody -Body ([string] $toolInput.body) -Encode $toolInput.encode).body
+            $readback = Get-ReadbackCheck -Body $sent -After $after
+            if ($readback) { $r.text = [string] $r.text + "`n`n" + $readback }
+        }
+
         # 「実際に何を叩いて何が返ったか」を残す。require_human_step の妥当性は
         # 報告の書きぶりではなくこれで判定する。
+        # 書き込みは本文と突き合わせの結果まで全文残す (あとから何を書いたかが分かるように)。
         if (@('http_request', 'open_source', 'fetch_attachment', 'run_command') -contains $toolName) {
             $target = if ($toolInput.url) {
                 $m = if ($toolInput.method) { ([string] $toolInput.method).ToUpper() } else { 'GET' }
@@ -632,8 +699,18 @@ function Invoke-WorkItem {
             } else { '' }
             $head = ($r.text -split "`n")[0]
             if ($head.Length -gt 200) { $head = $head.Substring(0, 200) }
+            $req = ''
+            $pv = ''
+            if ($toolName -eq 'http_request' -and $httpKind -ne 'read') {
+                $req = [string] $toolInput.body
+                $pvParts = @()
+                if ($preview) { $pvParts += @($preview.lines) }
+                if ($readback) { $pvParts += $readback }
+                $pv = $pvParts -join "`n"
+            }
+            if ($toolName -eq 'run_command') { $req = [string] $toolInput.command }
             Add-TaskAttempt -Conn $conn -TaskId $id -Tool $toolName -Target $target `
-                -Outcome $(if ($r.isError) { 'failed' } else { 'ok' }) -Detail $head
+                -Outcome $(if ($r.isError) { 'failed' } else { 'ok' }) -Detail $head -Request $req -Preview $pv
         }
 
         if ($r.artifact) {
@@ -776,20 +853,23 @@ function Invoke-WorkItem {
         $summary += "`n`n送信済み ({0} 件):`n" -f $sentItems.Count
         foreach ($x in $sentItems) { $summary += ('- ' + (($x -split "`n")[0]) + "`n") }
     }
-    if ($verdict) {
-        $mark = if ($verdict.verdict -eq 'ok' -and $verdict.completed) { '問題なし' } else { '要確認' }
-        $summary += "`n`n[自己検証: $mark] " + $verdict.summary
-    }
+    # 自己検証の結果は報告に書かない。以前は末尾に「[自己検証: 問題なし] …」を
+    # 付けていたが、利用者が読んでも判断が変わらない (問題なしなら読み飛ばし、
+    # 要確認なら指摘そのものが要る)。結果は作業ログに、残った指摘は下で別に残す。
     [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ agent_output = $summary })
+    # 報告はやりとりにも積む。agent_output は最新の1件で上書きされるので、
+    # 差し戻して作業させるたびに前回の報告が読めなくなっていた。
+    [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'report' -Body $summary)
     Set-CommentsConsumed -Conn $conn -TaskId $id -UpToId $commentWatermark
 
-    # 解消しなかった指摘はコメントに残す。レビューする人がまずここを見る。
+    # 解消しなかった指摘は残す。次に作業するとき (再開・引き継ぎ) にワーカーへ渡し、
+    # 画面では報告とは別の折りたたみに出す。
     if ($verdict -and @($verdict.issues | Where-Object { $_.severity -eq 'high' }).Count -gt 0) {
         $body = "検証で残った指摘:`n"
         foreach ($i in @($verdict.issues | Where-Object { $_.severity -eq 'high' })) {
             $body += "- $($i.where): $($i.problem)`n  → $($i.fix)`n"
         }
-        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Body $body)
+        [void] (Add-TaskComment -Conn $conn -TaskId $id -Author 'agent' -Kind 'verify' -Body $body)
     }
 
     [void] $conn.NonQuery('UPDATE tasks SET agent_lease_until = NULL WHERE id = ?', [object[]] @($id))

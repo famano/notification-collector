@@ -59,3 +59,41 @@ function Get-LogTail {
     # 配列そのものが1個の要素として渡り、行数が数えられなくなる。
     return $lines
 }
+
+function Save-PreviousLog {
+    <#
+      .SYNOPSIS
+        起動し直す前のログを logs\old\ に移して残す。古いものから消し、Keep 本まで持つ。
+      .DESCRIPTION
+        子プロセスのログは起動のたびに同じ名前へリダイレクトしているので、
+        再起動した時点で前回の中身が消えていた。#295 を調べたとき、事故の当時の
+        ワーカーのログは残っておらず、何を PUT したのかは DB の断片からしか辿れなかった。
+        失敗しても起動は止めない (ログを残せないことより、起動しないほうが困る)。
+      .OUTPUTS
+        移した先のパス。移すものが無ければ $null。
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [int] $Keep = 10
+    )
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $null }
+        if ((Get-Item -LiteralPath $Path).Length -eq 0) { return $null }
+        $dir = Join-Path (Split-Path -Parent $Path) 'old'
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $name = [IO.Path]::GetFileNameWithoutExtension($Path)
+        $ext = [IO.Path]::GetExtension($Path)
+        $stamp = (Get-Item -LiteralPath $Path).LastWriteTime.ToString('yyyyMMdd-HHmmss')
+        $dest = Join-Path $dir ('{0}-{1}{2}' -f $name, $stamp, $ext)
+        $n = 1
+        while (Test-Path -LiteralPath $dest) { $dest = Join-Path $dir ('{0}-{1}-{2}{3}' -f $name, $stamp, $n, $ext); $n++ }
+        Move-Item -LiteralPath $Path -Destination $dest -Force
+        # 同じ名前のログだけを数える (worker.log と worker.err.log は別々に Keep 本)。
+        $pattern = '^' + [regex]::Escape($name) + '-\d{8}-\d{6}(-\d+)?' + [regex]::Escape($ext) + '$'
+        $old = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match $pattern } |
+                 Sort-Object LastWriteTime -Descending)
+        if ($old.Count -gt $Keep) { $old | Select-Object -Skip $Keep | Remove-Item -Force -ErrorAction SilentlyContinue }
+        return $dest
+    }
+    catch { return $null }
+}

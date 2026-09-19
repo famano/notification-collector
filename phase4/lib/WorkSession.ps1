@@ -25,7 +25,9 @@ function Get-TextHash {
 function Get-OpenIssuesText {
     param([Parameter(Mandatory)] $Conn, [int] $TaskId, [string] $Since)
     $rows = @($Conn.Query(
-        "SELECT body, created_at FROM task_comments WHERE task_id = ? AND author = 'agent' ORDER BY id DESC LIMIT 1",
+        "SELECT body, created_at FROM task_comments
+          WHERE task_id = ? AND author = 'agent' AND (kind IS NULL OR kind = 'verify')
+          ORDER BY id DESC LIMIT 1",
         [object[]] @($TaskId)))
     if ($rows.Count -eq 0) { return '' }
     if ($Since -and [string]::CompareOrdinal([string] $rows[0]['created_at'], $Since) -lt 0) { return '' }
