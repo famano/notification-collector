@@ -336,6 +336,18 @@ CREATE TABLE IF NOT EXISTS task_sessions (
   updated_at  TEXT NOT NULL
 );
 '@)
+    # 表が先に別の形で作られていると、CREATE TABLE IF NOT EXISTS は何もしない。
+    # 開発の途中の版 (state が無く model がある) で作られた DB が実際にあり、
+    # 全カードの作業が「table task_sessions has no column named state」で落ちた。
+    # 足りない列は、ほかの表と同じく見て足す。
+    $scols = @($Conn.Query('PRAGMA table_info(task_sessions)')) | ForEach-Object { $_['name'] }
+    if ($scols -notcontains 'source_hash') { $Conn.Exec('ALTER TABLE task_sessions ADD COLUMN source_hash TEXT') }
+    if ($scols -notcontains 'occurrence') {
+        $Conn.Exec('ALTER TABLE task_sessions ADD COLUMN occurrence INTEGER NOT NULL DEFAULT 1')
+    }
+    if ($scols -notcontains 'state') {
+        $Conn.Exec("ALTER TABLE task_sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'running'")
+    }
 }
 
 function Get-Now { return (Get-Date).ToString('o') }

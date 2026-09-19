@@ -514,3 +514,36 @@ Describe '報告の宛先' {
         Assert-Match 'ご指摘の点を修正しました' $p
     }
 }
+
+Describe '古い形で作られた会話の表' {
+
+    if (-not (Test-SqliteAvailable)) { Skip-It '古い表' 'winsqlite3 が使えません'; return }
+
+    It 'state 列の無い表でも、開き直せば足りない列が足されて保存できる' {
+        # 開発の途中の版が作った形。これで全カードの作業が落ちた。
+        $dir = New-TestTempDir
+        $db = Join-Path $dir 'tasks.db'
+        $c = Open-TaskStore -Path $db
+        $c.Exec('DROP TABLE task_sessions')
+        $c.Exec(@'
+CREATE TABLE task_sessions (
+  task_id     INTEGER PRIMARY KEY,
+  messages    TEXT NOT NULL,
+  occurrence  INTEGER NOT NULL DEFAULT 1,
+  source_hash TEXT,
+  model       TEXT,
+  updated_at  TEXT NOT NULL
+);
+'@)
+        $id = [int] (New-Task -Conn $c -Title 'x' -Column 'todo')
+        $c.Dispose()
+
+        $c = Open-TaskStore -Path $db
+        try {
+            Save-TaskSession -Conn $c -TaskId $id -MessagesJson '{"messages":[]}' -State 'running'
+            Set-TaskSessionState -Conn $c -TaskId $id -State 'done'
+            Assert-Equal 'done' (Get-TaskSession -Conn $c -TaskId $id)['state']
+        }
+        finally { $c.Dispose() }
+    }
+}
