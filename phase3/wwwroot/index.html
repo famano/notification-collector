@@ -174,6 +174,13 @@
   }
   #drawer .humanstep .hs-go:hover { filter: brightness(1.08); }
   #drawer .humanstep .hs-sub { font-size: 12px; color: var(--muted); margin-top: 9px; word-break: break-word; }
+  /* 外に出したあとで問題が見つかった印。本人の1手 (橙) と区別して赤で出す */
+  .card .humanstep.alert, #drawer .humanstep.alert {
+    background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  }
+  #drawer .humanstep.alert { border-left-color: var(--danger); }
+  .card .humanstep.alert .hs-l, #drawer .humanstep.alert .hs-l { color: var(--danger); }
   #drawer .humanstep .hs-link {
     display: block; margin-top: 9px; padding: 0; border: none; background: none;
     font: inherit; font-size: 12px; font-weight: 600; color: var(--accent);
@@ -279,6 +286,7 @@
   /* 送信は取り消せない。作業ログを流し読みしても目に留まるようにする */
   .act.sent .k { color: var(--high); font-weight: 700; }
   .act.sent { font-weight: 600; }
+  .act.alert .k, .act.alert { color: var(--danger); font-weight: 700; }
   .act.error .k, .act.cancelled .k { color: var(--danger); font-weight: 600; }
 
   .cmt { padding: 7px 0 7px 10px; border-left: 2px solid var(--line); margin-bottom: 8px; }
@@ -526,7 +534,7 @@
   var ACT_KIND = {
     start: '開始', step: '経過', llm: '検討', tool: '実行', file: '成果物', sent: '送信済み',
     approve: '承認待ち', deny: '不許可', verify: '検証', issue: '指摘', repair: '修正',
-    done: '完了', error: 'エラー', cancelled: '中止', user: '操作'
+    done: '完了', error: 'エラー', cancelled: '中止', user: '操作', alert: '要確認'
   };
   var WORKER_STATE = {
     working: '作業中', waiting: '承認待ち', idle: '待機中',
@@ -839,13 +847,23 @@
     card.appendChild(el('div', 't', t.title));
     if (t.summary) card.appendChild(el('div', 's', t.summary));
 
+    // 書き込み・送信のあとで点検が問題を見つけたカード。ほかのカードに紛れさせない。
+    // 利用者が開いて「確認した」を押すまで出し続ける。
+    if (t.alert) {
+      var ab = el('div', 'humanstep alert');
+      ab.appendChild(el('div', 'hs-l', '外に出したあとで問題が見つかりました'));
+      ab.appendChild(el('div', 'hs-s', '開いて内容を確かめてください'));
+      card.appendChild(ab);
+    }
+
     // 「あなたにしかできない1手」はカードの表で出す。開かないと分からないのでは
     // 意味がない ―― 期限のあるもの (本人確認リンクなど) を取り逃がす。
     if (t.human_step_obj && t.human_step_obj.step) {
       var hs = t.human_step_obj;
       var box = el('div', 'humanstep');
       box.appendChild(el('div', 'hs-l', hs.blocker === 'credential_missing'
-        ? '設定すれば自動で進みます' : 'あなたの操作が必要です'));
+        ? '設定すれば自動で進みます'
+        : hs.blocker === 'beyond_tools' ? '引き渡し: 手持ちの道具では正しくできません' : 'あなたの操作が必要です'));
       // カンバンで入力できるサービスなら、端末に戻る指示より先にそれを出す。
       box.appendChild(el('div', 'hs-s', t.setup_ready ? 'このカードを開くと、ここで設定できます' : hs.step));
       if (hs.deadline) box.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
@@ -1297,7 +1315,8 @@
         var isCred = hs.blocker === 'credential_missing';
         var hbox = el('div', 'humanstep');
         hbox.appendChild(el('div', 'hs-l',
-          isCred ? '設定すれば、以後は自動で進みます' : 'あなたの操作が必要です'));
+          isCred ? '設定すれば、以後は自動で進みます'
+            : hs.blocker === 'beyond_tools' ? '引き渡し: 手持ちの道具では正しくできないため、ここで止めました' : 'あなたの操作が必要です'));
         hbox.appendChild(el('div', 'hs-s', hs.step));
 
         if (hs.deadline) hbox.appendChild(el('div', 'hs-d', '期限: ' + hs.deadline));
@@ -1327,6 +1346,25 @@
           hbox.appendChild(el('div', 'hs-tried', 'ここに至るまでに試したこと: ' + hs.tried));
         }
         pad.appendChild(hbox);
+      }
+
+      // --- 外に出したあとで見つかった問題 ---
+      // 報告より上に置く。報告はワーカーの言い分で、ここは別の担当者の点検の結果。
+      // #295 では点検が「ファイルを1行にして壊した」と見つけていたのに、報告の下に
+      // 埋もれたまま普段どおりのカードとして置かれていた。
+      if (t.alert) {
+        var al = el('div', 'humanstep alert');
+        al.appendChild(el('div', 'hs-l', '外に出したあとで問題が見つかりました'));
+        al.appendChild(el('div', 'hs-s', t.alert));
+        var issues = comments.filter(function (c) { return c.author === 'agent' && c.kind !== 'report'; });
+        if (issues.length) al.appendChild(mdRender(issues[issues.length - 1].body));
+        al.appendChild(el('div', 'hs-sub', '書き込みや送信は取り消せません。相手の状態を確かめ、必要なら差し戻して直させてください。'));
+        var ackRow = el('div', 'row'); ackRow.style.marginTop = '8px';
+        ackRow.appendChild(actionButton('確認した', null, '…', function () {
+          return api('/api/tasks/' + t.id + '/ack', 'POST', {}).then(function () { return refresh(true); });
+        }));
+        al.appendChild(ackRow);
+        pad.appendChild(al);
       }
 
       // --- 主役1: ワーカーの報告 ---

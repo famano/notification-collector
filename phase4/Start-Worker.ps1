@@ -813,8 +813,18 @@ function Invoke-WorkItem {
 
         # 送信済みのカードは直しに回さない。送ったものは取り消せず、もう一度
         # モデルを走らせると同じ相手に二通目が出かねない。指摘は人間に渡す。
+        #
+        # ただし「人間に渡す」を、ほかのカードと同じ見た目のレビュー待ちで済ませない。
+        # #295 では点検が「ファイルを1行にして壊した」と正しく見つけていたのに、
+        # 普段どおりのカードとして置かれ、利用者はリポジトリがおかしくなってから気付いた。
+        # 外に出したあとで問題が見つかったら、利用者が確認するまで赤く出し続ける。
         if ($sentItems.Count -gt 0) {
             Write-Step $id 'verify' '送信済みのため修正は行いません。指摘は人間の確認に回します。' 'Yellow'
+            if ($high.Count -gt 0) {
+                $alert = "書き込み・送信のあとで、点検が問題を見つけました: " + [string] $v.summary
+                [void] (Update-TaskFields -Conn $conn -TaskId $id -Fields @{ alert = $alert })
+                Write-Step $id 'alert' $alert 'Red'
+            }
             break
         }
 
