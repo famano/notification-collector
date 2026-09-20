@@ -28,6 +28,7 @@ PowerShell 実装で、Python も Node も .NET SDK も要らない。
 | [phase5](phase5/README.md) | 外部サービス接続。Slack / Gmail / GitHub / Microsoft 365 (Outlook・Teams) / Chatwork / Backlog |
 | [tests](tests/README.md) | テスト。追加インストールもキーも要らない |
 | [docs/配布手順.md](docs/配布手順.md) | 配る側と使う側の手順。`Install.cmd` と `config\app-config.json` |
+| [docs/design](docs/design/README.md) | 設計の詳細。構成要素ごとに「どう出来ていて、触ると何が壊れるか」 |
 
 ## 動かす
 
