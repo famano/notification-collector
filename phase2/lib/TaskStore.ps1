@@ -163,6 +163,16 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'user_record') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN user_record TEXT')
     }
+    # やりとりの種類。author だけでは足りなくなった。
+    #   (author=user)         … 利用者の指示
+    #   report                … ワーカーの報告。1回の作業ごとに1件残す
+    #   verify / (旧データ NULL) … 自己検証で解消しなかった指摘
+    # 報告は agent_output に上書きしていたので、差し戻して作業させるたびに
+    # 前回の報告が読めなくなっていた。やりとりに積めば経緯として読み返せる。
+    $ccols = @($Conn.Query('PRAGMA table_info(task_comments)')) | ForEach-Object { $_['name'] }
+    if ($ccols -notcontains 'kind') {
+        $Conn.Exec('ALTER TABLE task_comments ADD COLUMN kind TEXT')
+    }
     # 正規 API で本文を取り直したかの印 (Phase 5)
     $ecols = @($Conn.Query('PRAGMA table_info(events)')) | ForEach-Object { $_['name'] }
     if ($ecols -notcontains 'context_fetched') {
@@ -223,6 +233,13 @@ function Invoke-SchemaMigration {
     if ($cols -notcontains 'human_step') {
         $Conn.Exec('ALTER TABLE tasks ADD COLUMN human_step TEXT')
     }
+    # 外に出した操作 (書き込み・送信) のあとで、点検が問題を見つけたカードの印。
+    # #295 では、点検は「ファイルを1行にして壊した」と正しく見つけていたのに、
+    # 送信済みなので直しには回さず、ほかのカードと同じ見た目でレビュー待ちに置いていた。
+    # 利用者が「確認した」と押すまで赤く出し続ける。
+    if ($cols -notcontains 'alert') {
+        $Conn.Exec('ALTER TABLE tasks ADD COLUMN alert TEXT')
+    }
 
     # 件ごとの台帳。カードをまたいで「前回こう分かった」を持ち越す。
     $Conn.Exec(@'
@@ -276,6 +293,61 @@ CREATE TABLE IF NOT EXISTS task_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_task ON task_attempts(task_id, id);
 '@)
+
+    # 書き込みの監査。以前は応答の先頭1行しか残しておらず、#295 で実際に何を
+    # PUT したのかは後から分からなかった (ログは再起動で上書きされていた)。
+    #   request … 書き込み (POST/PUT/PATCH/DELETE) の本文。符号化する前の平文で残す
+    #   preview … 書く前に突き合わせた結果と、書いたあとの読み直し
+    $acols = @($Conn.Query('PRAGMA table_info(task_attempts)')) | ForEach-Object { $_['name'] }
+    if ($acols -notcontains 'request') { $Conn.Exec('ALTER TABLE task_attempts ADD COLUMN request TEXT') }
+    if ($acols -notcontains 'preview') { $Conn.Exec('ALTER TABLE task_attempts ADD COLUMN preview TEXT') }
+
+    # 「まとめて許可」の単位。http_request はツール名ではなく「種類 × ホスト」で持つ
+    # (http_request:add:api.github.com)。承認要求には、許可したときに何が束ねられるかと、
+    # そもそも束ねてよい操作かを持たせる。影響を事前に確かめられない上書きは束ねない。
+    $rcols = @($Conn.Query('PRAGMA table_info(tool_requests)')) | ForEach-Object { $_['name'] }
+    if ($rcols -notcontains 'grant_key') { $Conn.Exec('ALTER TABLE tool_requests ADD COLUMN grant_key TEXT') }
+    if ($rcols -notcontains 'grantable') {
+        $Conn.Exec('ALTER TABLE tool_requests ADD COLUMN grantable INTEGER NOT NULL DEFAULT 1')
+    }
+    # 以前の「http_request を今後すべて許可」は、GET を通すつもりで押されたものでも
+    # PUT・DELETE まで無承認にしていた (#295)。読み取りだけの許可に置き換える。
+    # 書き込みを通したければ、次に承認画面が出たときに種類とホストを見て許可し直せばよい。
+    [void] $Conn.NonQuery("UPDATE OR IGNORE tool_grants SET tool = 'http_request:read:*' WHERE tool = 'http_request'")
+    [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE tool = 'http_request'")
+
+    # ワーカーとモデルの会話そのもの。カード1枚につき1本。
+    #
+    # やり直しのたびに会話を捨てていたので、差し戻すと最初から調べ直し、
+    # 自分が前回何をしたか (何を書き込んだか) も知らないまま作業していた ――
+    # 「これをやったのはきみか」と聞かれて「GET しかしていない」と答えたのはこのため。
+    # いまは会話を残し、再開は続きから行う。
+    #   occurrence … この会話を始めたときの occurrence_count。同じ件の新しい発生
+    #                (次の CI の失敗など) は別の出来事なので、会話を分ける目印にする
+    #   source_hash … 渡した出自の指紋。再開時に取り直したものと違えば、差分として渡す
+    #   state       … running (作業中。落ちたらこのまま残る) / done / partial (回数の上限で止めた)
+    $Conn.Exec(@'
+CREATE TABLE IF NOT EXISTS task_sessions (
+  task_id     INTEGER PRIMARY KEY,
+  messages    TEXT NOT NULL,
+  occurrence  INTEGER NOT NULL DEFAULT 1,
+  source_hash TEXT,
+  state       TEXT NOT NULL DEFAULT 'running',
+  updated_at  TEXT NOT NULL
+);
+'@)
+    # 表が先に別の形で作られていると、CREATE TABLE IF NOT EXISTS は何もしない。
+    # 開発の途中の版 (state が無く model がある) で作られた DB が実際にあり、
+    # 全カードの作業が「table task_sessions has no column named state」で落ちた。
+    # 足りない列は、ほかの表と同じく見て足す。
+    $scols = @($Conn.Query('PRAGMA table_info(task_sessions)')) | ForEach-Object { $_['name'] }
+    if ($scols -notcontains 'source_hash') { $Conn.Exec('ALTER TABLE task_sessions ADD COLUMN source_hash TEXT') }
+    if ($scols -notcontains 'occurrence') {
+        $Conn.Exec('ALTER TABLE task_sessions ADD COLUMN occurrence INTEGER NOT NULL DEFAULT 1')
+    }
+    if ($scols -notcontains 'state') {
+        $Conn.Exec("ALTER TABLE task_sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'running'")
+    }
 }
 
 function Get-Now { return (Get-Date).ToString('o') }
@@ -656,11 +728,17 @@ function Add-TaskAttempt {
         [Parameter(Mandatory)] [string] $Tool,
         [string] $Target,
         [Parameter(Mandatory)] [string] $Outcome,   # 'ok' / 'failed' / 'denied'
-        [string] $Detail
+        [string] $Detail,
+        # 書き込みの本文 (全文)。読み取りでは渡さない。
+        [string] $Request,
+        # 書く前の突き合わせと、書いたあとの読み直し
+        [string] $Preview
     )
+    $rq = if ($Request) { $Request } else { $null }
+    $pv = if ($Preview) { $Preview } else { $null }
     [void] $Conn.NonQuery(
-        'INSERT INTO task_attempts (task_id, tool, target, outcome, detail, created_at) VALUES (?,?,?,?,?,?)',
-        [object[]] @($TaskId, $Tool, $Target, $Outcome, $Detail, (Get-Now)))
+        'INSERT INTO task_attempts (task_id, tool, target, outcome, detail, created_at, request, preview) VALUES (?,?,?,?,?,?,?,?)',
+        [object[]] @($TaskId, $Tool, $Target, $Outcome, $Detail, (Get-Now), $rq, $pv))
 }
 
 function Get-TaskAttempts {
@@ -680,9 +758,18 @@ function Get-AttemptSummary {
         $mark = switch ([string] $r['outcome']) {
             'ok'     { '○' }
             'denied' { '×(不許可)' }
+            'held'   { '△(実行せず差し戻し)' }
             default  { '×' }
         }
-        ("{0} {1} {2} {3}" -f $mark, [string] $r['tool'], [string] $r['target'], [string] $r['detail']).Trim()
+        $line = ("{0} {1} {2} {3}" -f $mark, [string] $r['tool'], [string] $r['target'], [string] $r['detail']).Trim()
+        # 書き込みは「何が起きたか」まで残す。再開・引き継ぎのときに、
+        # 自分が何を書き込んだのかをこれで知る。
+        if ($r['preview']) {
+            $pv = ([string] $r['preview']) -replace "`r?`n", ' / '
+            if ($pv.Length -gt 300) { $pv = $pv.Substring(0, 300) + '…' }
+            $line += "`n    → " + $pv
+        }
+        $line
     }
     return ($lines -join "`n")
 }
@@ -860,11 +947,14 @@ function Add-TaskComment {
         [Parameter(Mandatory)] $Conn,
         [Parameter(Mandatory)] [int] $TaskId,
         [Parameter(Mandatory)] [string] $Author,
-        [Parameter(Mandatory)] [string] $Body
+        [Parameter(Mandatory)] [string] $Body,
+        # ワーカーの発言の種類 ('report' / 'verify')。利用者の指示には付けない。
+        [string] $Kind
     )
+    $k = if ($Kind) { $Kind } else { $null }
     [void] $Conn.NonQuery(
-        'INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?,?,?,?)',
-        [object[]] @($TaskId, $Author, $Body, (Get-Now)))
+        'INSERT INTO task_comments (task_id, author, body, created_at, kind) VALUES (?,?,?,?,?)',
+        [object[]] @($TaskId, $Author, $Body, (Get-Now), $k))
     return $Conn.LastRowId
 }
 
@@ -932,12 +1022,23 @@ function Test-YoloMode {
 }
 
 function Test-ToolGranted {
+    <#
+      .PARAMETER Tool
+        許可の鍵。http_request は「種類 × ホスト」(http_request:add:api.github.com)、
+        ほかはツール名。ホストが * の許可 (以前の許可を置き換えたもの) は
+        同じ種類のどのホストにも効く。
+    #>
     param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId, [Parameter(Mandatory)] [string] $Tool)
-    $r = @($Conn.Query(
-        "SELECT 1 AS x FROM tool_grants
-          WHERE tool = ? AND (scope = 'global' OR (scope = 'task' AND scope_id = ?)) LIMIT 1",
-        [object[]] @($Tool, $TaskId)))
-    return ($r.Count -gt 0)
+    $keys = @($Tool)
+    if ($Tool -match '^(http_request:\w+):') { $keys += ($Matches[1] + ':*') }
+    foreach ($k in $keys) {
+        $r = @($Conn.Query(
+            "SELECT 1 AS x FROM tool_grants
+              WHERE tool = ? AND (scope = 'global' OR (scope = 'task' AND scope_id = ?)) LIMIT 1",
+            [object[]] @($k, $TaskId)))
+        if ($r.Count -gt 0) { return $true }
+    }
+    return $false
 }
 
 function Add-ToolGrant {
@@ -968,11 +1069,16 @@ function New-ToolRequest {
         [Parameter(Mandatory)] [int] $TaskId,
         [Parameter(Mandatory)] [string] $Tool,
         [Parameter(Mandatory)] [string] $Summary,
-        [Parameter(Mandatory)] [string] $Detail
+        [Parameter(Mandatory)] [string] $Detail,
+        # 「まとめて許可」を押したときに記録する鍵。省略時はツール名。
+        [string] $GrantKey,
+        # $false なら、この要求には「まとめて許可」を出さない (1回ごとに判断させる)。
+        [bool] $Grantable = $true
     )
+    $gk = if ($GrantKey) { $GrantKey } else { $Tool }
     [void] $Conn.NonQuery(
-        'INSERT INTO tool_requests (task_id, tool, summary, detail, status, created_at) VALUES (?,?,?,?,?,?)',
-        [object[]] @($TaskId, $Tool, $Summary, $Detail, 'pending', (Get-Now)))
+        'INSERT INTO tool_requests (task_id, tool, summary, detail, status, created_at, grant_key, grantable) VALUES (?,?,?,?,?,?,?,?)',
+        [object[]] @($TaskId, $Tool, $Summary, $Detail, 'pending', (Get-Now), $gk, [int] $Grantable))
     return $Conn.LastRowId
 }
 
@@ -1078,6 +1184,8 @@ function Remove-TaskRows {
     [void] $Conn.NonQuery('DELETE FROM tool_requests WHERE task_id = ?',  [object[]] @($TaskId))
     # 外部キーではないが、残すと消えたカード向けの許可が居座る
     [void] $Conn.NonQuery("DELETE FROM tool_grants WHERE scope = 'task' AND scope_id = ?", [object[]] @($TaskId))
+    # 会話にはメールの本文がそのまま入っている。カードと一緒に消す。
+    [void] $Conn.NonQuery('DELETE FROM task_sessions WHERE task_id = ?', [object[]] @($TaskId))
     return ($Conn.NonQuery('DELETE FROM tasks WHERE id = ?', [object[]] @($TaskId)) -gt 0)
 }
 
@@ -1221,6 +1329,54 @@ function Get-NextWorkItem {
     catch { $Conn.Rollback(); throw }
 }
 
+# ---------------------------------------------------------------- 会話の保存
+
+function Get-TaskSession {
+    <#
+      .OUTPUTS
+        行 (messages は JSON 文字列のまま)。無ければ $null。
+    #>
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    $r = @($Conn.Query('SELECT * FROM task_sessions WHERE task_id = ?', [object[]] @($TaskId)))
+    if ($r.Count -eq 0) { return $null }
+    return $r[0]
+}
+
+function Save-TaskSession {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [string] $MessagesJson,
+        [int] $Occurrence = 1,
+        [string] $SourceHash,
+        [ValidateSet('running', 'done', 'partial')] [string] $State = 'running'
+    )
+    [void] $Conn.NonQuery(
+        'INSERT INTO task_sessions (task_id, messages, occurrence, source_hash, state, updated_at) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(task_id) DO UPDATE SET messages=excluded.messages, occurrence=excluded.occurrence,
+                                            source_hash=excluded.source_hash, state=excluded.state,
+                                            updated_at=excluded.updated_at',
+        [object[]] @($TaskId, $MessagesJson, $Occurrence, $SourceHash, $State, (Get-Now)))
+}
+
+# 作業の終わり方だけを書き換える。会話の中身はツールを1回使うごとに保存済み。
+function Set-TaskSessionState {
+    param(
+        [Parameter(Mandatory)] $Conn,
+        [Parameter(Mandatory)] [int] $TaskId,
+        [Parameter(Mandatory)] [ValidateSet('running', 'done', 'partial')] [string] $State
+    )
+    [void] $Conn.NonQuery('UPDATE task_sessions SET state = ? WHERE task_id = ?', [object[]] @($State, $TaskId))
+}
+
+# 会話を捨てる。利用者の「最初からやり直す」。
+# 間違った前提ごと会話が続いてしまうことはある (「自分には書き込む手段が無い」と
+# 思い込んだまま、など)。そのときに捨てられる口が要る。
+function Clear-TaskSession {
+    param([Parameter(Mandatory)] $Conn, [Parameter(Mandatory)] [int] $TaskId)
+    return ($Conn.NonQuery('DELETE FROM task_sessions WHERE task_id = ?', [object[]] @($TaskId)) -gt 0)
+}
+
 # カードに載っている「あなたにしかできない1手」。無ければ $null。
 #
 # ワーカーはこれを変数で持ち回らない。ツール実行はクロージャの中で起きていて、
@@ -1253,7 +1409,7 @@ function Get-TaskDetail {
 # 更新できるカラムはホワイトリストで固定する。キーを SQL に埋めるため、
 # 呼び出し側の入力をそのまま通してはいけない。
 $script:UpdatableFields = @('title', 'summary', 'urgency', 'category', 'user_edited', 'user_record', 'agent_output', 'draft_text',
-                            'shape', 'human_step', 'subject_key')
+                            'shape', 'human_step', 'subject_key', 'alert')
 
 function Update-TaskFields {
     param(

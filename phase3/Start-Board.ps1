@@ -48,6 +48,8 @@ Set-Utf8Output
 # 間違ったことを覚えたと分かるのもカードを見た瞬間で、そこで消せなければ
 # 間違ったまま毎回渡り続ける。
 . "$PSScriptRoot\..\phase2\lib\Memory.ps1"
+# 道具が足りない作業の引き渡し先 (Claude Code)。画面から始めるので読み込む。
+. "$PSScriptRoot\..\phase4\lib\Delegation.ps1"
 $script:PolicyPath = $PolicyPath
 
 # 送信経路。カンバンだけで仕事を終わらせるには、最後の一手 (送る) もここに要る。
@@ -921,6 +923,10 @@ function Invoke-Route {
                 [pscustomobject]@{
                     id = $_['id']; task_id = $_['task_id']; tool = $_['tool']
                     summary = $_['summary']; detail = $_['detail']; created_at = $_['created_at']
+                    # 「まとめて許可」を押したときに何が束ねられるか。画面はこれを出す。
+                    grant_key = $(if ($_['grant_key']) { [string] $_['grant_key'] } else { [string] $_['tool'] })
+                    # 0 なら「まとめて許可」を出さない (影響を事前に確かめられない上書きなど)
+                    grantable = ([int] $_['grantable'] -ne 0)
                 }
             })
             grants = @(Get-ToolGrants -Conn $Conn | ForEach-Object {
@@ -939,10 +945,14 @@ function Invoke-Route {
         $r = Get-ToolRequest -Conn $Conn -RequestId $reqId
         if (-not $r) { Write-JsonResponse $Context @{ error = 'not found' } 404; return }
 
-        # 「まとめて許可」は許可のときだけ作る
-        if ($decision -eq 'approved' -and $b -and $b.grant) {
-            if ($b.grant -eq 'task')   { Add-ToolGrant -Conn $Conn -Scope 'task' -ScopeId ([int] $r['task_id']) -Tool ([string] $r['tool']) }
-            if ($b.grant -eq 'global') { Add-ToolGrant -Conn $Conn -Scope 'global' -ScopeId $null -Tool ([string] $r['tool']) }
+        # 「まとめて許可」は許可のときだけ作る。
+        # 束ねる単位は要求に記録された鍵 (http_request なら「種類 × ホスト」)。
+        # 画面から鍵を受け取らない ―― 受け取れば、どの要求からでも何でも許可できてしまう。
+        # 束ねてよくない要求 (影響を事前に確かめられない上書き) では作らない。
+        if ($decision -eq 'approved' -and $b -and $b.grant -and [int] $r['grantable'] -ne 0) {
+            $gk = if ($r['grant_key']) { [string] $r['grant_key'] } else { [string] $r['tool'] }
+            if ($b.grant -eq 'task')   { Add-ToolGrant -Conn $Conn -Scope 'task' -ScopeId ([int] $r['task_id']) -Tool $gk }
+            if ($b.grant -eq 'global') { Add-ToolGrant -Conn $Conn -Scope 'global' -ScopeId $null -Tool $gk }
         }
         $ok = Set-ToolRequestStatus -Conn $Conn -RequestId $reqId -Status $decision
         if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'すでに処理済みです' } 409; return }
@@ -1188,6 +1198,13 @@ function Invoke-Route {
             return
         }
 
+        # Claude Code への引き渡し。押す前に「何を渡すか」を全文見せる。
+        # 渡す文面はワーカー (モデル) が第三者の文面から組み立てたものなので、読まずに押させない。
+        if ($method -eq 'GET' -and $action -eq 'delegation') {
+            Write-JsonResponse $Context (Get-DelegationInfo -Conn $Conn -TaskId $taskId)
+            return
+        }
+
         if ($method -eq 'DELETE' -and -not $action) {
             try { $ok = Remove-Task -Conn $Conn -TaskId $taskId }
             catch {
@@ -1222,9 +1239,62 @@ function Invoke-Route {
                 Write-JsonResponse $Context @{ ok = $true }
                 return
             }
+            'delegate' {
+                $info = Get-DelegationInfo -Conn $Conn -TaskId $taskId
+                if (-not $info.eligible) { Write-JsonResponse $Context @{ ok = $false; error = $info.reason } 400; return }
+                if (-not $info.available) { Write-JsonResponse $Context @{ ok = $false; error = $info.reason } 400; return }
+                if ($info.running) { Write-JsonResponse $Context @{ ok = $false; error = 'すでに Claude Code が作業しています' } 409; return }
+                # 手元の clone。画面から受け取ったパスは、origin がそのリポジトリを指しているときだけ使う。
+                $path = if ($b -and $b.path) { [string] $b.path } else { [string] $info.path }
+                if (-not $path -or -not (Test-RepoMatchesRemote -Path $path -Repo $info.repo)) {
+                    Write-JsonResponse $Context @{ ok = $false; error = ("{0} の clone ではありません (origin が一致しません)" -f $info.repo) } 400
+                    return
+                }
+                Set-Setting -Conn $Conn -Key ('delegate.repo.' + $info.repo.ToLower()) -Value $path
+                [void] (Update-TaskFields -Conn $Conn -TaskId $taskId -Fields @{ shape = 'delegated' })
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message 'Claude Code に渡しました'
+                $script_ = Join-Path $PSScriptRoot '..\phase4\Start-Delegation.ps1'
+                $psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $script_), '-TaskId', $taskId)
+                if ($DbPath) { $psArgs += @('-DbPath', ('"{0}"' -f [IO.Path]::GetFullPath($DbPath))) }
+                if ($script:PolicyPath) { $psArgs += @('-PolicyPath', ('"{0}"' -f [IO.Path]::GetFullPath($script:PolicyPath))) }
+                $logDir = Join-Path $PSScriptRoot '..\logs'
+                if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+                try {
+                    [void] (Start-Process -FilePath 'powershell' -ArgumentList $psArgs -WindowStyle Hidden `
+                        -RedirectStandardOutput (Join-Path $logDir ("delegation-{0}.log" -f $taskId)) `
+                        -RedirectStandardError (Join-Path $logDir ("delegation-{0}.err.log" -f $taskId)))
+                }
+                catch {
+                    [void] (Update-TaskFields -Conn $Conn -TaskId $taskId -Fields @{ shape = 'human' })
+                    Write-JsonResponse $Context @{ ok = $false; error = $_.Exception.Message } 500
+                    return
+                }
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
+            # 「外に出したあとで問題が見つかった」の赤い印を、利用者が確認して外す。
+            # 印はワーカーが立て、利用者が見たと言うまで消さない ―― 見落とされたまま
+            # ほかのカードに紛れるのが、#295 で起きたこと。
+            'ack' {
+                $ok = Update-TaskFields -Conn $Conn -TaskId $taskId -Fields @{ alert = $null }
+                if (-not $ok) { Write-JsonResponse $Context @{ ok = $false; error = 'not found' } 404; return }
+                Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '書き込み・送信のあとの問題を確認しました'
+                Write-JsonResponse $Context @{ ok = $true }
+                return
+            }
             'comment' {
                 if (-not $b -or -not $b.body) { Write-JsonResponse $Context @{ error = 'body is required' } 400; return }
                 [void] (Add-TaskComment -Conn $Conn -TaskId $taskId -Author 'user' -Body $b.body)
+                # 「最初からやり直す」。ワーカーは差し戻しを前回の会話の続きとして受けるが、
+                # 間違った前提ごと続いてしまうときは会話を捨てられるようにする。
+                # 実行中のカードでは捨てない ―― ワーカーが書き続けている最中で、すぐに書き戻される。
+                if ($b.restart) {
+                    $cur = @($Conn.Query('SELECT board_column FROM tasks WHERE id = ?', [object[]] @($taskId)))
+                    if ($cur.Count -gt 0 -and [string] $cur[0]['board_column'] -ne 'doing' -and
+                        (Clear-TaskSession -Conn $Conn -TaskId $taskId)) {
+                        Add-TaskActivity -Conn $Conn -TaskId $taskId -Kind 'user' -Message '前回の会話を捨てて、最初からやり直します'
+                    }
+                }
                 # 指示を書く = やり直してほしい。要対応に戻してワーカーに拾わせる。
                 $col = Request-TaskRework -Conn $Conn -TaskId $taskId
                 Write-JsonResponse $Context @{ ok = $true; column = $col }
