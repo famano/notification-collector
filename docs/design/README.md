@@ -12,6 +12,7 @@
 | [Board](Board.md) | `phase3/Start-Board.ps1` | 利用者の操作が全部閉じる場所。宛先の決定と出口 |
 | [SourceAccess](SourceAccess.md) | `phase4/lib/SourceAccess.ps1` | 出自の取り直しと、「あなたは誰か」の束縛 |
 | [Connectors](Connectors.md) | `phase5/lib/*Connector.ps1` | 共通の形 (watermark・絞り込み) と、サービスごとの差分 |
+| [Credentials](Credentials.md) | `phase5/lib/SecretStore.ps1` ほか | 鍵をどこに置き、誰が入れ、どのアカウントのものとして使うか |
 | [WinSqlite](WinSqlite.md) | `lib/WinSqlite.ps1` | 追加インストールを要求しないことの土台 |
 
 ## 読み方
